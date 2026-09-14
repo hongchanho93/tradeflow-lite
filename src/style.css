@@ -130,6 +130,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb
 .rail-button:disabled { color: #454951; opacity: .55; }
 .rail-button.unavailable { color: #4d5158; cursor: default; }
 .rail-button svg { width: 28px; height: 28px; }
+#lock-drawings [data-icon-state] { display: inline-flex; }
+#lock-drawings [data-icon-state="locked"] { display: none; }
+#lock-drawings.active [data-icon-state="unlocked"] { display: none; }
+#lock-drawings.active [data-icon-state="locked"] { display: inline-flex; }
 .rail-divider { width: 40px; height: 1px; margin: 3px 0; background: var(--tv-border); }
 .rail-spacer { flex: 1; }
 .drawing-tool-menu { position: relative; width: 40px; height: 40px; }
