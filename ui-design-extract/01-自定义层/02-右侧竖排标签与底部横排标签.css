@@ -1,0 +1,116 @@
+/* 从 01-主题变量与全局配色.css 中摘出的标签栏规则（同一份代码，单独列出便于对照截图）
+   右侧：自选 / 盘口 / 信号 / 历史 / PINE
+   底部：交易 / 模拟账户 / 行情 / 板块 / F10 / 问财 */
+
+:is(body.theme-dark,[data-theme=dark]) :is([class*='layout__area'],[class*='layout__area--top'],[class*='layout__area--left'],[class*='layout__area--right'],[class*='layout__area--bottom'],[class*='header-toolbar'],[class*='group-'][class*='wrap'],[class*='left-toolbar'],[class*='drawingToolbar'],.widgetbar-tabs,.widgetbar-pages,.widgetbar-pagescontent,[class*='bottom-widgetbar'],[class*='bottom-widgetbar-content'],[class*='bottom-toolbar'],[class*='bottom-widgetbar-handle']) {
+  background:var(--tv-custom-chrome-bg)!important;
+  background-color:var(--tv-custom-chrome-bg)!important;
+}
+:is(body.theme-dark,[data-theme=dark]) :is([class*='left-toolbar'] [class*='separator'],.widgetbar-tabs [class*='separator'],[class*='header-toolbar'] [class*='separator'],[class*='bottom-toolbar'] [class*='separator']) {
+  background:var(--tv-custom-panel-border-soft)!important;
+}
+.tv-custom-widgetbar-tab {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:37px;
+  height:36px;
+  margin:4px;
+  background:transparent;
+  border:none;
+  border-radius:7px;
+  cursor:pointer;
+  color:var(--tv-custom-tab-text);
+  font-family:inherit;
+  font-size:12px;
+  font-weight:inherit;
+  line-height:1.2;
+  flex-shrink:0;
+  letter-spacing:0;
+  -webkit-font-smoothing:inherit;
+  text-rendering:inherit;
+}
+.tv-custom-widgetbar-tab:hover {
+  background:var(--tv-color-toolbar-button-background-hover,rgba(120,123,134,.12));
+  border-radius:7px;
+}
+.tv-custom-widgetbar-tab.active {
+  color:var(--tv-custom-tab-text);
+  background:var(--tv-custom-tab-active-bg);
+  border-radius:7px;
+}
+.tv-custom-widgetbar-tab svg {
+  width:18px;
+  height:18px;
+  display:block;
+  stroke:currentColor;
+}
+.tv-custom-bottom-tab {
+  padding:0 16px;
+  height:38px;
+  background:transparent;
+  border:none;
+  border-bottom:2px solid transparent;
+  cursor:pointer;
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-tab-text));
+  font-family:var(--tv-bottom-native-tab-font-family,inherit);
+  font-size:var(--tv-bottom-native-tab-font-size,inherit);
+  font-weight:var(--tv-bottom-native-tab-font-weight,inherit);
+  line-height:var(--tv-bottom-native-tab-line-height,inherit);
+  letter-spacing:var(--tv-bottom-native-tab-letter-spacing,0);
+  flex-shrink:0;
+  box-sizing:border-box;
+  -webkit-font-smoothing:inherit;
+  text-rendering:inherit;
+}
+.tv-custom-bottom-tab:hover {
+  background:var(--tv-color-toolbar-button-background-hover,rgba(120,123,134,.12));
+}
+.tv-custom-bottom-tab.active {
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-panel-heading));
+  border-bottom-color:#8b1a1a;
+}
+.tv-market-bottom-tab {
+  display:inline-flex!important;
+  align-items:center!important;
+  justify-content:center!important;
+  height:100%!important;
+  padding:0 14px!important;
+  border:0!important;
+  border-bottom:2px solid transparent!important;
+  background:transparent!important;
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-tab-text))!important;
+  font-family:var(--tv-bottom-native-tab-font-family,inherit)!important;
+  font-size:var(--tv-bottom-native-tab-font-size,inherit)!important;
+  font-weight:var(--tv-bottom-native-tab-font-weight,inherit)!important;
+  line-height:var(--tv-bottom-native-tab-line-height,inherit)!important;
+  letter-spacing:var(--tv-bottom-native-tab-letter-spacing,0)!important;
+  cursor:pointer!important;
+  flex-shrink:0!important;
+  box-sizing:border-box!important;
+  -webkit-font-smoothing:inherit!important;
+  text-rendering:inherit!important;
+}
+.tv-market-bottom-tab:hover {
+  background:var(--tv-color-toolbar-button-background-hover,rgba(120,123,134,.12))!important;
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-panel-heading))!important;
+}
+.tv-market-bottom-tab.active {
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-panel-heading))!important;
+  border-bottom-color:#8b1a1a!important;
+}
+.tv-custom-bottom-tab-strip :is(.tv-market-bottom-tab,.tv-custom-bottom-tab) {
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-panel-heading))!important;
+  font-family:var(--tv-bottom-native-tab-font-family,inherit)!important;
+  font-size:var(--tv-bottom-native-tab-font-size,inherit)!important;
+  font-weight:var(--tv-bottom-native-tab-font-weight,inherit)!important;
+  line-height:var(--tv-bottom-native-tab-line-height,inherit)!important;
+  letter-spacing:var(--tv-bottom-native-tab-letter-spacing,0)!important;
+}
+.tv-custom-bottom-tab-strip :is(.tv-market-bottom-tab,.tv-custom-bottom-tab) * {
+  color:inherit!important;
+}
+.tv-custom-bottom-tab-strip :is(.tv-market-bottom-tab,.tv-custom-bottom-tab).active,.tv-custom-bottom-tab-strip :is(.tv-market-bottom-tab,.tv-custom-bottom-tab)[aria-selected='true'] {
+  color:var(--tv-bottom-native-tab-color,var(--tv-custom-panel-heading))!important;
+  border-bottom-color:#8b1a1a!important;
+}

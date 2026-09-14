@@ -1,0 +1,20 @@
+左侧工具栏图标
+截图左侧竖条本体按钮：磁吸、画笔锁、锁、显示/隐藏、垃圾桶、收起箭头等
+
+原始出处：charting_library/bundles/drawing-toolbar.fce67f141eb6ebe35dfc.js
+共 14 个图标
+
+module-101631.svg
+module-133372.svg
+module-151894.svg
+module-204827.svg
+module-228923.svg
+module-260407.svg
+module-389658.svg
+module-44030.svg
+module-448013.svg
+module-483287.svg
+module-675240.svg
+module-679970.svg
+module-772995.svg
+module-864305.svg

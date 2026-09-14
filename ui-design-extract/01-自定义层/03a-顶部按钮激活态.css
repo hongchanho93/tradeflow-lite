@@ -1,0 +1,18 @@
+/* 来源 index.html 第 734-749 行
+   覆盖：顶部 “分时 / 不复权 / 信号 / 盘口” 这几个自定义按钮的 .active 高亮 */
+
+      .price-mode-header-button.active {
+        color: #38bdf8;
+      }
+
+      .theme-header-button.active {
+        color: #f59e0b;
+      }
+
+      .signal-header-button.active {
+        color: #f59e0b;
+      }
+
+      .fundamentals-header-button.active {
+        color: #60a5fa;
+      }

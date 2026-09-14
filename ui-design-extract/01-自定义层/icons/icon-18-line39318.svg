@@ -1,0 +1,7 @@
+<svg viewBox="0 0 ', w, ' ', h, '" role="img" aria-label="股东人数与股价趋势">',
+                  grid.join(""),
+                  bars.join(""),
+                  hasPrices ? '<path class="line" d="' + linePath + '">
+</path>' : '',
+                  dots,
+                '</svg>

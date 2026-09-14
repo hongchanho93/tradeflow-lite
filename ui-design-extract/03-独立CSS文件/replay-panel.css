@@ -1,0 +1,114 @@
+/* 原文件：charting_library-master-main/frontend/features/replay/replay-panel.css
+   回放条 */
+
+/* Bar Replay control bar */
+#replay_panel {
+  --rp-bg: var(--tv-custom-panel-bg, #1e222d);
+  --rp-brand: var(--tv-custom-panel-accent, #5b9bd5);
+  --rp-text: var(--tv-custom-panel-text, #d1d4dc);
+  --rp-muted: var(--tv-custom-panel-muted, #787b86);
+  --rp-hover: var(--tv-custom-panel-hover, rgba(255,255,255,.05));
+  --rp-active: var(--tv-custom-panel-active, rgba(255,255,255,.08));
+  --rp-divider: var(--tv-custom-panel-border-soft, rgba(255,255,255,.10));
+  --rp-border: var(--tv-custom-panel-border, rgba(255,255,255,.06));
+
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 3.5px 14px;
+  background: var(--rp-bg);
+  border: 1px solid var(--rp-border);
+  border-radius: 0 0 7.5px 7.5px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  color: var(--rp-text);
+  white-space: nowrap;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+#replay_panel .group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+#replay_panel .divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--rp-divider);
+  margin: 4px 6px;
+}
+
+#replay_panel .btn {
+  appearance: none;
+  border: 0;
+  background-color: transparent;
+  color: var(--rp-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color .12s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+#replay_panel .btn:hover { background-color: var(--rp-hover); }
+#replay_panel .btn:active,
+#replay_panel .btn.is-active { background-color: var(--rp-active); }
+#replay_panel .btn:focus-visible { outline: 2px solid var(--rp-brand); outline-offset: 2px; }
+#replay_panel .btn[disabled] { opacity: .35; cursor: not-allowed; }
+
+#replay_panel .btn .icon {
+  width: 22px;
+  height: 22px;
+  display: block;
+  flex: none;
+}
+
+#replay_panel .btn .icon * {
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+#replay_panel .btn .icon .fill { fill: currentColor; stroke: none; }
+#replay_panel .btn.is-active .play-icon { display: none; }
+#replay_panel .btn:not(.is-active) .pause-icon { display: none; }
+
+#replay_panel select.replay-speed-sel {
+  appearance: none;
+  border: 0;
+  background-color: transparent;
+  color: var(--rp-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color .12s ease;
+}
+
+#replay_panel select.replay-speed-sel:hover { background-color: var(--rp-hover); }
+#replay_panel select.replay-speed-sel option { background: var(--rp-bg); color: var(--rp-text); }
+
+#replay_time {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--rp-text);
+}

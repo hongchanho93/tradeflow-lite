@@ -1,0 +1,199 @@
+/* 原文件：charting_library-master-main/frontend/features/intraday-chart/intraday-view.css
+   “分时” 按钮打开的分时图视图 */
+
+#intraday-view {
+  --intraday-bg: var(--app-bg, #0b1220);
+  --intraday-surface: var(--app-surface, rgba(11, 18, 32, 0.98));
+  --intraday-text: var(--app-text, #e2e8f0);
+  --intraday-muted: var(--app-muted, #94a3b8);
+  --intraday-border: var(--app-border, rgba(148, 163, 184, 0.16));
+  --intraday-grid: rgba(148, 163, 184, 0.13);
+  --intraday-price-line: #4f8cff;
+  --intraday-price-fill: rgba(79, 140, 255, 0.09);
+  --intraday-avg-line: #d97706;
+  --intraday-auction-line: #8b7cf6;
+  --intraday-auction-bg: rgba(139, 124, 246, 0.08);
+  --intraday-closing-line: #ef5350;
+  --intraday-closing-bg: rgba(239, 83, 80, 0.07);
+  --intraday-up: #f87171;
+  --intraday-down: #4ade80;
+  --intraday-prev-line: var(--app-muted, #94a3b8);
+  --intraday-neutral: var(--app-text, #e2e8f0);
+  --intraday-volume-neutral: rgba(148, 163, 184, 0.45);
+  --intraday-active-bg: rgba(96, 165, 250, 0.16);
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 42px;
+  bottom: 0;
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+  background: var(--intraday-bg);
+  color: var(--intraday-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body.theme-light #intraday-view,
+.theme-light #intraday-view {
+  --intraday-bg: var(--app-bg, #ffffff);
+  --intraday-surface: var(--app-surface, #ffffff);
+  --intraday-text: var(--app-text, #131722);
+  --intraday-muted: var(--app-muted, #6a6d78);
+  --intraday-border: var(--app-border, #e0e3eb);
+  --intraday-grid: rgba(42, 46, 57, 0.06);
+  --intraday-price-line: #2962ff;
+  --intraday-price-fill: rgba(41, 98, 255, 0.055);
+  --intraday-avg-line: #f5a623;
+  --intraday-auction-line: #7e57c2;
+  --intraday-auction-bg: rgba(126, 87, 194, 0.055);
+  --intraday-closing-line: #ef5350;
+  --intraday-closing-bg: rgba(239, 83, 80, 0.045);
+  --intraday-up: #ef4444;
+  --intraday-down: #089981;
+  --intraday-prev-line: #b2b5be;
+  --intraday-neutral: var(--app-text, #131722);
+  --intraday-volume-neutral: rgba(120, 123, 134, 0.42);
+  --intraday-active-bg: rgba(37, 99, 235, 0.14);
+}
+
+#intraday-view.hidden {
+  display: none;
+}
+
+body.intraday-window {
+  margin: 0;
+  overflow: hidden;
+  background: var(--app-bg, #0b1220);
+}
+
+body.intraday-window #intraday-view {
+  inset: 0;
+}
+
+.intraday-toolbar {
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--intraday-border);
+  background: var(--intraday-surface);
+  box-sizing: border-box;
+}
+
+.intraday-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.intraday-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--intraday-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0;
+}
+
+.intraday-metric {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--intraday-muted);
+  letter-spacing: 0;
+}
+
+.intraday-metric::before {
+  color: var(--intraday-muted);
+  font-weight: 400;
+}
+
+.intraday-metric.price-up {
+  color: var(--intraday-up);
+}
+
+.intraday-metric.price-down {
+  color: var(--intraday-down);
+}
+
+.intraday-metric.price-flat {
+  color: var(--intraday-muted);
+}
+
+.intraday-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.intraday-actions.hidden {
+  display: none;
+}
+
+.intraday-actions input,
+.intraday-actions button {
+  height: 24px;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  background: var(--app-button-bg, transparent);
+  color: var(--app-text);
+  font: 500 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.intraday-actions input {
+  width: 126px;
+  padding: 0 7px;
+  box-sizing: border-box;
+}
+
+.intraday-actions button {
+  min-width: 28px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.intraday-actions button:hover {
+  background: var(--app-button-hover);
+}
+
+.intraday-canvas-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--intraday-bg);
+}
+
+.intraday-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.intraday-status {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 8px 11px;
+  border: 1px solid var(--intraday-border);
+  border-radius: 4px;
+  background: var(--intraday-surface);
+  color: var(--intraday-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.intraday-status.hidden {
+  display: none;
+}
+
+.intraday-header-button.active {
+  color: var(--intraday-price-line, #2962ff) !important;
+  background: var(--intraday-active-bg, rgba(41, 98, 255, 0.16)) !important;
+}

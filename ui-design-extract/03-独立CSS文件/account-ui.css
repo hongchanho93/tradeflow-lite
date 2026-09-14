@@ -1,0 +1,1504 @@
+/* 原文件：charting_library-master-main/frontend/account/account-ui.css
+   左上角头像 J 及账号相关弹层 */
+
+.tf-account-ui {
+  --tf-account-surface: var(--tv-custom-panel-bg, #fff);
+  --tf-account-surface-soft: var(--tv-custom-panel-bg-soft, #f0f3fa);
+  --tf-account-control: var(--tv-custom-panel-control-bg, #fff);
+  --tf-account-text: var(--tv-custom-panel-text, #131722);
+  --tf-account-heading: var(--tv-custom-panel-heading, #131722);
+  --tf-account-muted: var(--tv-custom-panel-muted, #787b86);
+  --tf-account-line: var(--tv-custom-panel-border, rgba(15, 23, 42, .14));
+  --tf-account-line-soft: var(--tv-custom-panel-border-soft, rgba(15, 23, 42, .10));
+  --tf-account-hover: color-mix(in srgb, var(--tv-custom-panel-text, #131722) 12%, transparent);
+  --tf-account-active: color-mix(in srgb, var(--tv-custom-panel-text, #131722) 20%, transparent);
+  --tf-account-primary: #2962ff;
+  --tf-account-danger: #f23645;
+  --tf-account-success: #089981;
+  box-sizing: border-box;
+  color: var(--tf-account-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, 'PingFang SC', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.tf-account-ui *,
+.tf-account-ui *::before,
+.tf-account-ui *::after {
+  box-sizing: border-box;
+}
+
+.tf-account-ui button,
+.tf-account-ui input {
+  font-family: inherit;
+}
+
+.tf-account-ui [hidden] {
+  display: none !important;
+}
+
+#tf-account-session-notice {
+  position: fixed !important;
+  inset: 0;
+  z-index: 2147483647 !important;
+  display: grid;
+  place-items: center;
+  background: transparent;
+}
+
+#tf-account-session-notice[hidden] {
+  display: none !important;
+}
+
+.tf-account-session-notice-dialog {
+  width: min(360px, calc(100vw - 32px));
+  padding: 22px 24px 20px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 8px;
+  background: var(--tf-account-surface);
+  color: var(--tf-account-text);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .24);
+}
+
+.tf-account-session-notice-dialog h2 {
+  margin: 0;
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.tf-account-session-notice-dialog p {
+  margin: 12px 0 20px;
+  color: var(--tf-account-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.tf-account-session-notice-dialog button {
+  min-width: 76px;
+  float: right;
+}
+
+#tf-account-button {
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  z-index: 2147483646 !important;
+  width: 52px;
+  height: 38px;
+  display: grid !important;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--tv-custom-panel-bg, #fff) !important;
+  color: var(--tf-account-text);
+  cursor: pointer;
+}
+
+html.tauri-custom-titlebar #tf-account-button {
+  top: var(--tauri-custom-titlebar-height);
+}
+
+html.tauri-platform-macos.tf-chart-fullscreen-active #tf-account-button,
+html.tauri-platform-macos.tf-chart-fullscreen-active #tf-account-menu {
+  display: none !important;
+}
+
+#tf-account-button:hover,
+#tf-account-button[aria-expanded="true"] {
+  background: var(--tv-custom-panel-bg, #fff) !important;
+}
+
+.tf-account-trigger-label,
+.tf-account-trigger-user,
+.tf-account-trigger-avatar {
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-trigger-label {
+  min-width: 44px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tf-account-trigger-user {
+  width: 28px;
+}
+
+.tf-account-trigger-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgb(110, 158, 107);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 28px;
+  text-align: center;
+}
+
+#tf-account-button .tf-account-trigger-avatar-latin {
+  width: 28px;
+  height: 28px;
+  display: block;
+  fill: none;
+  stroke: none;
+}
+
+#tf-account-button .tf-account-trigger-avatar-latin text {
+  fill: #fff;
+  stroke: none;
+}
+
+#tf-account-button:hover .tf-account-trigger-label,
+#tf-account-button:hover .tf-account-trigger-user,
+#tf-account-button:hover .tf-account-trigger-avatar,
+#tf-account-button[aria-expanded="true"] .tf-account-trigger-label,
+#tf-account-button[aria-expanded="true"] .tf-account-trigger-user,
+#tf-account-button[aria-expanded="true"] .tf-account-trigger-avatar {
+  background: var(--tf-account-hover);
+  color: var(--tf-account-text);
+}
+
+#tf-account-button:hover .tf-account-trigger-avatar,
+#tf-account-button[aria-expanded="true"] .tf-account-trigger-avatar {
+  background: rgb(110, 158, 107);
+  color: #fff;
+}
+
+#tf-account-button svg,
+.tf-account-menu-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tf-account-avatar svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#tf-account-menu {
+  position: fixed !important;
+  left: 52px;
+  top: 0;
+  z-index: 2147483647 !important;
+  width: 260px;
+  padding: 0 6px 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background: var(--tf-account-surface);
+  color: var(--tf-account-text);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .2);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+html.tauri-custom-titlebar #tf-account-menu {
+  top: var(--tauri-custom-titlebar-height);
+}
+
+#tf-account-menu[hidden],
+#tf-account-panel[hidden] {
+  display: none !important;
+}
+
+.tf-account-menu-brand {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--tf-account-heading);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.tf-account-menu-section {
+  padding: 0;
+}
+
+#tf-account-menu-anonymous > .tf-account-menu-section:first-child,
+#tf-account-menu-authenticated > .tf-account-menu-section:first-child,
+.tf-account-menu-section + .tf-account-menu-section {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--tf-account-line-soft);
+}
+
+.tf-account-summary {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tf-account-summary:hover,
+.tf-account-menu-row:hover {
+  background: var(--tf-account-hover);
+}
+
+.tf-account-summary:active,
+.tf-account-menu-row:active {
+  background: var(--tf-account-active);
+}
+
+.tf-account-avatar {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 50%;
+  color: var(--tf-account-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tf-account-summary-copy {
+  min-width: 0;
+  flex: 1;
+  padding-left: 4px;
+}
+
+.tf-account-summary-copy strong,
+.tf-account-summary-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-account-summary-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.tf-account-summary-copy small,
+.tf-account-menu-note,
+.tf-account-menu-meta,
+.tf-account-form-note {
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-menu-row {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tf-account-menu-row.tf-account-menu-status,
+.tf-account-menu-row.tf-account-menu-status:hover,
+.tf-account-menu-row.tf-account-menu-status:active {
+  background: transparent;
+  cursor: default;
+}
+
+.tf-account-menu-icon {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-menu-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.tf-account-menu-icon .tf-account-tv-glyph {
+  width: 28px;
+  height: 28px;
+  fill: currentColor;
+  stroke: none;
+}
+
+.tf-account-menu-icon .tf-account-tv-glyph.stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tf-account-menu-label {
+  min-width: 0;
+  flex: 1;
+  padding-left: 4px;
+  line-height: 18px;
+}
+
+.tf-account-menu-meta {
+  margin-left: auto;
+  padding: 3px 4px 3px 24px;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.tf-account-sync-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--tf-account-muted);
+}
+
+.tf-account-sync-dot.ready {
+  background: var(--tf-account-success);
+}
+
+.tf-account-menu-switch {
+  width: 30px;
+  height: 16px;
+  flex: 0 0 30px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--tf-account-muted);
+  transition: background .12s ease;
+}
+
+.tf-account-menu-switch span {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .12s ease;
+}
+
+.tf-account-menu-switch.active {
+  background: var(--tf-account-primary);
+}
+
+.tf-account-menu-switch.active span {
+  transform: translateX(14px);
+}
+
+.tf-account-entry-action {
+  color: inherit;
+}
+
+.tf-account-entry-action:last-child {
+  color: var(--tf-account-primary);
+}
+
+.tf-account-entry-action .tf-account-menu-icon {
+  color: currentColor;
+}
+
+.tf-account-menu-row.danger {
+  color: var(--tf-account-danger);
+}
+
+.tf-account-menu-note {
+  margin: 3px 8px 7px;
+  line-height: 1.5;
+}
+
+#tf-account-panel {
+  position: fixed !important;
+  inset: 0;
+  z-index: 2147483647 !important;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: transparent;
+  color: var(--tf-account-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.tf-account-dialog {
+  width: min(420px, calc(100vw - 32px));
+  height: 320px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background: var(--tf-account-surface);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .4);
+}
+
+.tf-account-dialog[data-view="account"],
+.tf-account-dialog[data-view="messages"],
+.tf-account-dialog[data-view="shortcuts"],
+.tf-account-dialog[data-view="update"],
+.tf-account-dialog[data-view="support"],
+.tf-account-dialog[data-view="upgrade"],
+.tf-account-dialog[data-view="voucher-gate"] {
+  width: min(680px, calc(100vw - 32px));
+  height: 560px;
+  font-size: 16px;
+}
+
+.tf-account-dialog-head {
+  height: 68px;
+  flex: 0 0 68px;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+}
+
+.tf-account-dialog-head h2 {
+  margin: 0;
+  color: var(--tf-account-heading);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.tf-account-close {
+  width: 34px;
+  height: 34px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tf-account-close:hover {
+  background: var(--tf-account-hover);
+}
+
+.tf-account-ui button:disabled {
+  cursor: wait;
+  opacity: .62;
+}
+
+.tf-account-dialog-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0 24px 24px;
+}
+
+.tf-account-dialog[data-view="account"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="messages"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="shortcuts"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="update"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="support"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="upgrade"] .tf-account-dialog-body,
+.tf-account-dialog[data-view="voucher-gate"] .tf-account-dialog-body {
+  overflow: hidden;
+}
+
+.tf-account-field {
+  width: 100%;
+  height: 40px;
+  margin: 0 0 10px;
+  padding: 0 12px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--tf-account-control);
+  color: var(--tf-account-text);
+  font: inherit;
+}
+
+.tf-account-field::placeholder {
+  color: var(--tf-account-muted);
+}
+
+.tf-account-field:focus {
+  border-color: var(--tf-account-primary);
+  box-shadow: 0 0 0 1px var(--tf-account-primary);
+}
+
+.tf-account-identifier-wrap {
+  position: relative;
+  margin: 0 0 10px;
+}
+
+.tf-account-identifier-wrap > .tf-account-field {
+  margin-bottom: 0;
+}
+
+.tf-account-identifier-history {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 44px;
+  z-index: 3;
+  max-height: 176px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  background: var(--tf-account-surface);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .2);
+}
+
+.tf-account-identifier-history button {
+  width: 100%;
+  height: 40px;
+  display: block;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--tf-account-text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 18px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-account-identifier-history button:hover {
+  background: var(--tf-account-hover);
+}
+
+.tf-account-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 2px 0 12px;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--tf-account-primary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.tf-account-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.tf-account-form-actions .spacer {
+  flex: 1;
+}
+
+.tf-account-form-button {
+  min-width: 80px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tf-account-form-button:hover {
+  background: var(--tf-account-hover);
+}
+
+.tf-account-form-button.primary {
+  border-color: var(--tf-account-primary);
+  background: var(--tf-account-primary);
+  color: #fff;
+}
+
+#tf-account-status,
+.tf-account-action-status {
+  min-height: 18px;
+  margin-top: 11px;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+#tf-account-status.bad,
+.tf-account-action-status.bad {
+  color: var(--tf-account-danger);
+}
+
+.tf-account-action-status {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 0 4px;
+  background: var(--tf-account-surface);
+}
+
+.tf-account-download-link {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--tf-account-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.tf-account-download-link:hover,
+.tf-account-download-link:focus-visible {
+  text-decoration: underline;
+}
+
+#tf-account-subview-host {
+  height: 100%;
+}
+
+.tf-account-subview {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.tf-account-profile-card {
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding: 2px 4px 14px;
+  background: transparent;
+}
+
+.tf-account-profile-card strong,
+.tf-account-profile-card small,
+.tf-account-setting-copy strong,
+.tf-account-setting-copy small,
+.tf-account-empty strong,
+.tf-account-empty small,
+.tf-account-support-copy strong,
+.tf-account-support-copy small {
+  display: block;
+}
+
+.tf-account-profile-card strong {
+  color: var(--tf-account-heading);
+  font-size: 17px;
+  line-height: 22px;
+  font-weight: 600;
+}
+
+.tf-account-profile-card small,
+.tf-account-setting-copy small,
+.tf-account-empty small,
+.tf-account-support-copy small,
+.tf-account-platform-row small {
+  margin-top: 2px;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-profile-avatar {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 50%;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-profile-avatar svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tf-account-setting-section {
+  margin-top: 0;
+}
+
+.tf-account-setting-section + .tf-account-setting-section {
+  margin-top: 26px;
+}
+
+.tf-account-setting-section h3 {
+  margin: 0 0 10px;
+  color: var(--tf-account-muted);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.tf-account-setting-row {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 11px 4px;
+}
+
+.tf-account-setting-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.tf-account-setting-copy strong {
+  color: var(--tf-account-heading);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.tf-account-row-value {
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-center .tf-account-setting-copy strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.tf-account-center .tf-account-profile-card small,
+.tf-account-center .tf-account-setting-copy small,
+.tf-account-center .tf-account-row-value {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.tf-account-secondary-button,
+.tf-account-primary-button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tf-account-text);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: none;
+}
+
+.tf-account-secondary-button:hover {
+  background: var(--tf-account-hover);
+}
+
+.tf-account-username-row {
+  align-items: center;
+}
+
+.tf-account-username-row.editing {
+  align-items: flex-start;
+}
+
+.tf-account-username-row.editing > .tf-account-secondary-button {
+  margin-top: 28px;
+}
+
+.tf-account-inline-field {
+  width: 320px;
+  max-width: 100%;
+  min-width: 0;
+  height: 32px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--tf-account-control-bg);
+  color: var(--tf-account-text);
+  font: inherit;
+}
+
+.tf-account-inline-field:focus {
+  border-color: #2962ff;
+  box-shadow: 0 0 0 1px #2962ff;
+}
+
+#tf-account-display-name-status.bad {
+  display: block;
+  color: var(--tf-account-danger);
+}
+
+#tf-account-display-name-status:empty {
+  display: none;
+}
+
+.tf-account-secondary-button.danger {
+  color: var(--tf-account-danger);
+}
+
+.tf-account-primary-button {
+  border-color: var(--tf-account-primary);
+  background: var(--tf-account-primary);
+  color: #fff;
+}
+
+.tf-account-messages {
+  display: flex;
+  flex-direction: column;
+}
+
+.tf-account-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tf-account-filter-row button {
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tf-account-muted);
+  font: inherit;
+}
+
+.tf-account-filter-row button.active {
+  background: var(--tf-account-active);
+  color: var(--tf-account-heading);
+}
+
+.tf-account-empty {
+  min-height: 220px;
+  flex: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  color: var(--tf-account-muted);
+  text-align: center;
+}
+
+.tf-account-empty strong {
+  margin-top: 10px;
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+}
+
+.tf-account-empty-icon {
+  font-size: 34px;
+  font-weight: 300;
+}
+
+.tf-account-shortcut-intro {
+  margin: 0 0 16px;
+  color: var(--tf-account-text);
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.tf-account-shortcut-search {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 0 11px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-shortcut-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--tf-account-text);
+  font: inherit;
+}
+
+.tf-account-shortcut-search input::placeholder {
+  color: var(--tf-account-muted);
+}
+
+.tf-account-shortcut-app-actions {
+  margin-top: 4px;
+}
+
+.tf-account-shortcut-row {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 9px 14px 9px 18px;
+}
+
+.tf-account-shortcut-row > span:first-child {
+  flex: 1;
+  color: var(--tf-account-text);
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.tf-account-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-key-sequence {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tf-account-key-or {
+  margin: 0 4px;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-keys kbd {
+  box-sizing: border-box;
+  min-width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--tf-account-line);
+  border-radius: 6px;
+  background: var(--tf-account-surface);
+  color: var(--tf-account-text);
+  font: 400 15px/20px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--tf-account-heading) 10%, transparent);
+}
+
+.tf-account-update {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.tf-account-update-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  margin: 8px 0 12px;
+  border-radius: 50%;
+  background: var(--tf-account-surface-soft);
+  color: var(--tf-account-muted);
+  font-size: 25px;
+  font-weight: 300;
+}
+
+.tf-account-update > strong {
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.tf-account-update > small {
+  margin-top: 3px;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-version-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 16px;
+  margin-top: 24px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--tf-account-surface-soft);
+  text-align: left;
+}
+
+.tf-account-version-grid span {
+  color: var(--tf-account-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.tf-account-version-grid b {
+  font-size: 16px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.tf-account-update > p {
+  width: 100%;
+  margin: 12px 0 0;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+  text-align: left;
+}
+
+.tf-account-update-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.tf-account-inline-status {
+  min-height: 18px;
+  margin-top: 10px;
+  color: var(--tf-account-muted);
+  font-size: 12px;
+}
+
+.tf-account-support {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.tf-account-upgrade {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px;
+  overflow: hidden;
+}
+
+.tf-account-upgrade-card {
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--tf-account-surface) 88%, #17235b 12%) 0%, var(--tf-account-surface) 72%) padding-box,
+    linear-gradient(110deg, #00c6e9 0%, #376bff 40%, #853eff 72%, #d528e8 100%) border-box;
+}
+
+.tf-account-upgrade-hero {
+  display: grid;
+  grid-template-columns: 44% 56%;
+  align-items: start;
+}
+
+.tf-account-upgrade-offer {
+  padding: 22px 24px 20px;
+}
+
+.tf-account-upgrade-offer small,
+.tf-account-upgrade-offer p,
+.tf-account-upgrade-includes > strong,
+.tf-account-upgrade-includes > p,
+.tf-account-upgrade-includes > small,
+.tf-account-upgrade-contact > p strong,
+.tf-account-upgrade-contact > p small {
+  display: block;
+}
+
+.tf-account-upgrade-offer small {
+  color: color-mix(in srgb, var(--tf-account-primary) 58%, var(--tf-account-text));
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: .35px;
+}
+
+.tf-account-upgrade-offer h3 {
+  margin: 15px 0 2px;
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 550;
+}
+
+.tf-account-upgrade-amount {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--tf-account-heading);
+}
+
+.tf-account-upgrade-amount strong {
+  font-size: 64px;
+  line-height: 68px;
+  font-weight: 600;
+  letter-spacing: -3.5px;
+}
+
+.tf-account-upgrade-amount span {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.tf-account-upgrade-offer p {
+  margin: 5px 0 0;
+  color: var(--tf-account-muted);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.tf-account-upgrade-includes {
+  min-width: 0;
+  padding: 22px 24px 18px;
+  border-left: 1px solid var(--tf-account-line-soft);
+}
+
+.tf-account-upgrade-includes > strong {
+  color: var(--tf-account-heading);
+  font-size: 20px;
+  line-height: 27px;
+  font-weight: 600;
+}
+
+.tf-account-upgrade-includes > p {
+  margin: 7px 0 0;
+  color: var(--tf-account-muted);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.tf-account-upgrade-includes ul {
+  display: grid;
+  gap: 6px;
+  margin: 13px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tf-account-upgrade-includes li {
+  position: relative;
+  padding-left: 20px;
+  color: var(--tf-account-text);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.tf-account-upgrade-includes li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: color-mix(in srgb, var(--tf-account-primary) 58%, var(--tf-account-text));
+  font-weight: 600;
+}
+
+.tf-account-upgrade-includes > small {
+  margin-top: 11px;
+  color: var(--tf-account-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.tf-account-upgrade-transition {
+  min-height: 68px;
+  padding: 12px 24px 13px;
+  border-top: 1px solid var(--tf-account-line-soft);
+}
+
+.tf-account-upgrade-transition > span {
+  color: color-mix(in srgb, var(--tf-account-primary) 58%, var(--tf-account-text));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.tf-account-upgrade-transition p {
+  margin: 4px 0 0;
+  color: var(--tf-account-muted);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.tf-account-upgrade-transition p strong {
+  color: var(--tf-account-text);
+  font-weight: 600;
+}
+
+.tf-account-upgrade-contact {
+  display: grid;
+  grid-template-columns: 44% 56%;
+  align-items: center;
+  margin-top: auto;
+  min-height: 82px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background:
+    linear-gradient(var(--tf-account-surface), var(--tf-account-surface)) padding-box,
+    linear-gradient(110deg, #00c6e9 0%, #376bff 40%, #853eff 72%, #d528e8 100%) border-box;
+}
+
+.tf-account-upgrade-contact > p {
+  margin: 0;
+  padding: 14px 20px;
+}
+
+.tf-account-upgrade-contact > p strong {
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.tf-account-upgrade-contact > p small {
+  margin-top: 3px;
+  color: var(--tf-account-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.tf-account-upgrade-contact .tf-account-support-channel {
+  min-height: 80px;
+  padding: 10px 20px;
+  border-left: 1px solid var(--tf-account-line-soft);
+}
+
+.tf-account-upgrade-contact .tf-account-support-icon {
+  width: 42px;
+  height: 42px;
+  flex-basis: 42px;
+}
+
+.tf-account-upgrade-contact .tf-account-support-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.tf-account-upgrade-contact .tf-account-support-copy strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.tf-account-voucher-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 6px 4px 0;
+}
+
+.tf-account-voucher-gate > strong {
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 500;
+}
+
+.tf-account-voucher-gate > p {
+  max-width: 520px;
+  margin: 12px 0 0;
+  color: var(--tf-account-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.tf-account-voucher-gate-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.tf-account-support-channel {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+}
+
+.tf-account-support-icon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--tf-account-surface-soft);
+  color: var(--tf-account-muted);
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.tf-account-support-icon.wechat {
+  background: #07c160;
+  color: #fff;
+}
+
+.tf-account-support-icon svg {
+  width: 30px;
+  height: 30px;
+  fill: currentColor;
+}
+
+.tf-account-support-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.tf-account-support-copy strong {
+  color: var(--tf-account-heading);
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.tf-account-support-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-account-support > p {
+  margin: 8px 0 0;
+  color: var(--tf-account-muted);
+}
+
+.tf-account-diagnostics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.tf-account-diagnostics-copy {
+  min-width: 0;
+}
+
+.tf-account-diagnostics-copy strong,
+.tf-account-diagnostics-copy small {
+  display: block;
+}
+
+.tf-account-diagnostics-copy strong {
+  color: var(--tf-account-heading);
+  font-size: 16px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.tf-account-diagnostics-copy small {
+  margin-top: 3px;
+  color: var(--tf-account-muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+#tf-account-diagnostics-status {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+#tf-account-diagnostics-status.bad {
+  color: var(--tf-account-danger);
+}
+
+.tf-account-empty small,
+.tf-account-update > small,
+.tf-account-update > p,
+.tf-account-inline-status,
+.tf-account-support-copy small,
+.tf-account-support > p {
+  font-size: 14px;
+  line-height: 20px;
+}
+
+#tf-privacy-overlay {
+  position: fixed !important;
+  inset: 0;
+  z-index: 2147483647 !important;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: transparent;
+}
+
+#tf-privacy-overlay[hidden] {
+  display: none !important;
+}
+
+.tf-privacy-dialog {
+  position: relative;
+  width: min(680px, calc(100vw - 32px));
+  height: 560px;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  border: 0;
+  border-radius: 6px;
+  background: var(--tf-account-surface);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .4);
+}
+
+.tf-privacy-dialog iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--tf-account-surface);
+}
+
+.tf-privacy-close {
+  position: absolute;
+  top: 17px;
+  right: 20px;
+  z-index: 2;
+}
+
+@media (max-width: 620px) {
+  #tf-account-menu {
+    width: min(260px, calc(100vw - 56px));
+  }
+
+  #tf-account-panel {
+    padding: 16px;
+  }
+
+  .tf-account-dialog[data-view="account"],
+  .tf-account-dialog[data-view="messages"],
+  .tf-account-dialog[data-view="shortcuts"],
+  .tf-account-dialog[data-view="update"],
+  .tf-account-dialog[data-view="support"],
+  .tf-account-dialog[data-view="upgrade"] {
+    height: min(560px, calc(100vh - 32px));
+  }
+
+  .tf-privacy-dialog {
+    height: min(560px, calc(100vh - 32px));
+  }
+}

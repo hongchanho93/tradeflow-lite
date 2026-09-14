@@ -1,0 +1,166 @@
+/* 来源 charting_library-master-main/index.html 第 289-452 行（<style> 内联块）
+   覆盖：亮/暗主题根变量、#tv_workspace 三段布局、Tauri 自定义标题栏、#tv_chart_container */
+
+      :root {
+        --app-bg: #000000;
+        --app-text: #e2e8f0;
+        --app-muted: #94a3b8;
+        --app-border: rgba(148, 163, 184, 0.18);
+        --app-surface: rgba(15, 23, 42, 0.96);
+        --app-surface-soft: rgba(15, 23, 42, 0.88);
+        --app-row: rgba(15, 23, 42, 0.42);
+        --app-row-active: rgba(30, 41, 59, 0.86);
+        --app-button-bg: rgba(30, 41, 59, 0.8);
+        --app-button-hover: rgba(51, 65, 85, 0.9);
+        --app-surface-strong: rgba(2, 6, 23, 0.24);
+        --tauri-custom-titlebar-height: 28px;
+        --tauri-custom-titlebar-bg: #000000;
+      }
+
+      body.theme-light {
+        --app-bg: #ffffff;
+        --app-text: #0f172a;
+        --app-muted: #475569;
+        --app-border: rgba(15, 23, 42, 0.14);
+        --app-surface: rgba(255, 255, 255, 0.96);
+        --app-surface-soft: rgba(248, 250, 252, 0.92);
+        --app-row: rgba(226, 232, 240, 0.75);
+        --app-row-active: rgba(191, 219, 254, 0.85);
+        --app-button-bg: rgba(226, 232, 240, 0.95);
+        --app-button-hover: rgba(203, 213, 225, 0.98);
+        --app-surface-strong: rgba(241, 245, 249, 0.94);
+        --tauri-custom-titlebar-bg: #ffffff;
+      }
+
+      html.theme-light {
+        --tauri-custom-titlebar-bg: #ffffff;
+      }
+
+      html.theme-dark {
+        --tauri-custom-titlebar-bg: #000000;
+      }
+
+      html, body, #tv_workspace, .tv-chart-pane {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--app-bg);
+      }
+
+      #tauri_custom_titlebar {
+        display: none;
+      }
+
+      html.tauri-custom-titlebar #tauri_custom_titlebar {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: var(--tauri-custom-titlebar-height);
+        background: var(--tauri-custom-titlebar-bg);
+        z-index: 2147483000;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      html.tauri-platform-windows {
+        --tauri-custom-titlebar-height: 32px;
+      }
+
+      html.tauri-platform-windows.tauri-custom-titlebar #tauri_custom_titlebar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--app-text);
+      }
+
+      .tauri-titlebar-brand {
+        display: none;
+        align-items: center;
+        min-width: 0;
+        padding-left: 11px;
+        font: 600 13px/1 "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--app-text);
+      }
+
+      .tauri-titlebar-drag-region {
+        flex: 1 1 auto;
+        height: 100%;
+        min-width: 0;
+      }
+
+      .tauri-titlebar-controls {
+        display: none;
+        align-items: stretch;
+        height: 100%;
+        margin-left: auto;
+      }
+
+      .tauri-titlebar-button {
+        width: 46px;
+        height: 100%;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--app-text);
+        font: 16px/1 "Segoe UI Symbol", "Segoe UI", sans-serif;
+        cursor: default;
+      }
+
+      .tauri-titlebar-button:hover {
+        background: rgba(128, 128, 128, 0.16);
+      }
+
+      .tauri-titlebar-button.close:hover {
+        background: #e81123;
+        color: #ffffff;
+      }
+
+      html.tauri-platform-windows .tauri-titlebar-brand,
+      html.tauri-platform-windows .tauri-titlebar-controls {
+        display: flex;
+      }
+
+      html.tauri-platform-windows .tauri-titlebar-brand {
+        flex: 0 0 auto;
+        padding-right: 12px;
+        white-space: nowrap;
+      }
+
+      html.tauri-custom-titlebar #tv_workspace {
+        height: calc(100% - var(--tauri-custom-titlebar-height));
+        margin-top: var(--tauri-custom-titlebar-height);
+      }
+
+      #tv_workspace {
+        display: flex;
+        flex-direction: row;
+        --tv-split-right-width: 34%;
+      }
+
+      #tv_workspace.split-resizing,
+      #tv_workspace.split-resizing * {
+        cursor: col-resize !important;
+        user-select: none !important;
+      }
+
+      body.backtest-review-active {
+        display: flex;
+        flex-direction: column;
+      }
+
+      body.backtest-review-active #tv_workspace {
+        flex: 1 1 auto;
+        height: auto;
+        min-height: 0;
+      }
+
+      #tv_chart_container {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 100%;
+        position: relative;
+        isolation: isolate;
+      }

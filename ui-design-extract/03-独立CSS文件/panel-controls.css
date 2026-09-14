@@ -1,0 +1,122 @@
+/* 原文件：charting_library-master-main/frontend/features/main-panels/panel-controls.css
+   面板通用控制条 */
+
+#main_panels_backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9995;
+  display: none;
+  background: rgba(0, 0, 0, 0);
+}
+
+#main_panels_backdrop.visible {
+  display: block;
+}
+
+.tf-chart-header-button {
+  min-width: 88px;
+  letter-spacing: 0;
+}
+
+.tf-chart-header-button.active {
+  color: #f59e0b;
+}
+
+#measure_stats_panel {
+  position: fixed;
+  top: 96px;
+  left: 72px;
+  z-index: 9997;
+  width: 276px;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: rgba(11, 18, 32, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  color: #e2e8f0;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+}
+
+#measure_stats_panel.visible {
+  display: flex;
+}
+
+#measure_stats_quick_button {
+  position: fixed;
+  z-index: 9998;
+  width: 56px;
+  height: 56px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: #e2e8f0;
+  cursor: pointer;
+  opacity: 1;
+}
+
+#measure_stats_quick_button svg {
+  width: 32px;
+  height: 32px;
+  display: block;
+  stroke: currentColor;
+}
+
+#measure_stats_quick_button.visible {
+  display: flex;
+}
+
+body.theme-light #measure_stats_quick_button,
+body.theme-light #measure_stats_quick_button:hover {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: #111827;
+}
+
+.measure-stats-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.measure-stats-panel-close {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.measure-stats-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.measure-stats-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: inherit;
+  white-space: nowrap;
+}
+
+.measure-stats-option input {
+  flex: 0 0 auto;
+}
+
+.measure-stats-panel-tip {
+  color: #94a3b8;
+}

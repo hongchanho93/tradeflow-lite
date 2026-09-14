@@ -1,0 +1,117 @@
+/* 来源 index.html 第 41558-41591 行
+   覆盖：十字光标信息浮窗 #tv-kline-info-tooltip、图表右键菜单 #tv-chart-context-menu */
+
+#tv-kline-info-tooltip {
+  position:fixed;
+  z-index:2147483647;
+  display:none;
+  min-width:142px;
+  max-width:176px;
+  box-sizing:border-box;
+  padding:6px 9px;
+  border:none;
+  border-radius:7px;
+  background:var(--kline-tip-bg,#2962ff);
+  color:var(--kline-tip-text,var(--tv-color-toolbar-button-text,#131722));
+  font:12px/1.34 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;
+  box-shadow:0 2px 6px var(--kline-tip-shadow,rgba(0,0,0,.18));
+  pointer-events:none;
+  user-select:none;
+}
+#tv-kline-info-tooltip.visible {
+  display:block}
+#tv-kline-info-tooltip .kline-tip-grid {
+  display:grid;
+  grid-template-columns:42px minmax(72px,1fr);
+  gap:4px 8px;
+  align-items:center}
+#tv-kline-info-tooltip .kline-tip-label {
+  color:var(--kline-tip-text,#fff);
+  white-space:nowrap;
+  font-weight:300}
+#tv-kline-info-tooltip .kline-tip-value {
+  color:var(--kline-tip-text,#fff);
+  text-align:right;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+  font-weight:300}
+#tv-kline-info-tooltip .kline-tip-value.up {
+  color:var(--kline-tip-up,#ff7043);
+  font-weight:500}
+#tv-kline-info-tooltip .kline-tip-value.down {
+  color:var(--kline-tip-down,#22c55e)}
+
+
+#tv-chart-context-menu {
+  position:fixed;
+  z-index:2147483646;
+  display:none;
+  width:260px;
+  max-width:calc(100vw - 12px);
+  box-sizing:border-box;
+  padding:6px;
+  border:0;
+  border-radius:6px;
+  background:var(--tv-custom-panel-bg,#fff);
+  box-shadow:0 2px 4px rgba(0,0,0,.2);
+  color:var(--tv-custom-panel-text,#131722);
+  font-family:-apple-system,system-ui,'Trebuchet MS',Roboto,Ubuntu,'PingFang SC',sans-serif;
+  font-size:14px;
+  font-weight:400;
+  line-height:18px;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  user-select:none;
+}
+#tv-chart-context-menu.visible {
+  display:block}
+#tv-chart-context-menu .tv-chart-menu-item {
+  height:40px;
+  display:flex;
+  align-items:center;
+  padding:2px 4px;
+  box-sizing:border-box;
+  border-radius:4px;
+  white-space:nowrap;
+  cursor:pointer;
+  color:inherit;
+  background:transparent;
+}
+#tv-chart-context-menu .tv-chart-menu-item:hover {
+  background:color-mix(in srgb,var(--tv-custom-panel-text,#131722) 12%,transparent);
+}
+#tv-chart-context-menu .tv-chart-menu-separator {
+  position:relative;
+  height:13px;
+  margin:0 -6px;
+  background:transparent;
+}
+#tv-chart-context-menu .tv-chart-menu-separator::after {
+  content:'';
+  position:absolute;
+  top:6px;
+  left:0;
+  right:0;
+  height:1px;
+  background:var(--tv-custom-panel-border-soft,rgba(15,23,42,.10));
+}
+#tv-chart-context-menu .tv-chart-menu-icon {
+  flex:0 0 28px;
+  width:28px;
+  height:28px;
+  margin-right:4px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--tv-custom-panel-muted,#787b86);
+}
+#tv-chart-context-menu .tv-chart-menu-icon svg {
+  width:28px;
+  height:28px;
+  display:block;
+}
+#tv-chart-context-menu .tv-chart-menu-label {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}

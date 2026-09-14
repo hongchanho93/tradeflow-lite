@@ -1,0 +1,35 @@
+{
+  "name": "tradeflow-lite",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "test:ui": "node scripts/check-ui-contract.mjs",
+    "test:contracts": "node scripts/check-market-search.mjs && node scripts/check-symbol-logos.mjs && node scripts/check-latest-request.mjs && node scripts/check-bar-series.mjs && node scripts/check-history-loader.mjs && node scripts/check-market-session.mjs && node scripts/check-quote.mjs && node scripts/check-indicators.mjs && node scripts/check-watchlist.mjs && node scripts/check-drawing-state.mjs && node scripts/check-chart-controls.mjs && node scripts/check-time-navigation.mjs && node scripts/check-marker-state.mjs",
+    "test:real-market": "cargo test --manifest-path src-tauri/Cargo.toml real_market_matrix -- --ignored --nocapture",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "lightweight-charts": "5.2.1",
+    "lightweight-charts-line-tools-circle": "git+https://github.com/difurious/lightweight-charts-line-tools-circle.git#7822b9a8990b21b72a9358d529be978d14bcd456",
+    "lightweight-charts-line-tools-core": "git+https://github.com/difurious/lightweight-charts-line-tools-core.git#db2695c628f7ff2b163f2f465003d52e959bb8cd",
+    "lightweight-charts-line-tools-fib-retracement": "git+https://github.com/difurious/lightweight-charts-line-tools-fib-retracement.git#248b46813b44dd2dbe1576a9bce67ddf39d1338f",
+    "lightweight-charts-line-tools-freehand": "git+https://github.com/difurious/lightweight-charts-line-tools-freehand.git#8d55bb4d185128b33b3e09d97b26061a58a1a70c",
+    "lightweight-charts-line-tools-lines": "git+https://github.com/difurious/lightweight-charts-line-tools-lines.git#edb2a6ce00c8bbbe6f19e8469e378350efe6013f",
+    "lightweight-charts-line-tools-long-short-position": "git+https://github.com/difurious/lightweight-charts-line-tools-long-short-position.git#a6d256484a5d646550fd7e840e201efbdb7e93af",
+    "lightweight-charts-line-tools-parallel-channel": "git+https://github.com/difurious/lightweight-charts-line-tools-parallel-channel.git#cfdc0ddf0148ed788e84b453a7b413dc6be5ef0c",
+    "lightweight-charts-line-tools-path": "github:difurious/lightweight-charts-line-tools-path#ef59bdac6d335c2381da1e652c8f2845b8631370",
+    "lightweight-charts-line-tools-price-range": "git+https://github.com/difurious/lightweight-charts-line-tools-price-range.git#03e7c92166746f3632337e035f2ba955090465cb",
+    "lightweight-charts-line-tools-rectangle": "git+https://github.com/difurious/lightweight-charts-line-tools-rectangle.git#8c229e62852f72936dbef5fdc198e321b9a85cc3",
+    "lightweight-charts-line-tools-text": "git+https://github.com/difurious/lightweight-charts-line-tools-text.git#3a64a17814c85a98cccccce1f5a014ef8e18a091",
+    "lightweight-charts-line-tools-triangle": "github:difurious/lightweight-charts-line-tools-triangle#858baf354f101aca2eb9dcb1c9861eb75b5146f4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  }
+}

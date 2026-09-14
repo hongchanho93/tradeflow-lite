@@ -1,0 +1,24 @@
+K线类型图标
+顶部那个蜡烛图样式切换按钮里的各种图表类型
+
+原始出处：charting_library/bundles/series-icons-map.089b5813ba4cab1bf543.js
+共 18 个图标
+
+module-215480.svg
+module-243402.svg
+module-37616.svg
+module-381923.svg
+module-420340.svg
+module-438716.svg
+module-443167.svg
+module-455638.svg
+module-500507.svg
+module-659505.svg
+module-722763.svg
+module-773265.svg
+module-786864.svg
+module-800237.svg
+module-842051.svg
+module-867545.svg
+module-917696.svg
+module-965635.svg

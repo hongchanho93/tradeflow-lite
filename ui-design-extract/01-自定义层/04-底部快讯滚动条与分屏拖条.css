@@ -1,0 +1,284 @@
+/* 来源 index.html 第 453-733 行
+   覆盖：截图最底部 “快讯 00:18 …新浪财经” 跑马灯 #stock_news_ticker、
+   副图容器 #tv_index_container、中间可拖动分隔条 #tv_split_resizer、启动错误/内存提示条 */
+
+      #stock_news_ticker {
+        position: absolute;
+        left: 455px;
+        right: 250px;
+        bottom: 8px;
+        z-index: 24;
+        height: 28px;
+        display: grid;
+        grid-template-columns: 20px auto minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+        box-sizing: border-box;
+        padding: 0 10px;
+        border: 1px solid var(--tv-custom-panel-border, var(--app-border));
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--tv-custom-panel-bg, var(--app-surface)) 92%, transparent);
+        color: var(--tv-custom-panel-text, var(--app-text));
+        font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+        backdrop-filter: blur(8px);
+        overflow: hidden;
+      }
+
+      @media (max-width: 1200px) {
+        #stock_news_ticker {
+          left: 16px;
+          right: 16px;
+          bottom: 42px;
+        }
+      }
+
+      #stock_news_ticker.hidden {
+        display: none;
+      }
+
+      .stock-news-ticker-label {
+        color: var(--tv-custom-panel-muted, var(--app-muted));
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .stock-news-ticker-settings {
+        width: 20px;
+        height: 20px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--tv-custom-panel-muted, var(--app-muted));
+        cursor: pointer;
+        font: 700 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 0;
+      }
+
+      .stock-news-ticker-settings:hover {
+        background: var(--tv-custom-panel-hover, var(--app-button-hover));
+        color: var(--tv-custom-panel-heading, var(--app-text));
+      }
+
+      .stock-news-ticker-viewport {
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .stock-news-ticker-track {
+        display: inline-flex;
+        align-items: center;
+        gap: 28px;
+        min-width: max-content;
+        white-space: nowrap;
+        will-change: transform;
+        animation: stock-news-ticker-scroll 144s linear infinite;
+      }
+
+      #stock_news_ticker:hover .stock-news-ticker-track {
+        animation-play-state: paused;
+      }
+
+      .stock-news-ticker-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 520px;
+        border: 0;
+        background: transparent;
+        color: var(--tv-custom-panel-heading, var(--app-text));
+        font: inherit;
+        padding: 0;
+        cursor: pointer;
+      }
+
+      .stock-news-ticker-time {
+        color: var(--tv-custom-panel-muted, var(--app-muted));
+        font-size: 10px;
+      }
+
+      .stock-news-ticker-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .stock-news-ticker-empty {
+        color: var(--tv-custom-panel-muted, var(--app-muted));
+      }
+
+      @keyframes stock-news-ticker-scroll {
+        from { transform: translateX(0); }
+        to { transform: translateX(-50%); }
+      }
+
+      #tv_index_container {
+        flex: 0 0 var(--tv-split-right-width);
+        min-width: 320px;
+        height: 100%;
+        border-left: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      #tv_split_resizer {
+        flex: 0 0 7px;
+        width: 7px;
+        margin-left: -3px;
+        margin-right: -4px;
+        height: 100%;
+        cursor: col-resize;
+        position: relative;
+        z-index: 20;
+        background: transparent;
+      }
+
+      #tv_split_resizer::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 3px;
+        width: 1px;
+        background: rgba(148, 163, 184, 0.18);
+        opacity: 0;
+        transition: opacity 0.12s ease, background-color 0.12s ease, width 0.12s ease;
+      }
+
+      #tv_split_resizer:hover::after,
+      #tv_split_resizer.dragging::after {
+        opacity: 1;
+        width: 2px;
+        background: #2962ff;
+      }
+
+      body.single-pane #tv_chart_container {
+        flex: 1 1 100%;
+        width: 100%;
+      }
+
+      body.single-pane #tv_index_container {
+        flex: 0 0 0;
+        width: 0;
+        min-width: 0;
+        overflow: hidden;
+        border-left: none;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      body.single-pane #tv_split_resizer,
+      body.backtest-window-mode #tv_split_resizer {
+        display: none !important;
+      }
+
+      body.backtest-window-mode #tv_index_container,
+      body.backtest-window-mode #signal_panel,
+      body.backtest-window-mode #recent-history-panel {
+        display: none !important;
+      }
+
+      body.backtest-window-mode #tv_chart_container {
+        flex: 1 1 100%;
+        width: 100%;
+      }
+
+      #boot_error {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 99999;
+        max-width: min(720px, calc(100vw - 32px));
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: rgba(127, 29, 29, 0.95);
+        color: #fff;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        white-space: pre-wrap;
+        display: none;
+      }
+
+      #boot_hint {
+        position: fixed;
+        top: 52px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 99998;
+        max-width: min(560px, calc(100vw - 32px));
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #e2e8f0;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        white-space: pre-wrap;
+        pointer-events: none;
+        display: none;
+      }
+
+      #mem_warn {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 99997;
+        padding: 7px 14px;
+        border-radius: 8px;
+        font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        white-space: nowrap;
+        cursor: pointer;
+        display: none !important;
+        pointer-events: none;
+      }
+      @media (max-width: 600px) {
+        #boot_hint { top: 96px; }
+      }
+      #tf-mobile-watchlist-button {
+        display: none;
+      }
+      #tf-mobile-notes-button {
+        display: none;
+      }
+      @media (max-width: 600px) {
+        #tf-mobile-watchlist-button,
+        #tf-mobile-notes-button {
+          position: fixed;
+          right: 12px;
+          bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+          z-index: 2147482999;
+          min-width: 52px;
+          height: 36px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0 12px;
+          border: 1px solid var(--tv-custom-panel-border, var(--app-border));
+          border-radius: 8px;
+          background: var(--tv-custom-panel-bg, var(--app-surface));
+          color: var(--tv-custom-panel-heading, var(--app-text));
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+          font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+          cursor: pointer;
+        }
+        #tf-mobile-notes-button {
+          bottom: calc(126px + env(safe-area-inset-bottom, 0px));
+        }
+        #tf-mobile-watchlist-button[aria-expanded="true"],
+        #tf-mobile-notes-button[aria-expanded="true"] {
+          display: none;
+        }
+        body:has(.tf-ip-overlay) #tf-mobile-watchlist-button,
+        body:has(.tf-ip-overlay) #tf-mobile-notes-button,
+        body:has(#tf-account-panel:not([hidden])) #tf-mobile-watchlist-button,
+        body:has(#tf-account-panel:not([hidden])) #tf-mobile-notes-button {
+          display: none !important;
+        }
+      }
+      #mem_warn[data-level="medium"] {
+        background: rgba(30, 58, 138, 0.88);
+        color: #bfdbfe;
+      }
+      #mem_warn[data-level="high"] {
+        background: rgba(120, 53, 15, 0.95);
+        color: #fde68a;
+        font-weight: 600;
+      }

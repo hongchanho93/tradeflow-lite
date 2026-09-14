@@ -1,0 +1,26 @@
+浮动工具条图标
+选中绘图后浮出的小工具条
+
+原始出处：charting_library/bundles/floating-toolbars.47df2a0632b65c8dff7b.js
+共 20 个图标
+
+icon-516098.svg
+module-111186.svg
+module-166820.svg
+module-215179.svg
+module-295167.svg
+module-356721.svg
+module-37292.svg
+module-399776.svg
+module-400406.svg
+module-451528.svg
+module-454352.svg
+module-577999.svg
+module-585658.svg
+module-601018.svg
+module-603704.svg
+module-609914.svg
+module-626317.svg
+module-663712.svg
+module-835497.svg
+module-959053.svg

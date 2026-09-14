@@ -1,0 +1,23 @@
+/* 来源 index.html 第 17609-17615 行，函数 ensureLocalLayoutMenuStyles()
+   覆盖：顶部 “11 / 保存” 旁边那个箭头点开的本地布局菜单项 */
+
+.tradeflow-local-layout-menu-item {
+  width:100%;
+  height:32px;
+  border:0;
+  background:transparent;
+  color:inherit;
+  display:flex;
+  align-items:center;
+  padding:0 20px;
+  text-align:left;
+  cursor:pointer;
+  font:inherit;
+  box-sizing:border-box;
+  white-space:nowrap}
+.tradeflow-local-layout-menu-item:hover {
+  background:rgba(120,123,134,.12)}
+.tradeflow-local-layout-separator {
+  height:1px;
+  margin:4px 0;
+  background:rgba(120,123,134,.18)}

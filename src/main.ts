@@ -1,0 +1,2951 @@
+import { invoke } from '@tauri-apps/api/core';
+import {
+  AreaSeries,
+  BarSeries,
+  BaselineSeries,
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  HistogramSeries,
+  LineStyle,
+  LineSeries,
+  PriceScaleMode,
+  createChart,
+  createSeriesMarkers,
+  createTextWatermark,
+  type CandlestickData,
+  type IPaneApi,
+  type IPriceLine,
+  type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
+  type Time,
+  type UTCTimestamp,
+} from 'lightweight-charts';
+import { createLineToolsPlugin, type LineToolType } from 'lightweight-charts-line-tools-core';
+import { LineToolCircle } from 'lightweight-charts-line-tools-circle';
+import { LineToolFibRetracement } from 'lightweight-charts-line-tools-fib-retracement';
+import { LineToolBrush, LineToolHighlighter } from 'lightweight-charts-line-tools-freehand';
+import {
+  LineToolArrow,
+  LineToolCallout,
+  LineToolCrossLine,
+  LineToolExtendedLine,
+  LineToolHorizontalLine,
+  LineToolHorizontalRay,
+  LineToolRay,
+  LineToolTrendLine,
+  LineToolVerticalLine,
+} from 'lightweight-charts-line-tools-lines';
+import { LineToolLongShortPosition } from 'lightweight-charts-line-tools-long-short-position';
+import { LineToolParallelChannel } from 'lightweight-charts-line-tools-parallel-channel';
+import { LineToolPath } from 'lightweight-charts-line-tools-path';
+import { LineToolPriceRange } from 'lightweight-charts-line-tools-price-range';
+import { LineToolRectangle } from 'lightweight-charts-line-tools-rectangle';
+import { LineToolText } from 'lightweight-charts-line-tools-text';
+import { LineToolTriangle } from 'lightweight-charts-line-tools-triangle';
+import areaChartIcon from './assets/chart-types/area.svg?raw';
+import barsChartIcon from './assets/chart-types/bars.svg?raw';
+import baselineChartIcon from './assets/chart-types/baseline.svg?raw';
+import candlesChartIcon from './assets/chart-types/candles.svg?raw';
+import lineChartIcon from './assets/chart-types/line.svg?raw';
+import calloutDrawingIcon from './assets/drawing-tools/callout.svg?raw';
+import crossLineDrawingIcon from './assets/drawing-tools/cross-line.svg?raw';
+import extendedLineDrawingIcon from './assets/drawing-tools/extended-line.svg?raw';
+import highlighterDrawingIcon from './assets/drawing-tools/highlighter.svg?raw';
+import horizontalRayDrawingIcon from './assets/drawing-tools/horizontal-ray.svg?raw';
+import pathDrawingIcon from './assets/drawing-tools/path.svg?raw';
+import triangleDrawingIcon from './assets/drawing-tools/triangle.svg?raw';
+import verticalLineDrawingIcon from './assets/drawing-tools/vertical-line.svg?raw';
+import priceScaleGearIcon from './assets/price-scale-gear.svg?raw';
+import { LineToolUpArrow } from './drawing-tools/up-arrow';
+import { barsForSeriesUpdate, initialVisibleLogicalRange, mergeLatestBars } from './bar-series';
+import { BollingerBandPrimitive } from './boll-band';
+import {
+  loadChartPreferences,
+  movePaneOrder,
+  previousCloseFromBars,
+  saveChartPreferences,
+  type ChartType,
+  type MainOverlaySeries,
+  type ManagedSeries,
+  type PriceLineSettings,
+  type PriceScaleSetting,
+  type SecondaryPane,
+} from './chart-controls';
+import {
+  DrawingHistory,
+  drawingScope,
+  loadDrawingScopes,
+  saveDrawingScopes,
+  validateDrawingSnapshot,
+  type DrawingExport,
+} from './drawing-state';
+import {
+  DEEP_HISTORY_DELAY_MS,
+  HistoryMemoryCache,
+  INITIAL_HISTORY_BARS,
+  historyCacheKey,
+  deepHistoryBars,
+  shouldLoadDeepHistory,
+} from './history-loader';
+import { LatestRequestGate } from './latest-request';
+import { boll, bollBreakouts, ema, macd, rsi, sma, type BollBreakout, type OptionalValue } from './indicators';
+import { marketPollPlan } from './market-session';
+import marketUniversePackage from './market-universe.json';
+import {
+  listMarketSymbols,
+  type MarketSearchCategory,
+  type MarketSearchSource,
+  type MarketSymbol,
+} from './market-universe';
+import { exchangeLogoUrl, symbolLogoUrls } from './symbol-logos';
+import { isUsableQuote, type QuoteSnapshot } from './quote';
+import {
+  loadMarkerScopes,
+  markerScope,
+  saveMarkerScopes,
+  type ChartMarker,
+  type MarkerPosition,
+  type MarkerShape,
+} from './marker-state';
+import {
+  logicalRangeAround,
+  nearestBarIndex,
+  panLogicalRange,
+  parseShanghaiDate,
+  visibleRangeForPreset,
+  type TimeRangePreset,
+} from './time-navigation';
+import { loadWatchlist, moveWatchlistSymbol, saveWatchlist } from './watchlist';
+import './style.css';
+
+type Bar = { time: number; open: number; high: number; low: number; close: number; volume: number; amount?: number };
+type HistoryResponse = {
+  symbol: string;
+  bars: Bar[];
+  diagnostics: { source: string; host: string; latencyMs: number };
+  quote?: QuoteSnapshot;
+};
+type HostBenchmarkResponse = {
+  probes: Array<{ host: string; ok: boolean; latencyMs: number; error?: string }>;
+};
+type Resolution = '1' | '5' | '15' | '30' | '60' | '1D' | '1W' | '1M';
+type Adjustment = 'none' | 'qfq';
+type IndicatorName = 'ma' | 'ema' | 'boll' | 'macd' | 'rsi';
+type DrawingToolType = LineToolType | 'UpArrow';
+type SelectedDrawing = {
+  id: string;
+  toolType: DrawingToolType;
+  options: Record<string, any>;
+  points?: Array<{ timestamp: Time; price: number }>;
+};
+
+const drawingToolTypes: DrawingToolType[] = [
+  'TrendLine', 'Ray', 'Arrow', 'ExtendedLine', 'HorizontalLine', 'HorizontalRay', 'VerticalLine',
+  'CrossLine', 'Callout', 'Rectangle', 'Circle', 'Triangle', 'Path', 'ParallelChannel',
+  'FibRetracement', 'Brush', 'Highlighter', 'Text', 'PriceRange', 'LongShortPosition', 'UpArrow',
+];
+const knownDrawingTypes = new Set<string>(drawingToolTypes);
+
+const marketSymbols = (marketUniversePackage as { rows: MarketSymbol[] }).rows;
+const marketSymbolById = new Map(marketSymbols.map((item) => [item.symbol, item]));
+const defaultSymbol = marketSymbols.find((item) => item.symbol === 'SH:600000' && item.kind === 'stock')!;
+const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数' };
+const kindMetaLabels: Record<MarketSymbol['kind'], string> = { stock: 'stock', etf: 'fund', index: 'index' };
+const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; label: string }[]> = {
+  all: [
+    { value: 'all', label: '全部来源' },
+    { value: 'sh', label: '上海市场' },
+    { value: 'sz', label: '深圳市场' },
+    { value: 'bj', label: '北京市场' },
+  ],
+  stock: [
+    { value: 'all', label: '全部来源' },
+    { value: 'sh_main', label: '沪市主板' },
+    { value: 'star', label: '科创板' },
+    { value: 'sz_main', label: '深市主板' },
+    { value: 'chinext', label: '创业板' },
+    { value: 'bj', label: '北交所' },
+  ],
+  index: [
+    { value: 'all', label: '全部来源' },
+    { value: 'sh', label: '上证指数' },
+    { value: 'sz', label: '深证指数' },
+    { value: 'bj', label: '北证指数' },
+  ],
+  etf: [
+    { value: 'all', label: '全部来源' },
+    { value: 'sh', label: '沪市 ETF' },
+    { value: 'sz', label: '深市 ETF' },
+  ],
+};
+const resolutionLabels: Record<Resolution, string> = {
+  '1': '1分', '5': '5分', '15': '15分', '30': '30分', '60': '1小时',
+  '1D': '日', '1W': '周', '1M': '月',
+};
+const chartTypeLabels: Record<ChartType, string> = {
+  candles: 'K线', bars: '美国线', line: '折线', area: '面积', baseline: '基准',
+};
+const priceScaleModes: Record<PriceScaleSetting, PriceScaleMode> = {
+  normal: PriceScaleMode.Normal,
+  logarithmic: PriceScaleMode.Logarithmic,
+  percentage: PriceScaleMode.Percentage,
+  indexed: PriceScaleMode.IndexedTo100,
+};
+let currentSymbol = defaultSymbol;
+let currentResolution: Resolution = '1D';
+let currentAdjustment: Adjustment = 'none';
+const historyRequestGate = new LatestRequestGate();
+const historyCache = new HistoryMemoryCache<HistoryResponse>();
+const historyRequests = new Map<string, Promise<HistoryResponse>>();
+let currentBars: Bar[] = [];
+let currentQuote: QuoteSnapshot | null = null;
+let magnetEnabled = false;
+let drawingsLocked = false;
+let activeDrawingId: string | null = null;
+let selectedDrawing: SelectedDrawing | null = null;
+let suppressDrawingDeselect = false;
+let latestPollInFlight = false;
+let latestPollTimer: number | undefined;
+let deepHistoryTimer: number | undefined;
+let deepHistoryTimerKey = '';
+const deepHistoryLoading = new Set<string>();
+const chartPreferences = loadChartPreferences(localStorage);
+const activeIndicators = new Set<IndicatorName>(
+  chartPreferences.activeSeries.filter((series): series is IndicatorName => series !== 'volume'),
+);
+const hiddenSeries = new Set<ManagedSeries>(chartPreferences.hiddenSeries);
+let volumeVisible = chartPreferences.activeSeries.includes('volume');
+let currentChartType: ChartType = chartPreferences.chartType;
+let currentPriceScale: PriceScaleSetting = chartPreferences.priceScale;
+let priceScaleAuto = true;
+let priceScaleInverted = chartPreferences.priceScaleInverted;
+let secondaryPaneOrder: SecondaryPane[] = chartPreferences.paneOrder;
+let mainSeriesOrder: MainOverlaySeries[] = chartPreferences.mainSeriesOrder;
+let watchlistSymbols = loadWatchlist(localStorage, new Set(marketSymbolById.keys()));
+const drawingScopes = loadDrawingScopes(localStorage, knownDrawingTypes);
+const markerScopes = loadMarkerScopes(localStorage);
+let drawingHistory = new DrawingHistory('[]');
+let restoringDrawings = false;
+let drawingsInitialized = false;
+let markerPlacementActive = false;
+let editingMarkerId: string | null = null;
+let pendingMarkerTime: number | null = null;
+let primarySeriesVisible = true;
+
+const icon = (paths: string, viewBox = '0 0 24 24') => `
+  <svg aria-hidden="true" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+const drawingIcon = (paths: string) => `
+  <svg aria-hidden="true" viewBox="0 0 28 28">${paths}</svg>`;
+
+const icons = {
+  plus: icon('<path d="M12 5v14M5 12h14"/>'),
+  star: icon('<path d="m12 3 2.7 5.47 6.03.88-4.36 4.25 1.03 6-5.4-2.84L6.6 19.6l1.03-6-4.36-4.25 6.03-.88L12 3Z"/>'),
+  search: icon('<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>'),
+  indicator: icon('<path d="M3 17 8 9l4 4 5-8 4 3"/><path d="M3 21h18"/>'),
+  refresh: icon('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>'),
+  fullscreen: icon('<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>'),
+  priceLine: icon('<path d="M3 12h18"/><circle cx="12" cy="12" r="2.5"/>'),
+  camera: icon('<path d="M4 7h4l1.5-2h5L16 7h4v12H4V7Z"/><circle cx="12" cy="13" r="3.5"/>'),
+  copy: icon('<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>'),
+  download: icon('<path d="M12 3v12m-4-4 4 4 4-4"/><path d="M4 19h16"/>'),
+  crosshair: icon('<circle cx="12" cy="12" r="2"/><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/>'),
+  trend: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M7.354 21.354l14-14-.707-.707-14 14z"/><path d="M22.5 7c.828 0 1.5-.672 1.5-1.5S23.328 4 22.5 4 21 4.672 21 5.5 21.672 7 22.5 7zm0 1A2.5 2.5 0 1 1 25 5.5 2.5 2.5 0 0 1 22.5 8zM5.5 24c.828 0 1.5-.672 1.5-1.5S6.328 21 5.5 21 4 21.672 4 22.5 4.672 24 5.5 24zm0 1A2.5 2.5 0 1 1 8 22.5 2.5 2.5 0 0 1 5.5 25z"/></g>'),
+  ray: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M8.354 20.354l5-5-.707-.707-5 5zM16.354 12.354l8-8-.707-.707-8 8z"/><path d="M14.5 15c.828 0 1.5-.672 1.5-1.5S15.328 12 14.5 12s-1.5.672-1.5 1.5.672 1.5 1.5 1.5zm0 1a2.5 2.5 0 1 1 2.5-2.5 2.5 2.5 0 0 1-2.5 2.5zM6.5 23c.828 0 1.5-.672 1.5-1.5S7.328 20 6.5 20 5 20.672 5 21.5 5.672 23 6.5 23zm0 1A2.5 2.5 0 1 1 9 21.5 2.5 2.5 0 0 1 6.5 24z"/></g>'),
+  arrow: drawingIcon('<g fill="currentColor"><path fill-rule="nonzero" d="M7.354 21.354l14-14-.707-.707-14 14z"/><path d="M21 7l-8 3 5 5z"/><path fill-rule="nonzero" d="M22.5 7c.828 0 1.5-.672 1.5-1.5S23.328 4 22.5 4 21 4.672 21 5.5 21.672 7 22.5 7zm0 1A2.5 2.5 0 1 1 25 5.5 2.5 2.5 0 0 1 22.5 8zM5.5 24c.828 0 1.5-.672 1.5-1.5S6.328 21 5.5 21 4 21.672 4 22.5 4.672 24 5.5 24zm0 1A2.5 2.5 0 1 1 8 22.5 2.5 2.5 0 0 1 5.5 25z"/></g>'),
+  upArrow: drawingIcon('<path fill="currentColor" fill-rule="nonzero" d="M11 16v6h6v-6h4.865L14 6.562 6.135 16H11zm7 7h-8v-6H4L14 5l10 12h-6v6z"/>'),
+  horizontal: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M4 15h8.5v-1H4zM16.5 15H25v-1h-8.5z"/><path d="M14.5 16c.828 0 1.5-.672 1.5-1.5S15.328 13 14.5 13s-1.5.672-1.5 1.5.672 1.5 1.5 1.5zm0 1a2.5 2.5 0 1 1 2.5-2.5 2.5 2.5 0 0 1-2.5 2.5z"/></g>'),
+  extendedLine: extendedLineDrawingIcon,
+  horizontalRay: horizontalRayDrawingIcon,
+  verticalLine: verticalLineDrawingIcon,
+  crossLine: crossLineDrawingIcon,
+  callout: calloutDrawingIcon,
+  highlighter: highlighterDrawingIcon,
+  triangle: triangleDrawingIcon,
+  path: pathDrawingIcon,
+  rectangle: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M7.5 6h13V5h-13zM7.5 23h13v-1h-13zM5 7.5v13h1v-13zM22 7.5v13h1v-13z"/><path d="M5.5 7A1.5 1.5 0 1 0 4 5.5 1.5 1.5 0 0 0 5.5 7zm0 1A2.5 2.5 0 1 1 8 5.5 2.5 2.5 0 0 1 5.5 8zM22.5 7A1.5 1.5 0 1 0 21 5.5 1.5 1.5 0 0 0 22.5 7zm0 1A2.5 2.5 0 1 1 25 5.5 2.5 2.5 0 0 1 22.5 8zM22.5 24a1.5 1.5 0 1 0-1.5-1.5 1.5 1.5 0 0 0 1.5 1.5zm0 1a2.5 2.5 0 1 1 2.5-2.5 2.5 2.5 0 0 1-2.5 2.5zM5.5 24A1.5 1.5 0 1 0 4 22.5 1.5 1.5 0 0 0 5.5 24zm0 1A2.5 2.5 0 1 1 8 22.5 2.5 2.5 0 0 1 5.5 25z"/></g>'),
+  circle: drawingIcon('<path stroke="currentColor" fill="none" d="M16 14a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z"/><path fill="currentColor" fill-rule="evenodd" d="M4.5 14a9.5 9.5 0 0 1 18.7-2.37 2.5 2.5 0 0 0 0 4.74A9.5 9.5 0 0 1 4.5 14zm19.7 2.5a10.5 10.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5zM22.5 14a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0z"/>'),
+  channel: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M8.354 18.354l10-10-.707-.707-10 10zM12.354 25.354l5-5-.707-.707-5 5zM20.354 17.354l5-5-.707-.707-5 5z"/><path d="M19.5 8A1.5 1.5 0 1 0 18 6.5 1.5 1.5 0 0 0 19.5 8zm0 1A2.5 2.5 0 1 1 22 6.5 2.5 2.5 0 0 1 19.5 9zM6.5 21A1.5 1.5 0 1 0 5 19.5 1.5 1.5 0 0 0 6.5 21zm0 1A2.5 2.5 0 1 1 9 19.5 2.5 2.5 0 0 1 6.5 22zM18.5 20a1.5 1.5 0 1 0 1.5 1.5 1.5 1.5 0 0 0-1.5-1.5zm0-1a2.5 2.5 0 1 1-2.5 2.5 2.5 2.5 0 0 1 2.5-2.5z"/></g>'),
+  fib: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M3 5h22V4H3zM3 17h22v-1H3zM3 11h19.5v-1H3zM5.5 23H25v-1H5.5z"/><path d="M3.5 24A1.5 1.5 0 1 0 2 22.5 1.5 1.5 0 0 0 3.5 24zm0 1A2.5 2.5 0 1 1 6 22.5 2.5 2.5 0 0 1 3.5 25zM24.5 12a1.5 1.5 0 1 0-1.5-1.5 1.5 1.5 0 0 0 1.5 1.5zm0 1a2.5 2.5 0 1 1 2.5-2.5 2.5 2.5 0 0 1-2.5 2.5z"/></g>'),
+  brush: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M1.789 23l.859-.854.221-.228c.18-.19.38-.409.597-.655.619-.704 1.238-1.478 1.815-2.298.982-1.396 1.738-2.776 2.177-4.081 1.234-3.667 5.957-4.716 8.923-1.263 3.251 3.785-.037 9.38-5.379 9.38H1.789zM11 22c4.544 0 7.272-4.642 4.621-7.728-2.45-2.853-6.225-2.015-7.216.931-.474 1.408-1.273 2.869-2.307 4.337-.599.852-1.241 1.653-1.882 2.383L4.148 22H11z"/><path d="M18.182 6.002l-1.419 1.286c-1.031.935-1.075 2.501-.096 3.48l1.877 1.877c.976.976 2.553.954 3.513-.045l5.65-5.874-.721-.693-5.65 5.874c-.574.596-1.507.609-2.086.031l-1.877-1.877c-.574-.574-.548-1.48.061-2.032l1.419-1.286-.672-.741z"/></g>'),
+  text: drawingIcon('<path fill="currentColor" d="M8 6.5c0-.28.22-.5.5-.5H14v16h-2v1h5v-1h-2V6h5.5c.28 0 .5.22.5.5V9h1V6.5c0-.83-.67-1.5-1.5-1.5h-12C7.67 5 7 5.67 7 6.5V9h1V6.5z"/>'),
+  ruler: drawingIcon('<g fill="currentColor"><path fill-rule="nonzero" d="M4 5h16.5V4H4zM25 24H8.5v1H25z"/><path fill-rule="nonzero" d="M6.5 26A1.5 1.5 0 1 0 5 24.5 1.5 1.5 0 0 0 6.5 26zm0 1A2.5 2.5 0 1 1 9 24.5 2.5 2.5 0 0 1 6.5 27zM22.5 6A1.5 1.5 0 1 0 21 4.5 1.5 1.5 0 0 0 22.5 6zm0 1A2.5 2.5 0 1 1 25 4.5 2.5 2.5 0 0 1 22.5 7zM14 9v14h1V9z"/><path d="M14.5 6L17 9h-5z"/></g>'),
+  position: drawingIcon('<path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M4.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 6.5A2.5 2.5 0 0 1 6.95 6H24v1H6.95A2.5 2.5 0 0 1 2 6.5zM4.5 15a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 16.5a2.5 2.5 0 0 1 4.95-.5h13.1a2.5 2.5 0 1 1 0 1H6.95A2.5 2.5 0 0 1 2 16.5zM22.5 15a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm-18 6a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 22.5a2.5 2.5 0 0 1 4.95-.5H24v1H6.95A2.5 2.5 0 0 1 2 22.5z"/>'),
+  zoom: icon('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4M10.5 7v7m-3.5-3.5h7"/>'),
+  magnet: icon('<path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4H6Z"/>'),
+  lock: icon('<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'),
+  eye: icon('<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>'),
+  undo: icon('<path d="M9 7 4 12l5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/>'),
+  redo: icon('<path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/>'),
+  layers: icon('<path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/>'),
+  trash: icon('<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>'),
+  close: icon('<path d="m7 7 10 10M17 7 7 17"/>'),
+  marker: drawingIcon('<path fill="currentColor" fill-rule="nonzero" d="M7.382 16h14.483l-4.167-5 4.167-5h-15.865v12.764l1.382-2.764zm-2.382 7v-18h19l-5 6 5 6h-16l-3 6z"/>'),
+};
+const chartTypeIcons: Record<ChartType, string> = {
+  candles: candlesChartIcon,
+  bars: barsChartIcon,
+  line: lineChartIcon,
+  area: areaChartIcon,
+  baseline: baselineChartIcon,
+};
+
+document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
+  <div class="app-shell">
+    <div class="chart-toolbar">
+      <div class="symbol-search">
+        <div class="symbol-control">
+          ${icons.search}<input id="search" value="600000" aria-label="商品代码搜索" aria-controls="symbol-search-dialog" aria-expanded="false" autocomplete="off" readonly />
+        </div>
+      </div>
+      <button id="open" class="toolbar-button compact" aria-label="打开证券">${icons.plus}</button>
+      <button id="watchlist-add" class="toolbar-button compact" aria-label="添加当前证券到自选" title="添加到自选">${icons.star}</button>
+      <span class="toolbar-divider"></span>
+      <div class="resolution-switcher" aria-label="K线周期">
+        ${Object.entries(resolutionLabels).map(([resolution, label]) => `<button data-resolution="${resolution}" class="toolbar-button${resolution === '1D' ? ' active' : ''}">${label}</button>`).join('')}
+      </div>
+      <span class="toolbar-divider"></span>
+      <details id="chart-type-menu" class="chart-control-menu">
+        <summary class="toolbar-button icon-only" aria-label="K线图" title="K线图">${candlesChartIcon}<span id="chart-type-label" class="visually-hidden">K线</span></summary>
+        <div class="chart-control-menu-panel chart-type-options" aria-label="选择图表类型">
+          <button type="button" data-chart-type="bars" aria-label="美国线">${barsChartIcon}<span>美国线</span></button>
+          <button type="button" data-chart-type="candles" aria-label="K线图">${candlesChartIcon}<span>K线图</span></button>
+          <button type="button" data-chart-type="line" aria-label="线形图">${lineChartIcon}<span>线形图</span></button>
+          <button type="button" data-chart-type="area" aria-label="面积图">${areaChartIcon}<span>面积图</span></button>
+          <button type="button" data-chart-type="baseline" aria-label="基准线">${baselineChartIcon}<span>基准线</span></button>
+        </div>
+      </details>
+      <span class="toolbar-divider"></span>
+      <div class="adjustment-switcher" aria-label="复权方式">
+        <button data-adjustment="none" class="toolbar-button active">不复权</button>
+        <button data-adjustment="qfq" class="toolbar-button">前复权</button>
+      </div>
+      <button id="volume-toggle" class="toolbar-button" aria-label="显示或隐藏成交量">${icons.indicator}<span>成交量</span></button>
+      <details class="indicator-menu">
+        <summary class="toolbar-button" aria-label="技术指标">${icons.indicator}<span>指标</span></summary>
+        <div class="indicator-menu-panel">
+          <button data-indicator="ma" aria-pressed="false"><strong>MA</strong><span>移动平均线 · 20</span></button>
+          <button data-indicator="ema" aria-pressed="false"><strong>EMA</strong><span>指数移动平均 · 20</span></button>
+          <button data-indicator="boll" aria-pressed="false"><strong>BOLL</strong><span>布林带 · 20, 2</span></button>
+          <button data-indicator="macd" aria-pressed="false"><strong>MACD</strong><span>12, 26, 9 · 独立副图</span></button>
+          <button data-indicator="rsi" aria-pressed="false"><strong>RSI</strong><span>相对强弱 · 14</span></button>
+        </div>
+      </details>
+      <div class="toolbar-spacer"></div>
+      <button id="status" class="connection-status" aria-label="主站测速" title="点击重新测速"><i></i><span>正在连接</span></button>
+      <button id="watchlist-toggle" class="toolbar-button" aria-label="打开自选列表">自选</button>
+      <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
+      <button id="fit-chart" class="toolbar-button" aria-label="适应全部数据">${icons.fullscreen}</button>
+      <details id="chart-capture-menu" class="chart-control-menu chart-capture-menu">
+        <summary class="toolbar-button icon-only" aria-label="生成快照" title="生成快照">${icons.camera}</summary>
+        <div class="chart-control-menu-panel" aria-label="生成快照">
+          <button id="save-chart" type="button" aria-label="下载图片">${icons.download}<span>下载图片</span></button>
+          <button id="copy-chart" type="button" aria-label="复制图片">${icons.copy}<span>复制图片</span></button>
+        </div>
+      </details>
+    </div>
+
+    <div id="symbol-dialog-layer" class="symbol-dialog-layer" hidden>
+      <section id="symbol-search-dialog" class="symbol-search-dialog" role="dialog" aria-modal="true" aria-labelledby="symbol-dialog-title">
+        <header class="symbol-dialog-header">
+          <h2 id="symbol-dialog-title">商品代码搜索</h2>
+          <button id="symbol-dialog-close" type="button" aria-label="关闭代码搜索">${icons.close}</button>
+        </header>
+        <label class="symbol-dialog-search">
+          ${icons.search}
+          <input id="symbol-dialog-input" type="search" placeholder="搜索代码、名称或拼音" autocomplete="off" aria-controls="symbol-results" />
+        </label>
+        <nav class="symbol-category-tabs" aria-label="证券分类">
+          <button type="button" data-symbol-category="all" aria-selected="true">全部</button>
+          <button type="button" data-symbol-category="stock" aria-selected="false">股票</button>
+          <button type="button" data-symbol-category="index" aria-selected="false">指数</button>
+          <button type="button" data-symbol-category="etf" aria-selected="false">ETF</button>
+        </nav>
+        <div class="symbol-source-row">
+          <button id="symbol-source-trigger" class="symbol-source-trigger" type="button" aria-haspopup="menu" aria-expanded="false">全部来源</button>
+          <div id="symbol-source-menu" class="symbol-source-menu" role="menu" hidden></div>
+          <span id="symbol-result-count"></span>
+        </div>
+        <div id="symbol-results" class="symbol-results" role="listbox"></div>
+        <footer class="symbol-dialog-footer">输入代码、名称或拼音查找证券，点击结果即可切换图表</footer>
+      </section>
+    </div>
+
+    <div class="workspace">
+      <aside class="drawing-toolbar" aria-label="绘图工具栏">
+        <button id="crosshair-tool" class="rail-button active" aria-label="十字线">${icons.crosshair}</button>
+        <span class="rail-divider"></span>
+        <details class="drawing-tool-menu">
+          <summary class="rail-button" aria-label="线条工具" title="线条工具">${icons.trend}</summary>
+          <div class="drawing-tool-menu-panel">
+            <div class="drawing-tool-menu-section">线条</div>
+            <button data-drawing-tool="TrendLine" aria-label="趋势线" title="趋势线">${icons.trend}<span>趋势线</span></button>
+            <button data-drawing-tool="Ray" aria-label="射线" title="射线">${icons.ray}<span>射线</span></button>
+            <button data-drawing-tool="Arrow" aria-label="箭头" title="箭头">${icons.arrow}<span>箭头</span></button>
+            <button data-drawing-tool="ExtendedLine" aria-label="延长线" title="延长线">${icons.extendedLine}<span>延长线</span></button>
+            <button data-drawing-tool="HorizontalLine" aria-label="水平线" title="水平线">${icons.horizontal}<span>水平线</span></button>
+            <button data-drawing-tool="HorizontalRay" aria-label="水平射线" title="水平射线">${icons.horizontalRay}<span>水平射线</span></button>
+            <button data-drawing-tool="VerticalLine" aria-label="垂直线" title="垂直线">${icons.verticalLine}<span>垂直线</span></button>
+            <button data-drawing-tool="CrossLine" aria-label="十字线" title="十字线">${icons.crossLine}<span>十字线</span></button>
+            <div class="drawing-tool-menu-separator"></div>
+            <div class="drawing-tool-menu-section">价格线</div>
+            <button id="previous-close-toggle" class="price-line-menu-item" type="button" aria-label="昨收线" aria-pressed="true">${icons.horizontal}<span>昨收线</span><i></i></button>
+            <button id="edit-cost-price" class="price-line-menu-item" type="button" aria-label="成本线">${icons.priceLine}<span>成本线</span></button>
+            <button id="add-custom-price" class="price-line-menu-item" type="button" aria-label="自定义价格线">${icons.plus}<span>自定义价格线</span></button>
+            <div class="drawing-tool-menu-separator"></div>
+            <div class="drawing-tool-menu-section">通道</div>
+            <button data-drawing-tool="ParallelChannel" aria-label="平行通道" title="平行通道">${icons.channel}<span>平行通道</span></button>
+            <div class="drawing-tool-menu-separator"></div>
+            <div class="drawing-tool-menu-section">标注和手绘</div>
+            <button data-drawing-tool="Callout" aria-label="标注框" title="标注框">${icons.callout}<span>标注框</span></button>
+            <button data-drawing-tool="Highlighter" aria-label="荧光笔" title="荧光笔">${icons.highlighter}<span>荧光笔</span></button>
+            <div class="drawing-tool-menu-separator"></div>
+            <div class="drawing-tool-menu-section">几何形状</div>
+            <button data-drawing-tool="Triangle" aria-label="三角形" title="三角形">${icons.triangle}<span>三角形</span></button>
+            <button data-drawing-tool="Path" aria-label="多段路径" title="多段路径">${icons.path}<span>多段路径</span></button>
+          </div>
+        </details>
+        <button class="rail-button" data-drawing-tool="Rectangle" aria-label="矩形" title="矩形">${icons.rectangle}</button>
+        <button class="rail-button" data-drawing-tool="Circle" aria-label="圆形" title="圆形">${icons.circle}</button>
+        <button class="rail-button" data-drawing-tool="UpArrow" aria-label="向上箭头" title="向上箭头">${icons.upArrow}</button>
+        <button id="marker-tool" class="rail-button" aria-label="添加图表标记" title="添加标记">${icons.marker}</button>
+        <button class="rail-button" data-drawing-tool="FibRetracement" aria-label="斐波那契回撤" title="斐波那契回撤">${icons.fib}</button>
+        <button class="rail-button" data-drawing-tool="Brush" aria-label="笔刷" title="笔刷">${icons.brush}</button>
+        <button class="rail-button" data-drawing-tool="Text" aria-label="文字" title="文字">${icons.text}</button>
+        <details class="drawing-tool-menu">
+          <summary class="rail-button" aria-label="测量与仓位工具" title="测量与仓位工具">${icons.ruler}</summary>
+          <div class="drawing-tool-menu-panel">
+            <div class="drawing-tool-menu-section">测量</div>
+            <button data-drawing-tool="PriceRange" aria-label="价格区间" title="价格区间">${icons.ruler}<span>价格区间</span></button>
+            <div class="drawing-tool-menu-separator"></div>
+            <div class="drawing-tool-menu-section">预测和测量</div>
+            <button data-drawing-tool="LongShortPosition" aria-label="多空仓位" title="多空仓位">${icons.position}<span>多空仓位</span></button>
+          </div>
+        </details>
+        <span class="rail-divider"></span>
+        <button id="zoom-tool" class="rail-button" aria-label="放大">${icons.zoom}</button>
+        <button id="magnet-tool" class="rail-button" aria-label="磁铁">${icons.magnet}</button>
+        <button id="lock-drawings" class="rail-button" aria-label="锁定绘图" title="锁定绘图">${icons.lock}</button>
+        <button id="undo-drawing" class="rail-button" aria-label="撤销绘图操作" title="撤销" disabled>${icons.undo}</button>
+        <button id="redo-drawing" class="rail-button" aria-label="重做绘图操作" title="重做" disabled>${icons.redo}</button>
+        <button id="drawing-manager-toggle" class="rail-button" aria-label="绘图对象管理" title="对象管理">${icons.layers}</button>
+        <div class="rail-spacer"></div>
+        <button id="clear-drawings" class="rail-button" aria-label="移除全部绘图" title="移除全部绘图">${icons.trash}</button>
+      </aside>
+
+      <main class="chart-stage">
+        <div class="chart-meta">
+          <div class="ohlc-legend" id="ohlc-legend">
+            <span id="instrument-logo" class="instrument-logo"></span>
+            <strong id="legend-symbol">浦发银行 · 1天 · SH</strong>
+            <span id="legend-values" class="legend-values">开=-- 高=-- 低=-- 收=--</span>
+          </div>
+        </div>
+        <div id="chart" aria-label="浦发银行日线图"></div>
+        <div id="drawing-mode-hint" class="drawing-mode-hint" hidden></div>
+        <div id="drawing-text-editor" class="drawing-text-editor" hidden>
+          <input id="drawing-text-input" aria-label="图表文字" maxlength="80" placeholder="输入图表文字" />
+          <button id="place-drawing-text">放置</button>
+        </div>
+        <div id="price-line-editor" class="price-line-editor-popover" hidden>
+          <strong id="price-line-editor-title">设置成本线</strong>
+          <input id="price-line-input" type="number" min="0" step="any" inputmode="decimal" placeholder="输入价格" aria-label="价格" />
+          <button id="confirm-price-line" type="button">确定</button>
+          <button id="cancel-price-line" type="button" aria-label="取消">${icons.close}</button>
+          <p id="price-line-message" hidden></p>
+        </div>
+        <div id="marker-editor" class="marker-editor-popover" hidden>
+          <header><strong id="marker-editor-title">添加标记</strong><span id="marker-editor-time"></span></header>
+          <input id="marker-text" maxlength="80" placeholder="标记文字（可选）" aria-label="标记文字" />
+          <select id="marker-shape" aria-label="标记形状">
+            <option value="arrowUp">向上箭头</option><option value="arrowDown">向下箭头</option>
+            <option value="circle">圆点</option><option value="square">方块</option>
+          </select>
+          <select id="marker-position" aria-label="标记位置">
+            <option value="belowBar">K线下方</option><option value="aboveBar">K线上方</option><option value="inBar">K线内部</option>
+          </select>
+          <label class="marker-color"><span>颜色</span><input id="marker-color" type="color" value="#2962ff" aria-label="标记颜色" /></label>
+          <label class="marker-size"><span>大小</span><input id="marker-size" type="range" min="1" max="3" step="1" value="1" aria-label="标记大小" /></label>
+          <footer>
+            <button id="delete-marker" class="danger" type="button" hidden>删除</button>
+            <span></span><button id="cancel-marker" type="button">取消</button><button id="confirm-marker" class="primary" type="button">保存</button>
+          </footer>
+          <p id="marker-message" hidden></p>
+        </div>
+        <div id="drawing-properties" class="drawing-properties" hidden>
+          <span class="drawing-property-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <strong id="drawing-properties-name">绘图</strong>
+          <label class="drawing-property-color" title="颜色">
+            <input id="drawing-color" type="color" value="#089981" aria-label="绘图颜色" />
+          </label>
+          <details class="drawing-property-control">
+            <summary title="粗细"><span class="drawing-line-sample"></span><output id="drawing-size-value">2px</output></summary>
+            <label class="drawing-property-popover"><span id="drawing-size-label">粗细</span><input id="drawing-size" type="range" min="1" max="5" step="1" value="2" aria-label="绘图大小" /></label>
+          </details>
+          <details class="drawing-property-control">
+            <summary title="透明度"><span class="drawing-opacity-sample"></span><output id="drawing-opacity-value">100%</output></summary>
+            <label class="drawing-property-popover"><span>透明度</span><input id="drawing-opacity" type="range" min="5" max="100" step="5" value="100" aria-label="绘图透明度" /></label>
+          </details>
+          <button id="delete-selected-drawing" class="drawing-property-button danger" aria-label="删除所选绘图" title="删除">${icons.trash}</button>
+          <button id="close-drawing-properties" class="drawing-property-button" aria-label="关闭绘图属性" title="关闭">${icons.close}</button>
+        </div>
+        <div class="chart-brand" aria-label="Trade Flow">TF</div>
+        <details id="price-scale-controls" class="price-scale-controls">
+          <summary class="price-scale-gear" aria-label="价格轴设置" title="价格轴设置">${priceScaleGearIcon}</summary>
+          <div class="price-scale-menu" aria-label="价格轴设置">
+            <div class="control-menu-title">价格轴</div>
+            <button type="button" data-price-scale="normal"><span>常规</span><i></i></button>
+            <button type="button" data-price-scale="logarithmic"><span>对数</span><i></i></button>
+            <button type="button" data-price-scale="percentage"><span>百分比</span><i></i></button>
+            <button type="button" data-price-scale="indexed"><span>基准 100</span><i></i></button>
+            <div class="control-menu-separator"></div>
+            <button id="price-scale-auto" type="button"><span>自动缩放</span><i></i></button>
+            <button id="price-scale-invert" type="button"><span>反转价格轴</span><i></i></button>
+            <button id="price-scale-manual" type="button"><span>设置可见范围…</span></button>
+            <button id="price-scale-reset" type="button"><span>重置价格轴</span></button>
+          </div>
+        </details>
+        <div id="price-range-editor" class="price-range-editor" hidden>
+          <strong>价格范围</strong><input id="price-range-min" type="number" step="any" placeholder="最低" aria-label="最低价格" />
+          <input id="price-range-max" type="number" step="any" placeholder="最高" aria-label="最高价格" />
+          <button id="confirm-price-range" type="button">应用</button><button id="cancel-price-range" type="button">取消</button>
+          <p id="price-range-message" hidden></p>
+        </div>
+        <nav id="time-navigation" class="time-navigation" aria-label="时间导航">
+          <button id="time-pan-left" type="button" aria-label="向前浏览" title="向前浏览">‹</button>
+          <button id="time-pan-right" type="button" aria-label="向后浏览" title="向后浏览">›</button>
+          <span></span>
+          <button data-time-range="1m" type="button">1月</button><button data-time-range="3m" type="button">3月</button>
+          <button data-time-range="6m" type="button">6月</button><button data-time-range="ytd" type="button">今年</button>
+          <button data-time-range="1y" type="button">1年</button><button data-time-range="all" type="button">全部</button>
+          <label><span class="visually-hidden">定位日期</span><input id="go-to-date" type="date" aria-label="定位日期" /></label>
+          <button id="go-to-date-button" type="button">转到</button><button id="go-to-latest" type="button">最新</button>
+        </nav>
+        <div id="volume-legend" class="volume-legend" hidden>成交量 <span>--</span></div>
+        <aside id="watchlist-panel" class="watchlist-panel" hidden>
+          <header><strong>自选</strong><span>本地保存</span></header>
+          <div id="watchlist-items" class="watchlist-items"></div>
+          <p id="watchlist-empty">点击顶部星标添加当前证券</p>
+        </aside>
+        <aside id="drawing-manager" class="drawing-manager" hidden>
+          <header><strong>对象树</strong><button id="close-drawing-manager" aria-label="关闭对象树">${icons.close}</button></header>
+          <div id="drawing-manager-items" class="drawing-manager-items"></div>
+          <p id="drawing-manager-empty">当前证券还没有绘图</p>
+        </aside>
+        <div id="loading-layer" class="loading-layer"><span></span><span></span><span></span></div>
+        <div id="chart-error" class="chart-error" hidden></div>
+        <div id="chart-toast" class="chart-toast" role="status" hidden></div>
+      </main>
+    </div>
+  </div>
+`;
+
+const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
+  autoSize: true,
+  layout: {
+    background: { type: ColorType.Solid, color: '#131722' },
+    textColor: '#787b86',
+    fontSize: 11,
+    panes: { separatorColor: 'rgba(148, 163, 184, .14)', separatorHoverColor: 'rgba(148, 163, 184, .18)', enableResize: true },
+  },
+  grid: { vertLines: { color: '#242834' }, horzLines: { color: '#242834' } },
+  crosshair: {
+    mode: CrosshairMode.Normal,
+    vertLine: { color: '#666b74', width: 1, style: 3, labelBackgroundColor: '#363a40' },
+    horzLine: { color: '#666b74', width: 1, style: 3, labelBackgroundColor: '#363a40' },
+  },
+  timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 4, barSpacing: 3.5, minBarSpacing: 1.2 },
+  rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 58, mode: priceScaleModes[currentPriceScale], scaleMargins: { top: 0.08, bottom: 0.08 } },
+  localization: {
+    locale: 'zh-CN',
+    priceFormatter: (price: number) => price.toFixed(2),
+    timeFormatter: (time: Time) => formatChartTime(time),
+  },
+  handleScroll: true,
+  handleScale: true,
+});
+
+const candleSeries = chart.addSeries(CandlestickSeries, {
+  upColor: '#089981', downColor: '#f23645', borderVisible: false,
+  wickUpColor: '#089981', wickDownColor: '#f23645', priceLineVisible: true,
+  priceLineColor: '#089981', lastValueVisible: true,
+}, 0);
+const barSeries = chart.addSeries(BarSeries, {
+  upColor: '#089981', downColor: '#f23645', thinBars: true,
+  priceLineVisible: true, lastValueVisible: true, visible: false,
+}, 0);
+const closeLineSeries = chart.addSeries(LineSeries, {
+  color: '#2962ff', lineWidth: 2, priceLineVisible: true, lastValueVisible: true, visible: false,
+}, 0);
+const areaSeries = chart.addSeries(AreaSeries, {
+  lineColor: '#2962ff', lineWidth: 2, topColor: 'rgba(41, 98, 255, .32)', bottomColor: 'rgba(41, 98, 255, .03)',
+  priceLineVisible: true, lastValueVisible: true, visible: false,
+}, 0);
+const baselineSeries = chart.addSeries(BaselineSeries, {
+  baseValue: { type: 'price', price: 0 },
+  topLineColor: '#089981', topFillColor1: 'rgba(8, 153, 129, .28)', topFillColor2: 'rgba(8, 153, 129, .03)',
+  bottomLineColor: '#f23645', bottomFillColor1: 'rgba(242, 54, 69, .03)', bottomFillColor2: 'rgba(242, 54, 69, .28)',
+  priceLineVisible: true, lastValueVisible: true, visible: false,
+}, 0);
+const volumeSeries = chart.addSeries(HistogramSeries, {
+  priceFormat: { type: 'volume' }, priceScaleId: 'volume', lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+const maSeries = chart.addSeries(LineSeries, {
+  color: '#2962ff', lineWidth: 1, lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+const emaSeries = chart.addSeries(LineSeries, {
+  color: '#f6a623', lineWidth: 1, lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+const bollUpperSeries = chart.addSeries(LineSeries, {
+  color: '#9c6ade', lineWidth: 1, lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+const bollMiddleSeries = chart.addSeries(LineSeries, {
+  color: '#b0bec5', lineWidth: 1, lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+const bollLowerSeries = chart.addSeries(LineSeries, {
+  color: '#9c6ade', lineWidth: 1, lastValueVisible: false, priceLineVisible: false, visible: false,
+}, 0);
+const bollBand = new BollingerBandPrimitive();
+candleSeries.attachPrimitive(bollBand);
+const seriesMarkerApis: Record<ChartType, ISeriesMarkersPluginApi<Time>> = {
+  candles: createSeriesMarkers(candleSeries, [], { autoScale: true, zOrder: 'top' }),
+  bars: createSeriesMarkers(barSeries, [], { autoScale: true, zOrder: 'top' }),
+  line: createSeriesMarkers(closeLineSeries, [], { autoScale: true, zOrder: 'top' }),
+  area: createSeriesMarkers(areaSeries, [], { autoScale: true, zOrder: 'top' }),
+  baseline: createSeriesMarkers(baselineSeries, [], { autoScale: true, zOrder: 'top' }),
+};
+let bollSignalMarkers: SeriesMarker<Time>[] = [];
+let macdPane: {
+  pane: IPaneApi<Time>;
+  dif: ISeriesApi<'Line', Time>;
+  dea: ISeriesApi<'Line', Time>;
+  histogram: ISeriesApi<'Histogram', Time>;
+} | null = null;
+let rsiPane: { pane: IPaneApi<Time>; line: ISeriesApi<'Line', Time> } | null = null;
+
+const lineTools = createLineToolsPlugin(chart, candleSeries);
+lineTools.registerLineTool('TrendLine', LineToolTrendLine);
+lineTools.registerLineTool('Ray', LineToolRay);
+lineTools.registerLineTool('Arrow', LineToolArrow);
+lineTools.registerLineTool('ExtendedLine', LineToolExtendedLine);
+lineTools.registerLineTool('HorizontalLine', LineToolHorizontalLine);
+lineTools.registerLineTool('HorizontalRay', LineToolHorizontalRay);
+lineTools.registerLineTool('VerticalLine', LineToolVerticalLine);
+lineTools.registerLineTool('CrossLine', LineToolCrossLine);
+lineTools.registerLineTool('Callout', LineToolCallout);
+lineTools.registerLineTool('Rectangle', LineToolRectangle);
+lineTools.registerLineTool('Circle', LineToolCircle);
+lineTools.registerLineTool('ParallelChannel', LineToolParallelChannel);
+lineTools.registerLineTool('FibRetracement', LineToolFibRetracement);
+lineTools.registerLineTool('Brush', LineToolBrush);
+lineTools.registerLineTool('Highlighter', LineToolHighlighter);
+lineTools.registerLineTool('Triangle', LineToolTriangle);
+lineTools.registerLineTool('Path', LineToolPath);
+lineTools.registerLineTool('Text', LineToolText);
+lineTools.registerLineTool('PriceRange', LineToolPriceRange);
+lineTools.registerLineTool('LongShortPosition', LineToolLongShortPosition);
+lineTools.registerLineTool('UpArrow' as LineToolType, LineToolUpArrow as never);
+lineTools.setTimeFormatter((time) => formatChartTime(time as Time));
+
+createTextWatermark(chart.panes()[0], {
+  horzAlign: 'left', vertAlign: 'bottom',
+  lines: [{ text: 'TF', color: 'rgba(235, 238, 245, 0.13)', fontSize: 24 }],
+});
+
+const input = document.querySelector<HTMLInputElement>('#search')!;
+const symbolDialogLayer = document.querySelector<HTMLDivElement>('#symbol-dialog-layer')!;
+const symbolDialog = document.querySelector<HTMLElement>('#symbol-search-dialog')!;
+const symbolDialogInput = document.querySelector<HTMLInputElement>('#symbol-dialog-input')!;
+const symbolResults = document.querySelector<HTMLDivElement>('#symbol-results')!;
+const symbolSourceTrigger = document.querySelector<HTMLButtonElement>('#symbol-source-trigger')!;
+const symbolSourceMenu = document.querySelector<HTMLDivElement>('#symbol-source-menu')!;
+const symbolResultCount = document.querySelector<HTMLSpanElement>('#symbol-result-count')!;
+const status = document.querySelector<HTMLButtonElement>('#status')!;
+const loadingLayer = document.querySelector<HTMLDivElement>('#loading-layer')!;
+const errorLayer = document.querySelector<HTMLDivElement>('#chart-error')!;
+const legendValues = document.querySelector<HTMLSpanElement>('#legend-values')!;
+const volumeLegend = document.querySelector<HTMLDivElement>('#volume-legend span')!;
+const drawingModeHint = document.querySelector<HTMLDivElement>('#drawing-mode-hint')!;
+const drawingTextEditor = document.querySelector<HTMLDivElement>('#drawing-text-editor')!;
+const drawingTextInput = document.querySelector<HTMLInputElement>('#drawing-text-input')!;
+const drawingProperties = document.querySelector<HTMLDivElement>('#drawing-properties')!;
+const drawingPropertiesName = document.querySelector<HTMLElement>('#drawing-properties-name')!;
+const drawingColor = document.querySelector<HTMLInputElement>('#drawing-color')!;
+const drawingSize = document.querySelector<HTMLInputElement>('#drawing-size')!;
+const drawingSizeLabel = document.querySelector<HTMLSpanElement>('#drawing-size-label')!;
+const drawingSizeValue = document.querySelector<HTMLOutputElement>('#drawing-size-value')!;
+const drawingOpacity = document.querySelector<HTMLInputElement>('#drawing-opacity')!;
+const drawingOpacityValue = document.querySelector<HTMLOutputElement>('#drawing-opacity-value')!;
+const crosshairTool = document.querySelector<HTMLButtonElement>('#crosshair-tool')!;
+const instrumentLogo = document.querySelector<HTMLSpanElement>('#instrument-logo')!;
+const legendSymbol = document.querySelector<HTMLElement>('#legend-symbol')!;
+const chartStage = document.querySelector<HTMLElement>('.chart-stage')!;
+const watchlistAdd = document.querySelector<HTMLButtonElement>('#watchlist-add')!;
+const watchlistPanel = document.querySelector<HTMLElement>('#watchlist-panel')!;
+const watchlistItems = document.querySelector<HTMLDivElement>('#watchlist-items')!;
+const watchlistEmpty = document.querySelector<HTMLParagraphElement>('#watchlist-empty')!;
+const undoDrawing = document.querySelector<HTMLButtonElement>('#undo-drawing')!;
+const redoDrawing = document.querySelector<HTMLButtonElement>('#redo-drawing')!;
+const drawingManager = document.querySelector<HTMLElement>('#drawing-manager')!;
+const drawingManagerItems = document.querySelector<HTMLDivElement>('#drawing-manager-items')!;
+const drawingManagerEmpty = document.querySelector<HTMLParagraphElement>('#drawing-manager-empty')!;
+const chartTypeMenu = document.querySelector<HTMLDetailsElement>('#chart-type-menu')!;
+const chartTypeSummary = chartTypeMenu.querySelector<HTMLElement>('summary')!;
+const previousCloseToggle = document.querySelector<HTMLButtonElement>('#previous-close-toggle')!;
+const priceLineEditor = document.querySelector<HTMLDivElement>('#price-line-editor')!;
+const priceLineEditorTitle = document.querySelector<HTMLElement>('#price-line-editor-title')!;
+const priceLineInput = document.querySelector<HTMLInputElement>('#price-line-input')!;
+const priceLineMessage = document.querySelector<HTMLParagraphElement>('#price-line-message')!;
+const chartToast = document.querySelector<HTMLDivElement>('#chart-toast')!;
+const markerTool = document.querySelector<HTMLButtonElement>('#marker-tool')!;
+const markerEditor = document.querySelector<HTMLDivElement>('#marker-editor')!;
+const markerEditorTitle = document.querySelector<HTMLElement>('#marker-editor-title')!;
+const markerEditorTime = document.querySelector<HTMLElement>('#marker-editor-time')!;
+const markerText = document.querySelector<HTMLInputElement>('#marker-text')!;
+const markerShape = document.querySelector<HTMLSelectElement>('#marker-shape')!;
+const markerPosition = document.querySelector<HTMLSelectElement>('#marker-position')!;
+const markerColor = document.querySelector<HTMLInputElement>('#marker-color')!;
+const markerSize = document.querySelector<HTMLInputElement>('#marker-size')!;
+const markerMessage = document.querySelector<HTMLParagraphElement>('#marker-message')!;
+const deleteMarkerButton = document.querySelector<HTMLButtonElement>('#delete-marker')!;
+const priceScaleControls = document.querySelector<HTMLDetailsElement>('#price-scale-controls')!;
+const priceRangeEditor = document.querySelector<HTMLDivElement>('#price-range-editor')!;
+const priceRangeMin = document.querySelector<HTMLInputElement>('#price-range-min')!;
+const priceRangeMax = document.querySelector<HTMLInputElement>('#price-range-max')!;
+const priceRangeMessage = document.querySelector<HTMLParagraphElement>('#price-range-message')!;
+const goToDateInput = document.querySelector<HTMLInputElement>('#go-to-date')!;
+const drawingButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-drawing-tool]')];
+const drawingMenus = [...document.querySelectorAll<HTMLDetailsElement>('.drawing-tool-menu')];
+const drawingPropertyControls = [...drawingProperties.querySelectorAll<HTMLDetailsElement>('.drawing-property-control')];
+let pendingTextButton: HTMLButtonElement | null = null;
+const SYMBOL_RESULT_PAGE_SIZE = 80;
+let matchingSymbolResults: MarketSymbol[] = [];
+let visibleSymbolResults: MarketSymbol[] = [];
+let activeSymbolResult = -1;
+let activeSymbolCategory: MarketSearchCategory = 'all';
+let activeSymbolSource: MarketSearchSource = 'all';
+let renderedPriceLines: IPriceLine[] = [];
+let chartToastTimer: number | undefined;
+let priceLineEditorMode: 'cost' | 'custom' | null = null;
+
+const symbolLogoObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const image = entry.target as HTMLImageElement;
+    const source = image.dataset.logoSrc;
+    if (source) image.src = source;
+    symbolLogoObserver.unobserve(image);
+  }
+}, { root: symbolResults, rootMargin: '96px 0px' });
+
+function persistChartPreferences() {
+  chartPreferences.chartType = currentChartType;
+  chartPreferences.priceScale = currentPriceScale;
+  chartPreferences.priceScaleInverted = priceScaleInverted;
+  chartPreferences.paneOrder = [...secondaryPaneOrder];
+  chartPreferences.activeSeries = [
+    ...(volumeVisible ? ['volume' as const] : []),
+    ...activeIndicators,
+  ];
+  chartPreferences.hiddenSeries = [...hiddenSeries].filter((series) => chartPreferences.activeSeries.includes(series));
+  chartPreferences.mainSeriesOrder = [...mainSeriesOrder];
+  if (!saveChartPreferences(localStorage, chartPreferences)) showChartToast('图表设置未能保存');
+}
+
+function showChartToast(message: string) {
+  if (chartToastTimer !== undefined) window.clearTimeout(chartToastTimer);
+  chartToast.textContent = message;
+  chartToast.hidden = false;
+  chartToastTimer = window.setTimeout(() => {
+    chartToast.hidden = true;
+    chartToastTimer = undefined;
+  }, 2200);
+}
+
+function currentPriceLineSettings(): PriceLineSettings {
+  const existing = chartPreferences.priceLines[currentSymbol.symbol];
+  if (existing) return existing;
+  const created: PriceLineSettings = { previousClose: true, cost: null, custom: [] };
+  chartPreferences.priceLines[currentSymbol.symbol] = created;
+  return created;
+}
+
+function clearRenderedPriceLines() {
+  for (const line of renderedPriceLines) candleSeries.removePriceLine(line);
+  renderedPriceLines = [];
+}
+
+function renderPriceLines() {
+  clearRenderedPriceLines();
+  const settings = currentPriceLineSettings();
+  const previousClose = currentQuote?.previousClose
+    ?? previousCloseFromBars(currentBars, currentResolution);
+  if (settings.previousClose && previousClose !== null && previousClose > 0) {
+    renderedPriceLines.push(candleSeries.createPriceLine({
+      price: previousClose,
+      color: '#787b86',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: '昨收',
+    }));
+  }
+  if (settings.cost !== null) {
+    renderedPriceLines.push(candleSeries.createPriceLine({
+      price: settings.cost,
+      color: '#f6a623',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: '成本',
+    }));
+  }
+  for (const [index, price] of settings.custom.entries()) {
+    renderedPriceLines.push(candleSeries.createPriceLine({
+      price,
+      color: '#2962ff',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: `价位 ${index + 1}`,
+    }));
+  }
+}
+
+function syncPriceLineMenu() {
+  const settings = currentPriceLineSettings();
+  previousCloseToggle.classList.toggle('active', settings.previousClose);
+  previousCloseToggle.setAttribute('aria-pressed', String(settings.previousClose));
+  document.querySelector<HTMLButtonElement>('#edit-cost-price')!.classList.toggle('active', settings.cost !== null);
+}
+
+function openPriceLineEditor(mode: 'cost' | 'custom') {
+  priceLineEditorMode = mode;
+  const settings = currentPriceLineSettings();
+  priceLineEditorTitle.textContent = mode === 'cost' ? '设置成本线' : '添加自定义价格线';
+  priceLineInput.value = mode === 'cost' && settings.cost !== null ? String(settings.cost) : '';
+  priceLineMessage.hidden = true;
+  priceLineEditor.hidden = false;
+  for (const menu of drawingMenus) menu.open = false;
+  requestAnimationFrame(() => priceLineInput.focus());
+}
+
+function closePriceLineEditor() {
+  priceLineEditorMode = null;
+  priceLineEditor.hidden = true;
+  priceLineMessage.hidden = true;
+}
+
+function commitPriceLineEditor() {
+  if (!priceLineEditorMode) return;
+  const value = Number(priceLineInput.value);
+  if (!Number.isFinite(value) || value <= 0) {
+    priceLineMessage.textContent = '请输入大于 0 的有效价格';
+    priceLineMessage.hidden = false;
+    priceLineInput.focus();
+    return;
+  }
+  const settings = currentPriceLineSettings();
+  if (priceLineEditorMode === 'cost') settings.cost = value;
+  else if (!settings.custom.includes(value)) settings.custom.push(value);
+  persistChartPreferences();
+  renderPriceLines();
+  syncPriceLineMenu();
+  renderDrawingManager();
+  closePriceLineEditor();
+}
+
+function setPrimarySeriesData() {
+  candleSeries.setData(currentBars.map((bar) => candlePoint(bar)));
+  const ohlc = currentBars.map((bar) => ({ ...bar, time: bar.time as UTCTimestamp }));
+  const closes = currentBars.map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.close }));
+  const candlesVisible = primarySeriesVisible && currentChartType === 'candles';
+  candleSeries.applyOptions({
+    upColor: candlesVisible ? '#089981' : 'rgba(0, 0, 0, 0)',
+    downColor: candlesVisible ? '#f23645' : 'rgba(0, 0, 0, 0)',
+    wickUpColor: candlesVisible ? '#089981' : 'rgba(0, 0, 0, 0)',
+    wickDownColor: candlesVisible ? '#f23645' : 'rgba(0, 0, 0, 0)',
+    priceLineVisible: candlesVisible,
+    lastValueVisible: candlesVisible,
+  });
+  barSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'bars' });
+  closeLineSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'line' });
+  areaSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'area' });
+  baselineSeries.applyOptions({
+    visible: primarySeriesVisible && currentChartType === 'baseline',
+    baseValue: { type: 'price', price: currentBars[0]?.close ?? 0 },
+  });
+  barSeries.setData(currentChartType === 'bars' ? ohlc : []);
+  closeLineSeries.setData(currentChartType === 'line' ? closes : []);
+  areaSeries.setData(currentChartType === 'area' ? closes : []);
+  baselineSeries.setData(currentChartType === 'baseline' ? closes : []);
+}
+
+function updatePrimarySeries(bar: Bar) {
+  candleSeries.update(candlePoint(bar));
+  if (currentChartType === 'bars') barSeries.update({ ...bar, time: bar.time as UTCTimestamp });
+  const close = { time: bar.time as UTCTimestamp, value: bar.close };
+  if (currentChartType === 'line') closeLineSeries.update(close);
+  if (currentChartType === 'area') areaSeries.update(close);
+  if (currentChartType === 'baseline') baselineSeries.update(close);
+}
+
+function applyChartType(chartType: ChartType, preserveRange = true) {
+  const range = preserveRange ? chart.timeScale().getVisibleLogicalRange() : null;
+  currentChartType = chartType;
+  setPrimarySeriesData();
+  refreshIndicators();
+  renderSeriesMarkers();
+  applyMainSeriesOrder();
+  chartTypeSummary.innerHTML = `${chartTypeIcons[chartType]}<span id="chart-type-label" class="visually-hidden">${chartTypeLabels[chartType]}</span>`;
+  chartTypeSummary.setAttribute('aria-label', chartTypeLabels[chartType]);
+  chartTypeSummary.title = chartTypeLabels[chartType];
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-chart-type]')) {
+    const active = button.dataset.chartType === chartType;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+  }
+  if (range) requestAnimationFrame(() => chart.timeScale().setVisibleLogicalRange(range));
+  persistChartPreferences();
+}
+
+function applyPriceScale(setting: PriceScaleSetting) {
+  currentPriceScale = setting;
+  chart.priceScale('right').applyOptions({ mode: priceScaleModes[setting], invertScale: priceScaleInverted });
+  chart.priceScale('right').setAutoScale(priceScaleAuto);
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-price-scale]')) {
+    const active = button.dataset.priceScale === setting;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+  const autoButton = document.querySelector<HTMLButtonElement>('#price-scale-auto')!;
+  autoButton.classList.toggle('active', priceScaleAuto);
+  autoButton.setAttribute('aria-pressed', String(priceScaleAuto));
+  const invertButton = document.querySelector<HTMLButtonElement>('#price-scale-invert')!;
+  invertButton.classList.toggle('active', priceScaleInverted);
+  invertButton.setAttribute('aria-pressed', String(priceScaleInverted));
+  persistChartPreferences();
+}
+
+function openManualPriceRange() {
+  if (currentBars.length === 0) { showChartToast('图表暂无可用价格'); return; }
+  const range = chart.priceScale('right').getVisibleRange();
+  const prices = currentBars.flatMap((bar) => [bar.low, bar.high]);
+  priceRangeMin.value = formatPrice(range?.from ?? Math.min(...prices));
+  priceRangeMax.value = formatPrice(range?.to ?? Math.max(...prices));
+  priceRangeMessage.hidden = true;
+  priceRangeEditor.hidden = false;
+  priceScaleControls.open = false;
+  requestAnimationFrame(() => priceRangeMin.focus());
+}
+
+function applyManualPriceRange() {
+  const from = Number(priceRangeMin.value);
+  const to = Number(priceRangeMax.value);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
+    priceRangeMessage.textContent = '最低价必须小于最高价';
+    priceRangeMessage.hidden = false;
+    return;
+  }
+  priceScaleAuto = false;
+  chart.priceScale('right').setVisibleRange({ from, to });
+  priceRangeEditor.hidden = true;
+  applyPriceScale(currentPriceScale);
+}
+
+function renderSymbolLogo(container: HTMLSpanElement, item: MarketSymbol, eager: boolean) {
+  const urls = symbolLogoUrls(item);
+  const placeholder = document.createElement('span');
+  placeholder.className = 'symbol-logo-placeholder';
+  placeholder.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18V11h3v7H5Zm5 0V6h4v12h-4Zm6 0V9h3v9h-3Z"/></svg>';
+  const image = document.createElement('img');
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.addEventListener('load', () => container.classList.add('has-image'));
+  image.addEventListener('error', () => {
+    container.classList.remove('has-image');
+    if (image.src !== urls.fallback) image.src = urls.fallback;
+  });
+  container.replaceChildren(placeholder, image);
+  if (eager) image.src = urls.primary;
+  else {
+    image.dataset.logoSrc = urls.primary;
+    symbolLogoObserver.observe(image);
+  }
+}
+
+function createSymbolLogo(item: MarketSymbol) {
+  const logo = document.createElement('span');
+  logo.className = 'symbol-result-logo';
+  renderSymbolLogo(logo, item, false);
+  return logo;
+}
+
+function createExchangeBadge(exchange: MarketSymbol['exchange']) {
+  const badge = document.createElement('span');
+  badge.className = 'symbol-result-exchange';
+  const image = document.createElement('img');
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.addEventListener('error', () => badge.classList.add('missing'));
+  image.dataset.logoSrc = exchangeLogoUrl(exchange);
+  const label = document.createElement('span');
+  label.textContent = exchange;
+  badge.append(image, label);
+  symbolLogoObserver.observe(image);
+  return badge;
+}
+
+function persistWatchlist() {
+  if (!saveWatchlist(localStorage, watchlistSymbols)) {
+    errorLayer.hidden = false;
+    errorLayer.textContent = '自选保存失败：本地存储当前不可用';
+  }
+}
+
+function renderWatchlist() {
+  watchlistItems.replaceChildren();
+  watchlistEmpty.hidden = watchlistSymbols.length > 0;
+  const containsCurrent = watchlistSymbols.includes(currentSymbol.symbol);
+  watchlistAdd.classList.toggle('active', containsCurrent);
+  watchlistAdd.title = containsCurrent ? '从自选移除' : '添加到自选';
+  watchlistAdd.setAttribute('aria-label', containsCurrent ? '从自选移除当前证券' : '添加当前证券到自选');
+
+  for (const [index, symbolId] of watchlistSymbols.entries()) {
+    const item = marketSymbolById.get(symbolId);
+    if (!item) continue;
+    const row = document.createElement('div');
+    row.className = `watchlist-row${symbolId === currentSymbol.symbol ? ' current' : ''}`;
+    const openButton = document.createElement('button');
+    openButton.className = 'watchlist-open';
+    openButton.innerHTML = '<strong></strong><span></span>';
+    openButton.querySelector('strong')!.textContent = item.name;
+    openButton.querySelector('span')!.textContent = `${item.code} · ${item.exchange} · ${kindLabels[item.kind]}`;
+    openButton.addEventListener('click', () => void selectSymbol(item));
+    row.append(openButton);
+
+    for (const [label, direction] of [['↑', -1], ['↓', 1]] as const) {
+      const moveButton = document.createElement('button');
+      moveButton.className = 'watchlist-action';
+      moveButton.textContent = label;
+      moveButton.title = direction < 0 ? '上移' : '下移';
+      moveButton.disabled = direction < 0 ? index === 0 : index === watchlistSymbols.length - 1;
+      moveButton.addEventListener('click', () => {
+        watchlistSymbols = moveWatchlistSymbol(watchlistSymbols, index, direction);
+        persistWatchlist();
+        renderWatchlist();
+      });
+      row.append(moveButton);
+    }
+    const removeButton = document.createElement('button');
+    removeButton.className = 'watchlist-action danger';
+    removeButton.textContent = '×';
+    removeButton.title = '删除';
+    removeButton.addEventListener('click', () => {
+      watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== symbolId);
+      persistWatchlist();
+      renderWatchlist();
+    });
+    row.append(removeButton);
+    watchlistItems.append(row);
+  }
+}
+
+const drawingToolLabels: Record<string, string> = {
+  TrendLine: '趋势线 · 在主图上点两次',
+  Ray: '射线 · 点起点和方向点',
+  Arrow: '箭头 · 点起点和终点',
+  ExtendedLine: '延长线 · 点两个位置确定方向',
+  HorizontalLine: '水平线 · 在目标价格点一下',
+  HorizontalRay: '水平射线 · 点起点放置',
+  VerticalLine: '垂直线 · 在目标时间点一下',
+  CrossLine: '十字线 · 点交叉位置放置',
+  Callout: '标注框 · 输入文字后点锚点和标注位置',
+  Rectangle: '矩形 · 在主图上按住并拖动',
+  Circle: '圆形 · 在主图上点圆心和边缘',
+  ParallelChannel: '平行通道 · 依次点三个位置',
+  FibRetracement: '斐波那契回撤 · 在主图上点两次',
+  Brush: '笔刷 · 按住并拖动，松开完成',
+  Highlighter: '荧光笔 · 按住并拖动，松开完成',
+  Triangle: '三角形 · 依次点三个顶点',
+  Path: '多段路径 · 依次点各节点，双击完成',
+  Text: '文字 · 在主图上点一下放置',
+  PriceRange: '价格区间 · 在主图上拖出测量范围',
+  LongShortPosition: '多空仓位 · 设置入场、止损和目标',
+  UpArrow: '向上箭头 · 在主图上点一下放置',
+};
+
+const drawingToolNames: Record<string, string> = {
+  TrendLine: '趋势线', Ray: '射线', Arrow: '箭头', ExtendedLine: '延长线',
+  HorizontalLine: '水平线', HorizontalRay: '水平射线', VerticalLine: '垂直线', CrossLine: '十字线',
+  Callout: '标注框', Highlighter: '荧光笔', Triangle: '三角形', Path: '多段路径',
+  Rectangle: '矩形', Circle: '圆形', ParallelChannel: '平行通道', UpArrow: '向上箭头',
+  FibRetracement: '斐波那契回撤', Brush: '笔刷', Text: '文字', PriceRange: '价格区间',
+  LongShortPosition: '多空仓位',
+};
+
+function currentDrawingScope() {
+  return drawingScope(currentSymbol.symbol, currentAdjustment);
+}
+
+function currentDrawingSnapshot(): string | null {
+  return validateDrawingSnapshot(lineTools.exportLineTools(), knownDrawingTypes);
+}
+
+function updateDrawingHistoryButtons() {
+  undoDrawing.disabled = !drawingHistory.canUndo;
+  redoDrawing.disabled = !drawingHistory.canRedo;
+}
+
+function currentDrawingExports(): DrawingExport[] {
+  const snapshot = currentDrawingSnapshot();
+  return snapshot ? JSON.parse(snapshot) as DrawingExport[] : [];
+}
+
+function currentMarkerScope() {
+  return markerScope(currentSymbol.symbol, currentAdjustment, currentResolution);
+}
+
+function currentMarkers() {
+  return markerScopes.get(currentMarkerScope()) ?? [];
+}
+
+function persistMarkers(markers: ChartMarker[]) {
+  markerScopes.set(currentMarkerScope(), markers);
+  if (!saveMarkerScopes(localStorage, markerScopes)) showChartToast('标记未能保存');
+  renderSeriesMarkers();
+  if (!drawingManager.hidden) renderDrawingManager();
+}
+
+function renderSeriesMarkers() {
+  const validTimes = new Set(currentBars.map((bar) => bar.time));
+  const manual: SeriesMarker<Time>[] = currentMarkers()
+    .filter((marker) => marker.visible && validTimes.has(marker.time))
+    .map((marker) => ({
+      id: marker.id,
+      time: marker.time as UTCTimestamp,
+      position: marker.position,
+      shape: marker.shape,
+      color: marker.color,
+      text: marker.text || undefined,
+      size: marker.size,
+    }));
+  const combined = [...bollSignalMarkers, ...manual]
+    .sort((left, right) => Number(left.time) - Number(right.time));
+  for (const [chartType, api] of Object.entries(seriesMarkerApis) as [ChartType, ISeriesMarkersPluginApi<Time>][]) {
+    api.setMarkers(chartType === currentChartType && primarySeriesVisible ? combined : []);
+  }
+}
+
+function closeMarkerEditor() {
+  markerEditor.hidden = true;
+  markerMessage.hidden = true;
+  editingMarkerId = null;
+  pendingMarkerTime = null;
+}
+
+function cancelMarkerPlacement() {
+  markerPlacementActive = false;
+  markerTool.classList.remove('active');
+  markerTool.setAttribute('aria-pressed', 'false');
+  if (!activeDrawingId) {
+    drawingModeHint.hidden = true;
+    chartStage.classList.remove('drawing-active');
+  }
+}
+
+function openMarkerEditor(time: number, marker?: ChartMarker) {
+  cancelMarkerPlacement();
+  editingMarkerId = marker?.id ?? null;
+  pendingMarkerTime = time;
+  markerEditorTitle.textContent = marker ? '编辑标记' : '添加标记';
+  markerEditorTime.textContent = formatChartTime(time as UTCTimestamp);
+  markerText.value = marker?.text ?? '';
+  markerShape.value = marker?.shape ?? 'arrowUp';
+  markerPosition.value = marker?.position ?? 'belowBar';
+  markerColor.value = marker?.color ?? '#2962ff';
+  markerSize.value = String(marker?.size ?? 1);
+  deleteMarkerButton.hidden = !marker;
+  markerMessage.hidden = true;
+  markerEditor.hidden = false;
+  requestAnimationFrame(() => markerText.focus());
+}
+
+function commitMarkerEditor() {
+  if (pendingMarkerTime === null || !currentBars.some((bar) => bar.time === pendingMarkerTime)) {
+    markerMessage.textContent = '标记必须对应当前周期的一根 K 线';
+    markerMessage.hidden = false;
+    return;
+  }
+  const marker: ChartMarker = {
+    id: editingMarkerId ?? crypto.randomUUID(),
+    time: pendingMarkerTime,
+    position: markerPosition.value as MarkerPosition,
+    shape: markerShape.value as MarkerShape,
+    color: markerColor.value,
+    text: markerText.value.trim(),
+    size: Number(markerSize.value),
+    visible: true,
+  };
+  const markers = currentMarkers().filter((item) => item.id !== marker.id);
+  persistMarkers([...markers, marker].sort((left, right) => left.time - right.time));
+  closeMarkerEditor();
+}
+
+function deleteEditingMarker() {
+  if (!editingMarkerId) return;
+  persistMarkers(currentMarkers().filter((marker) => marker.id !== editingMarkerId));
+  closeMarkerEditor();
+}
+
+function isManagedSeriesActive(series: ManagedSeries) {
+  return series === 'volume' ? volumeVisible : activeIndicators.has(series);
+}
+
+function isManagedSeriesVisible(series: ManagedSeries) {
+  return isManagedSeriesActive(series) && !hiddenSeries.has(series);
+}
+
+function applyMainSeriesOrder() {
+  const groups: Record<MainOverlaySeries, ISeriesApi<any, Time>[]> = {
+    volume: [volumeSeries], ma: [maSeries], ema: [emaSeries],
+    boll: [bollUpperSeries, bollMiddleSeries, bollLowerSeries],
+  };
+  let order = 6;
+  for (const series of mainSeriesOrder) {
+    for (const api of groups[series]) api.setSeriesOrder(order++);
+  }
+}
+
+function applyManagedSeriesVisibility(series: ManagedSeries) {
+  const visible = isManagedSeriesVisible(series);
+  if (series === 'volume') {
+    volumeSeries.applyOptions({ visible });
+    document.querySelector<HTMLDivElement>('#volume-legend')!.hidden = !visible;
+  }
+  if (series === 'ma') maSeries.applyOptions({ visible });
+  if (series === 'ema') emaSeries.applyOptions({ visible });
+  if (series === 'boll') {
+    bollUpperSeries.applyOptions({ visible });
+    bollMiddleSeries.applyOptions({ visible });
+    bollLowerSeries.applyOptions({ visible });
+    if (visible) refreshIndicators();
+    else clearBollPresentation();
+  }
+  if (series === 'macd' && macdPane) {
+    macdPane.dif.applyOptions({ visible });
+    macdPane.dea.applyOptions({ visible });
+    macdPane.histogram.applyOptions({ visible });
+  }
+  if (series === 'rsi' && rsiPane) rsiPane.line.applyOptions({ visible });
+}
+
+function setIndicatorActive(indicator: IndicatorName, active: boolean, persist = true) {
+  if (active) {
+    activeIndicators.add(indicator);
+    if (persist) hiddenSeries.delete(indicator);
+    if (indicator === 'macd') ensureMacdPane();
+    if (indicator === 'rsi') ensureRsiPane();
+    refreshIndicators();
+  } else {
+    activeIndicators.delete(indicator);
+    hiddenSeries.delete(indicator);
+    if (indicator === 'ma') maSeries.applyOptions({ visible: false });
+    if (indicator === 'ema') emaSeries.applyOptions({ visible: false });
+    if (indicator === 'boll') clearBollPresentation();
+    if (indicator === 'macd') removeMacdPane();
+    if (indicator === 'rsi') removeRsiPane();
+  }
+  const button = document.querySelector<HTMLButtonElement>(`[data-indicator="${indicator}"]`)!;
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-pressed', String(active));
+  applyManagedSeriesVisibility(indicator);
+  applyMainSeriesOrder();
+  if (persist) persistChartPreferences();
+  if (!drawingManager.hidden) renderDrawingManager();
+}
+
+function setVolumeActive(active: boolean, persist = true) {
+  volumeVisible = active;
+  if (active && persist) hiddenSeries.delete('volume');
+  if (!active) hiddenSeries.delete('volume');
+  const button = document.querySelector<HTMLButtonElement>('#volume-toggle')!;
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-pressed', String(active));
+  applyManagedSeriesVisibility('volume');
+  applyMainSeriesOrder();
+  if (persist) persistChartPreferences();
+  if (!drawingManager.hidden) renderDrawingManager();
+}
+
+function moveActiveMainSeries(series: MainOverlaySeries, direction: -1 | 1) {
+  const active = mainSeriesOrder.filter((item) => isManagedSeriesActive(item));
+  const activeIndex = active.indexOf(series);
+  const target = active[activeIndex + direction];
+  if (!target) return;
+  const seriesIndex = mainSeriesOrder.indexOf(series);
+  const targetIndex = mainSeriesOrder.indexOf(target);
+  mainSeriesOrder = [...mainSeriesOrder];
+  [mainSeriesOrder[seriesIndex], mainSeriesOrder[targetIndex]] = [mainSeriesOrder[targetIndex], mainSeriesOrder[seriesIndex]];
+  applyMainSeriesOrder();
+  persistChartPreferences();
+  renderDrawingManager();
+}
+
+function renderDrawingManager() {
+  const drawings = currentDrawingExports();
+  const paneItems = activeSecondaryPanes();
+  const markers = currentMarkers();
+  const mainItems = mainSeriesOrder.filter((series) => isManagedSeriesActive(series));
+  const priceLines = currentPriceLineSettings();
+  const previousClose = currentQuote?.previousClose ?? previousCloseFromBars(currentBars, currentResolution);
+  const priceLineCount = (priceLines.previousClose && previousClose !== null ? 1 : 0)
+    + (priceLines.cost !== null ? 1 : 0)
+    + priceLines.custom.length;
+  drawingManagerItems.replaceChildren();
+  drawingManagerEmpty.hidden = true;
+
+  const appendSection = (title: string) => {
+    const heading = document.createElement('div');
+    heading.className = 'drawing-manager-section';
+    heading.textContent = title;
+    drawingManagerItems.append(heading);
+  };
+
+  const visibilityButtonFor = (series: ManagedSeries) => {
+    const visible = isManagedSeriesVisible(series);
+    const button = document.createElement('button');
+    button.innerHTML = icons.eye;
+    button.className = visible ? 'active' : '';
+    button.title = visible ? '隐藏序列' : '显示序列';
+    button.setAttribute('aria-label', `${visible ? '隐藏' : '显示'}${series.toUpperCase()}`);
+    button.addEventListener('click', () => {
+      if (visible) hiddenSeries.add(series);
+      else hiddenSeries.delete(series);
+      applyManagedSeriesVisibility(series);
+      persistChartPreferences();
+      renderDrawingManager();
+    });
+    return button;
+  };
+
+  appendSection('主图');
+  const primaryRow = document.createElement('div');
+  primaryRow.className = 'drawing-manager-row managed-series-row';
+  const primaryName = document.createElement('span');
+  primaryName.textContent = `${chartTypeLabels[currentChartType]} · ${currentSymbol.code}`;
+  const primaryVisibility = document.createElement('button');
+  primaryVisibility.innerHTML = icons.eye;
+  primaryVisibility.className = primarySeriesVisible ? 'active' : '';
+  primaryVisibility.title = primarySeriesVisible ? '隐藏主图' : '显示主图';
+  primaryVisibility.addEventListener('click', () => {
+    primarySeriesVisible = !primarySeriesVisible;
+    setPrimarySeriesData();
+    renderSeriesMarkers();
+    renderDrawingManager();
+  });
+  primaryRow.append(primaryName, primaryVisibility, document.createElement('i'), document.createElement('i'), document.createElement('i'));
+  drawingManagerItems.append(primaryRow);
+
+  if (mainItems.length > 0) {
+    appendSection('主图指标');
+    for (const [index, series] of mainItems.entries()) {
+      const row = document.createElement('div');
+      row.className = 'drawing-manager-row managed-series-row';
+      const name = document.createElement('span');
+      name.textContent = series === 'volume' ? '成交量' : series.toUpperCase();
+      row.append(name, visibilityButtonFor(series));
+      for (const [label, direction] of [['↑', -1], ['↓', 1]] as const) {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.title = direction < 0 ? '上移序列' : '下移序列';
+        button.disabled = direction < 0 ? index === 0 : index === mainItems.length - 1;
+        button.addEventListener('click', () => moveActiveMainSeries(series, direction));
+        row.append(button);
+      }
+      const removeButton = document.createElement('button');
+      removeButton.innerHTML = icons.trash;
+      removeButton.className = 'danger';
+      removeButton.title = '移除序列';
+      removeButton.addEventListener('click', () => {
+        if (series === 'volume') setVolumeActive(false);
+        else setIndicatorActive(series, false);
+      });
+      row.append(removeButton);
+      drawingManagerItems.append(row);
+    }
+  }
+
+  if (paneItems.length > 0) {
+    appendSection('副图');
+    for (const [index, item] of paneItems.entries()) {
+      const row = document.createElement('div');
+      row.className = 'drawing-manager-row managed-series-row object-tree-pane-order';
+      const name = document.createElement('span');
+      name.textContent = item.id.toUpperCase();
+      row.append(name, visibilityButtonFor(item.id));
+      for (const [label, direction] of [['↑', -1], ['↓', 1]] as const) {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.title = direction < 0 ? '上移副图' : '下移副图';
+        button.disabled = direction < 0 ? index === 0 : index === paneItems.length - 1;
+        button.addEventListener('click', () => {
+          secondaryPaneOrder = movePaneOrder(secondaryPaneOrder, item.id, direction);
+          applySecondaryPaneOrder();
+          persistChartPreferences();
+        });
+        row.append(button);
+      }
+      const removeButton = document.createElement('button');
+      removeButton.innerHTML = icons.trash;
+      removeButton.className = 'danger';
+      removeButton.title = '移除副图';
+      removeButton.addEventListener('click', () => setIndicatorActive(item.id, false));
+      row.append(removeButton);
+      drawingManagerItems.append(row);
+    }
+  }
+
+  const appendPriceLine = (nameText: string, price: number, remove: () => void) => {
+    const row = document.createElement('div');
+    row.className = 'drawing-manager-row price-line-object-row';
+    const name = document.createElement('span');
+    name.textContent = nameText;
+    const value = document.createElement('strong');
+    value.textContent = formatPrice(price);
+    const spacer = document.createElement('i');
+    const removeButton = document.createElement('button');
+    removeButton.innerHTML = icons.trash;
+    removeButton.className = 'danger';
+    removeButton.title = '删除';
+    removeButton.setAttribute('aria-label', `删除${nameText}`);
+    removeButton.addEventListener('click', remove);
+    row.append(name, value, spacer, removeButton);
+    drawingManagerItems.append(row);
+  };
+  if (priceLineCount > 0) {
+    appendSection('价格线');
+    if (priceLines.previousClose && previousClose !== null) appendPriceLine('昨收线', previousClose, () => {
+      priceLines.previousClose = false;
+      persistChartPreferences();
+      renderPriceLines();
+      syncPriceLineMenu();
+      renderDrawingManager();
+    });
+    if (priceLines.cost !== null) appendPriceLine('成本线', priceLines.cost, () => {
+      priceLines.cost = null;
+      persistChartPreferences();
+      renderPriceLines();
+      syncPriceLineMenu();
+      renderDrawingManager();
+    });
+    for (const [index, price] of priceLines.custom.entries()) appendPriceLine(`自定义价位 ${index + 1}`, price, () => {
+      priceLines.custom.splice(index, 1);
+      persistChartPreferences();
+      renderPriceLines();
+      renderDrawingManager();
+    });
+  }
+
+  if (markers.length > 0) {
+    appendSection('标记');
+    for (const marker of markers) {
+      const row = document.createElement('div');
+      row.className = 'drawing-manager-row marker-object-row';
+      const name = document.createElement('button');
+      name.className = 'marker-object-name';
+      name.textContent = marker.text || formatChartTime(marker.time as UTCTimestamp);
+      name.title = '定位到标记';
+      name.addEventListener('click', () => {
+        const index = nearestBarIndex(currentBars, marker.time);
+        if (index !== null) chart.timeScale().setVisibleLogicalRange(logicalRangeAround(index, currentBars.length));
+      });
+      const visibilityButton = document.createElement('button');
+      visibilityButton.innerHTML = icons.eye;
+      visibilityButton.className = marker.visible ? 'active' : '';
+      visibilityButton.title = marker.visible ? '隐藏标记' : '显示标记';
+      visibilityButton.addEventListener('click', () => persistMarkers(currentMarkers().map((item) => (
+        item.id === marker.id ? { ...item, visible: !item.visible } : item
+      ))));
+      const editButton = document.createElement('button');
+      editButton.textContent = '✎';
+      editButton.title = '编辑标记';
+      editButton.addEventListener('click', () => openMarkerEditor(marker.time, marker));
+      const removeButton = document.createElement('button');
+      removeButton.innerHTML = icons.trash;
+      removeButton.className = 'danger';
+      removeButton.title = '删除标记';
+      removeButton.addEventListener('click', () => persistMarkers(currentMarkers().filter((item) => item.id !== marker.id)));
+      row.append(name, visibilityButton, editButton, removeButton);
+      drawingManagerItems.append(row);
+    }
+  }
+
+  if (drawings.length > 0) appendSection('绘图');
+  for (const drawing of drawings) {
+    const row = document.createElement('div');
+    row.className = 'drawing-manager-row';
+    const name = document.createElement('span');
+    name.textContent = drawingToolNames[drawing.toolType] ?? drawing.toolType;
+    row.append(name);
+
+    const visible = drawing.options.visible !== false;
+    const visibilityButton = document.createElement('button');
+    visibilityButton.innerHTML = icons.eye;
+    visibilityButton.className = visible ? 'active' : '';
+    visibilityButton.title = visible ? '隐藏' : '显示';
+    visibilityButton.setAttribute('aria-label', `${visible ? '隐藏' : '显示'}${name.textContent}`);
+    visibilityButton.addEventListener('click', () => {
+      lineTools.applyLineToolOptions({
+        id: drawing.id, toolType: drawing.toolType, options: { visible: !visible },
+      } as never);
+      commitDrawingState();
+    });
+    row.append(visibilityButton);
+
+    const editable = drawing.options.editable !== false;
+    const lockButton = document.createElement('button');
+    lockButton.innerHTML = icons.lock;
+    lockButton.className = editable ? '' : 'active';
+    lockButton.title = editable ? '锁定' : '解锁';
+    lockButton.setAttribute('aria-label', `${editable ? '锁定' : '解锁'}${name.textContent}`);
+    lockButton.addEventListener('click', () => {
+      lineTools.applyLineToolOptions({
+        id: drawing.id, toolType: drawing.toolType, options: { editable: !editable },
+      } as never);
+      commitDrawingState();
+    });
+    row.append(lockButton);
+
+    const removeButton = document.createElement('button');
+    removeButton.innerHTML = icons.trash;
+    removeButton.className = 'danger';
+    removeButton.title = '删除';
+    removeButton.setAttribute('aria-label', `删除${name.textContent}`);
+    removeButton.addEventListener('click', () => {
+      lineTools.removeLineToolsById([drawing.id]);
+      commitDrawingState();
+    });
+    row.append(removeButton);
+    drawingManagerItems.append(row);
+  }
+  updateDrawingHistoryButtons();
+}
+
+function persistDrawingSnapshot(snapshot: string) {
+  drawingScopes.set(currentDrawingScope(), snapshot);
+  if (!saveDrawingScopes(localStorage, drawingScopes)) {
+    errorLayer.hidden = false;
+    errorLayer.textContent = '绘图保存失败：本地存储空间不足或不可用';
+  }
+}
+
+function commitDrawingState() {
+  if (restoringDrawings) return;
+  const snapshot = currentDrawingSnapshot();
+  if (!snapshot) {
+    errorLayer.hidden = false;
+    errorLayer.textContent = '绘图状态校验失败，本次修改未保存';
+    return;
+  }
+  drawingHistory.record(snapshot);
+  persistDrawingSnapshot(snapshot);
+  renderDrawingManager();
+}
+
+function applyDrawingSnapshot(snapshot: string): boolean {
+  const validated = validateDrawingSnapshot(snapshot, knownDrawingTypes);
+  const previous = currentDrawingSnapshot() ?? '[]';
+  if (!validated) return false;
+  restoringDrawings = true;
+  lineTools.removeAllLineTools();
+  const imported = validated === '[]' || lineTools.importLineTools(validated);
+  if (!imported) {
+    lineTools.removeAllLineTools();
+    if (previous !== '[]') lineTools.importLineTools(previous);
+  }
+  restoringDrawings = false;
+  hideDrawingProperties();
+  renderDrawingManager();
+  return imported;
+}
+
+function restoreDrawingScope() {
+  let snapshot = drawingScopes.get(currentDrawingScope()) ?? '[]';
+  if (!applyDrawingSnapshot(snapshot)) {
+    drawingScopes.delete(currentDrawingScope());
+    snapshot = '[]';
+    persistDrawingSnapshot(snapshot);
+    errorLayer.hidden = false;
+    errorLayer.textContent = '已忽略损坏的绘图状态';
+  }
+  drawingHistory = new DrawingHistory(snapshot);
+  updateDrawingHistoryButtons();
+}
+
+function hideDrawingProperties() {
+  selectedDrawing = null;
+  drawingProperties.hidden = true;
+  for (const control of drawingProperties.querySelectorAll<HTMLDetailsElement>('details')) control.open = false;
+}
+
+function positionDrawingProperties() {
+  if (!selectedDrawing || drawingProperties.hidden) return;
+  const points = selectedDrawing.points ?? [];
+  const coordinates = points.flatMap((point) => {
+    const x = chart.timeScale().timeToCoordinate(point.timestamp);
+    const y = candleSeries.priceToCoordinate(point.price);
+    return x === null || y === null ? [] : [{ x, y }];
+  });
+  const toolbarWidth = drawingProperties.offsetWidth;
+  const toolbarHeight = drawingProperties.offsetHeight;
+  const stageWidth = chartStage.clientWidth;
+  const stageHeight = chartStage.clientHeight;
+  const anchorX = coordinates.length
+    ? coordinates.reduce((sum, point) => sum + point.x, 0) / coordinates.length
+    : stageWidth / 2;
+  const anchorY = coordinates.length
+    ? Math.min(...coordinates.map((point) => point.y))
+    : 176;
+  const left = Math.max(12, Math.min(stageWidth - toolbarWidth - 12, anchorX - toolbarWidth / 2));
+  const top = Math.max(58, Math.min(stageHeight - toolbarHeight - 12, anchorY - toolbarHeight - 18));
+  drawingProperties.style.left = `${Math.round(left)}px`;
+  drawingProperties.style.top = `${Math.round(top)}px`;
+  drawingProperties.style.transform = 'none';
+}
+
+function leaveDrawingMode(removeIncomplete = false) {
+  if (removeIncomplete && activeDrawingId) lineTools.removeLineToolsById([activeDrawingId]);
+  activeDrawingId = null;
+  pendingTextButton = null;
+  drawingTextEditor.hidden = true;
+  hideDrawingProperties();
+  drawingModeHint.hidden = true;
+  document.querySelector('.chart-stage')?.classList.remove('drawing-active');
+  crosshairTool.classList.add('active');
+  crosshairTool.setAttribute('aria-pressed', 'true');
+  for (const button of drawingButtons) {
+    button.classList.remove('active');
+    button.setAttribute('aria-pressed', 'false');
+  }
+  for (const menu of drawingMenus) {
+    menu.open = false;
+    menu.querySelector('summary')?.classList.remove('active');
+  }
+}
+
+// The plugin's runtime supports partial option objects, but its published DeepPartial
+// type recurses into primitive values. Keep the compatibility cast at this boundary.
+function addInteractiveDrawing(toolType: DrawingToolType, options: Record<string, unknown>) {
+  return lineTools.addLineTool(toolType as LineToolType, [], options as never);
+}
+
+function startDrawing(toolType: DrawingToolType, button: HTMLButtonElement, textValue?: string) {
+  if (drawingsLocked) return;
+  cancelMarkerPlacement();
+  if ((toolType === 'Text' || toolType === 'Callout') && textValue === undefined) {
+    leaveDrawingMode(true);
+    pendingTextButton = button;
+    drawingTextInput.value = '';
+    drawingTextEditor.hidden = false;
+    drawingTextInput.focus();
+    return;
+  }
+  leaveDrawingMode(true);
+  const options: Record<string, unknown> = toolType === 'Rectangle'
+    ? { rectangle: { border: { color: '#2962ff', width: 1 }, background: { color: 'rgba(41, 98, 255, .12)' } } }
+    : toolType === 'Circle'
+      ? { circle: { border: { color: '#2962ff', width: 1 }, background: { color: 'rgba(41, 98, 255, .10)' } } }
+      : toolType === 'FibRetracement'
+        ? {
+          line: { width: 1 }, extend: { left: false, right: false },
+          levels: [
+            { coeff: 0, color: '#787b86', opacity: 0 },
+            { coeff: 0.236, color: '#787b86', opacity: 0 },
+            { coeff: 0.382, color: '#787b86', opacity: 0 },
+            { coeff: 0.5, color: '#787b86', opacity: 0 },
+            { coeff: 0.618, color: '#f23645', opacity: 0 },
+            { coeff: 0.786, color: '#787b86', opacity: 0 },
+            { coeff: 1, color: '#089981', opacity: 0 },
+          ],
+        }
+      : toolType === 'Brush'
+          ? { line: { color: '#2962ff', width: 2 } }
+          : toolType === 'Highlighter'
+            ? { line: { color: 'rgba(255, 235, 59, .4)', width: 20 } }
+          : toolType === 'Text' || toolType === 'Callout'
+            ? { text: { value: textValue || '文字', font: { color: '#d1d4dc', size: 12 } } }
+            : toolType === 'Triangle'
+              ? { triangle: { border: { color: '#2962ff', width: 1 }, background: { color: 'rgba(41, 98, 255, .12)' } } }
+            : toolType === 'Path'
+              ? { line: { color: '#2962ff', width: 2 } }
+            : toolType === 'UpArrow'
+              ? { arrow: { color: '#089981', opacity: 1, size: 34 } }
+            : ['TrendLine', 'Ray', 'Arrow', 'ExtendedLine', 'HorizontalLine', 'HorizontalRay', 'VerticalLine', 'CrossLine'].includes(toolType)
+              ? { line: { color: '#2962ff', width: toolType === 'HorizontalLine' ? 1 : 2 } }
+              : {};
+  activeDrawingId = addInteractiveDrawing(toolType, options);
+
+  crosshairTool.classList.remove('active');
+  crosshairTool.setAttribute('aria-pressed', 'false');
+  button.classList.add('active');
+  button.setAttribute('aria-pressed', 'true');
+  const drawingMenu = button.closest<HTMLDetailsElement>('.drawing-tool-menu');
+  drawingMenu?.querySelector('summary')?.classList.add('active');
+  if (drawingMenu) drawingMenu.open = false;
+  drawingModeHint.textContent = drawingToolLabels[toolType] ?? '在主图上绘制';
+  drawingModeHint.hidden = false;
+  document.querySelector('.chart-stage')?.classList.add('drawing-active');
+}
+
+lineTools.subscribeLineToolsAfterEdit(({ stage, selectedLineTool }) => {
+  if (selectedDrawing?.id === selectedLineTool.id) {
+    selectedDrawing = selectedLineTool as unknown as SelectedDrawing;
+    positionDrawingProperties();
+  }
+  if (stage === 'lineToolFinished' || stage === 'pathFinished') leaveDrawingMode();
+  commitDrawingState();
+});
+
+function colorToHex(color: unknown, fallback = '#2962ff'): string {
+  if (typeof color !== 'string') return fallback;
+  const hex = color.match(/^#([0-9a-f]{6})/i);
+  if (hex) return `#${hex[1]}`;
+  const rgb = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (!rgb) return fallback;
+  return `#${[rgb[1], rgb[2], rgb[3]].map((part) => Number(part).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function colorOpacity(color: unknown, fallback = 1): number {
+  if (typeof color !== 'string') return fallback;
+  const rgba = color.match(/rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)/i);
+  if (rgba) return Number(rgba[1]);
+  if (/^#[0-9a-f]{8}$/i.test(color)) return parseInt(color.slice(7, 9), 16) / 255;
+  return fallback;
+}
+
+function colorWithOpacity(color: string, opacity: number): string {
+  const rgb = color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!rgb) return color;
+  return `rgba(${parseInt(rgb[1], 16)}, ${parseInt(rgb[2], 16)}, ${parseInt(rgb[3], 16)}, ${opacity.toFixed(2)})`;
+}
+
+function getSelectedStyle(drawing: SelectedDrawing) {
+  const options = drawing.options;
+  switch (drawing.toolType) {
+    case 'UpArrow': return { color: options.arrow?.color, size: options.arrow?.size ?? 34, opacity: options.arrow?.opacity ?? 1, sizeLabel: '大小', min: 16, max: 64, step: 2 };
+    case 'Rectangle': return { color: options.rectangle?.border?.color, size: options.rectangle?.border?.width ?? 1, opacity: colorOpacity(options.rectangle?.background?.color, .12) };
+    case 'Circle': return { color: options.circle?.border?.color, size: options.circle?.border?.width ?? 1, opacity: colorOpacity(options.circle?.background?.color, .1) };
+    case 'Triangle': return { color: options.triangle?.border?.color, size: options.triangle?.border?.width ?? 1, opacity: colorOpacity(options.triangle?.background?.color, .12) };
+    case 'ParallelChannel': return { color: options.channelLine?.color, size: options.channelLine?.width ?? 1, opacity: colorOpacity(options.background?.color, .2) };
+    case 'Brush': return { color: options.line?.color, size: options.line?.width ?? 2, opacity: colorOpacity(options.line?.color) };
+    case 'Highlighter': return { color: options.line?.color, size: options.line?.width ?? 20, opacity: colorOpacity(options.line?.color, .4), min: 8, max: 40, step: 1 };
+    case 'Text': case 'Callout': return { color: options.text?.font?.color, size: options.text?.font?.size ?? 12, opacity: colorOpacity(options.text?.font?.color), sizeLabel: '字号', min: 8, max: 40, step: 1 };
+    case 'FibRetracement': return { color: options.levels?.[0]?.color, size: options.line?.width ?? 1, opacity: options.levels?.[0]?.opacity ?? 0 };
+    case 'PriceRange': return { color: options.priceRange?.rectangle?.border?.color, size: options.priceRange?.rectangle?.border?.width ?? 1, opacity: colorOpacity(options.priceRange?.rectangle?.background?.color, .2) };
+    case 'LongShortPosition': return { color: '#089981', size: options.entryPtRectangle?.border?.width ?? 1, opacity: colorOpacity(options.entryPtRectangle?.background?.color, .2), colorDisabled: true };
+    default: return { color: options.line?.color, size: options.line?.width ?? 2, opacity: colorOpacity(options.line?.color) };
+  }
+}
+
+function showDrawingProperties(drawing: SelectedDrawing) {
+  selectedDrawing = drawing;
+  const style = getSelectedStyle(drawing);
+  drawingPropertiesName.textContent = drawingToolNames[drawing.toolType] ?? '绘图';
+  drawingColor.value = colorToHex(style.color, drawing.toolType === 'UpArrow' ? '#089981' : '#2962ff');
+  drawingProperties.style.setProperty('--drawing-color', drawingColor.value);
+  drawingColor.disabled = Boolean(style.colorDisabled);
+  drawingColor.parentElement!.title = style.colorDisabled ? '多空仓位保留红绿双色' : '颜色';
+  drawingSizeLabel.textContent = style.sizeLabel ?? '粗细';
+  drawingSize.min = String(style.min ?? 1);
+  drawingSize.max = String(style.max ?? 5);
+  drawingSize.step = String(style.step ?? 1);
+  drawingSize.value = String(style.size);
+  drawingSizeValue.value = `${style.size}px`;
+  drawingOpacity.value = String(Math.round(style.opacity * 100));
+  drawingOpacityValue.value = `${Math.round(style.opacity * 100)}%`;
+  drawingProperties.hidden = false;
+  requestAnimationFrame(positionDrawingProperties);
+}
+
+function applySelectedDrawingStyle() {
+  if (!selectedDrawing) return;
+  const drawing = selectedDrawing;
+  const color = drawingColor.value;
+  drawingProperties.style.setProperty('--drawing-color', color);
+  const opacity = Number(drawingOpacity.value) / 100;
+  const size = Number(drawingSize.value);
+  const paintedColor = colorWithOpacity(color, opacity);
+  const options = drawing.options;
+  let patch: Record<string, unknown>;
+  switch (drawing.toolType) {
+    case 'UpArrow': patch = { arrow: { color, opacity, size } }; break;
+    case 'Rectangle': patch = { rectangle: { border: { color, width: size }, background: { color: paintedColor } } }; break;
+    case 'Circle': patch = { circle: { border: { color, width: size }, background: { color: paintedColor } } }; break;
+    case 'Triangle': patch = { triangle: { border: { color, width: size }, background: { color: paintedColor } } }; break;
+    case 'ParallelChannel': patch = { channelLine: { color, width: size }, middleLine: { color, width: size }, background: { color: paintedColor } }; break;
+    case 'Brush': case 'Highlighter': patch = { line: { color: paintedColor, width: size } }; break;
+    case 'Text': case 'Callout': patch = { text: { font: { color: paintedColor, size } } }; break;
+    case 'FibRetracement': patch = { line: { width: size }, levels: (options.levels ?? []).map((level: Record<string, unknown>) => ({ ...level, color, opacity })) }; break;
+    case 'PriceRange': patch = { priceRange: { rectangle: { border: { color, width: size }, background: { color: paintedColor } }, horizontalLine: { color, width: size }, verticalLine: { color, width: size } } }; break;
+    case 'LongShortPosition': {
+      const stopColor = colorWithOpacity(colorToHex(options.entryStopLossRectangle?.background?.color, '#f23645'), opacity);
+      const targetColor = colorWithOpacity(colorToHex(options.entryPtRectangle?.background?.color, '#089981'), opacity);
+      patch = {
+        entryStopLossRectangle: { background: { color: stopColor }, border: { width: size } },
+        entryPtRectangle: { background: { color: targetColor }, border: { width: size } },
+      };
+      break;
+    }
+    default: patch = { line: { color: paintedColor, width: size } };
+  }
+  suppressDrawingDeselect = true;
+  lineTools.applyLineToolOptions({ id: drawing.id, toolType: drawing.toolType, options: patch } as never);
+  const refreshed = JSON.parse(lineTools.getLineToolByID(drawing.id)) as SelectedDrawing[];
+  if (refreshed[0]) selectedDrawing = refreshed[0];
+  positionDrawingProperties();
+  commitDrawingState();
+  queueMicrotask(() => { suppressDrawingDeselect = false; });
+}
+
+lineTools.subscribeLineToolsSingleClick(({ selectionState, selectedLineTool }) => {
+  if (selectionState === 'selected' && selectedLineTool.options) {
+    showDrawingProperties(selectedLineTool as unknown as SelectedDrawing);
+  } else if (!suppressDrawingDeselect) {
+    hideDrawingProperties();
+  }
+});
+
+function formatChartTime(time: Time): string {
+  if (typeof time === 'number') {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time * 1000));
+  }
+  return typeof time === 'string' ? time : `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
+}
+
+function formatCompactVolume(volume: number): string {
+  if (volume >= 100_000_000) return `${(volume / 100_000_000).toFixed(2)}亿`;
+  if (volume >= 10_000) return `${(volume / 10_000).toFixed(2)}万`;
+  return volume.toFixed(0);
+}
+
+function formatPrice(value: number): string {
+  return value.toFixed(currentSymbol.kind === 'etf' ? 3 : 2);
+}
+
+function showBar(bar: Bar, previous?: Bar) {
+  const change = previous ? bar.close - previous.close : 0;
+  const percentage = previous && previous.close ? (change / previous.close) * 100 : 0;
+  const sign = change > 0 ? '+' : '';
+  const direction = change >= 0 ? 'up' : 'down';
+  legendValues.className = `legend-values ${direction}`;
+  legendValues.removeAttribute('title');
+  legendValues.textContent = `开=${formatPrice(bar.open)} 高=${formatPrice(bar.high)} 低=${formatPrice(bar.low)} 收=${formatPrice(bar.close)} ${sign}${formatPrice(change)} (${sign}${percentage.toFixed(2)}%)`;
+  volumeLegend.textContent = formatCompactVolume(bar.volume);
+}
+
+function showLatest(bars: Bar[]) {
+  const latest = bars.at(-1);
+  if (!latest) return;
+  const previous = bars.at(-2);
+  showBar(latest, previous);
+}
+
+function showQuote(quote: NonNullable<HistoryResponse['quote']>) {
+  const change = quote.last - quote.previousClose;
+  const percentage = quote.previousClose ? change / quote.previousClose * 100 : 0;
+  const sign = change > 0 ? '+' : '';
+  legendValues.className = `legend-values ${change >= 0 ? 'up' : 'down'}`;
+  legendValues.textContent = `开=${formatPrice(quote.open)} 高=${formatPrice(quote.high)} 低=${formatPrice(quote.low)} 收=${formatPrice(quote.last)} ${sign}${formatPrice(change)} (${sign}${percentage.toFixed(2)}%)`;
+  legendValues.title = `行情接收时间 ${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(quote.receivedAt * 1000))}`;
+}
+
+function showCurrentSnapshot() {
+  if (currentQuote) showQuote(currentQuote);
+  else showLatest(currentBars);
+}
+
+function indicatorPoints(values: OptionalValue[]) {
+  return values.flatMap((value, index) => value === null ? [] : [{
+    time: currentBars[index].time as UTCTimestamp,
+    value,
+  }]);
+}
+
+function updateIndicatorSeries(
+  series: typeof maSeries,
+  values: OptionalValue[],
+  updatedTimes?: number[],
+) {
+  if (!updatedTimes) {
+    series.setData(indicatorPoints(values));
+    return;
+  }
+  for (const time of updatedTimes) {
+    const index = currentBars.findIndex((bar) => bar.time === time);
+    const value = index < 0 ? null : values[index];
+    if (value !== null) series.update({ time: time as UTCTimestamp, value }, true);
+  }
+}
+
+const bollUpperBreakoutColor = '#f6c344';
+const bollLowerBreakoutColor = '#2962ff';
+
+function candlePoint(bar: Bar, signal: BollBreakout = null): CandlestickData<UTCTimestamp> {
+  const point: CandlestickData<UTCTimestamp> = {
+    time: bar.time as UTCTimestamp,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+  };
+  if (primarySeriesVisible && currentChartType === 'candles' && signal === 'upper') point.color = bollUpperBreakoutColor;
+  if (primarySeriesVisible && currentChartType === 'candles' && signal === 'lower') point.color = bollLowerBreakoutColor;
+  return point;
+}
+
+function updateBollPresentation(
+  bands: ReturnType<typeof boll>,
+  updatedTimes?: number[],
+) {
+  const signals = bollBreakouts(currentBars.map((bar) => bar.close), bands.upper, bands.lower);
+  if (!updatedTimes) {
+    candleSeries.setData(currentBars.map((bar, index) => candlePoint(bar, signals[index])));
+  } else {
+    for (const time of updatedTimes) {
+      const index = currentBars.findIndex((bar) => bar.time === time);
+      if (index >= 0) candleSeries.update(candlePoint(currentBars[index], signals[index]), true);
+    }
+  }
+  bollBand.setData(currentBars.flatMap((bar, index) => {
+    const upper = bands.upper[index];
+    const lower = bands.lower[index];
+    return upper === null || lower === null ? [] : [{
+      time: bar.time as UTCTimestamp,
+      upper,
+      lower,
+    }];
+  }), true);
+  const markers: SeriesMarker<Time>[] = [];
+  for (const [index, signal] of signals.entries()) {
+    if (signal === 'upper') markers.push({
+      time: currentBars[index].time as UTCTimestamp,
+      position: 'aboveBar',
+      shape: 'arrowUp',
+      color: bollUpperBreakoutColor,
+      text: '突破上轨',
+      size: 1,
+    });
+    if (signal === 'lower') markers.push({
+      time: currentBars[index].time as UTCTimestamp,
+      position: 'belowBar',
+      shape: 'arrowDown',
+      color: bollLowerBreakoutColor,
+      text: '跌破下轨',
+      size: 1,
+    });
+  }
+  bollSignalMarkers = hiddenSeries.has('boll') ? [] : markers;
+  renderSeriesMarkers();
+}
+
+function clearBollPresentation() {
+  bollBand.setData([], false);
+  bollSignalMarkers = [];
+  renderSeriesMarkers();
+  candleSeries.setData(currentBars.map((bar) => candlePoint(bar)));
+}
+
+function ensureMacdPane() {
+  if (macdPane) return;
+  const pane = chart.addPane(false);
+  const paneIndex = pane.paneIndex();
+  macdPane = {
+    pane,
+    dif: chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, paneIndex),
+    dea: chart.addSeries(LineSeries, { color: '#f6a623', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, paneIndex),
+    histogram: chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, paneIndex),
+  };
+  pane.setHeight(130);
+  applySecondaryPaneOrder();
+}
+
+function ensureRsiPane() {
+  if (rsiPane) return;
+  const pane = chart.addPane(false);
+  const paneIndex = pane.paneIndex();
+  rsiPane = {
+    pane,
+    line: chart.addSeries(LineSeries, { color: '#9c6ade', lineWidth: 1, priceLineVisible: false, lastValueVisible: true }, paneIndex),
+  };
+  pane.setHeight(110);
+  applySecondaryPaneOrder();
+}
+
+function removeMacdPane() {
+  if (!macdPane) return;
+  const { pane, dif, dea, histogram } = macdPane;
+  const paneIndex = pane.paneIndex();
+  chart.removeSeries(dif);
+  chart.removeSeries(dea);
+  chart.removeSeries(histogram);
+  if (chart.panes().includes(pane)) chart.removePane(paneIndex);
+  macdPane = null;
+  renderSecondaryPaneOrder();
+}
+
+function removeRsiPane() {
+  if (!rsiPane) return;
+  const { pane, line } = rsiPane;
+  const paneIndex = pane.paneIndex();
+  chart.removeSeries(line);
+  if (chart.panes().includes(pane)) chart.removePane(paneIndex);
+  rsiPane = null;
+  renderSecondaryPaneOrder();
+}
+
+function secondaryPaneById(id: SecondaryPane): IPaneApi<Time> | null {
+  return id === 'macd' ? macdPane?.pane ?? null : rsiPane?.pane ?? null;
+}
+
+function activeSecondaryPanes() {
+  return secondaryPaneOrder.flatMap((id) => {
+    const pane = secondaryPaneById(id);
+    return pane ? [{ id, pane }] : [];
+  });
+}
+
+function applySecondaryPaneOrder() {
+  const active = activeSecondaryPanes();
+  for (const [offset, item] of active.entries()) {
+    const targetIndex = offset + 1;
+    const currentIndex = item.pane.paneIndex();
+    if (currentIndex !== targetIndex) chart.swapPanes(currentIndex, targetIndex);
+  }
+  renderSecondaryPaneOrder();
+}
+
+function renderSecondaryPaneOrder() {
+  if (!drawingManager.hidden) renderDrawingManager();
+}
+
+function refreshIndicators(updatedTimes?: number[]) {
+  if (activeIndicators.size === 0 || currentBars.length === 0) return;
+  const closes = currentBars.map((bar) => bar.close);
+  if (activeIndicators.has('ma')) updateIndicatorSeries(maSeries, sma(closes, 20), updatedTimes);
+  if (activeIndicators.has('ema')) updateIndicatorSeries(emaSeries, ema(closes, 20), updatedTimes);
+  if (activeIndicators.has('boll')) {
+    const bands = boll(closes, 20, 2);
+    updateIndicatorSeries(bollUpperSeries, bands.upper, updatedTimes);
+    updateIndicatorSeries(bollMiddleSeries, bands.middle, updatedTimes);
+    updateIndicatorSeries(bollLowerSeries, bands.lower, updatedTimes);
+    if (hiddenSeries.has('boll')) clearBollPresentation();
+    else updateBollPresentation(bands, updatedTimes);
+  }
+  if (activeIndicators.has('macd') && macdPane) {
+    const values = macd(closes);
+    updateIndicatorSeries(macdPane.dif, values.dif, updatedTimes);
+    updateIndicatorSeries(macdPane.dea, values.dea, updatedTimes);
+    const histogramPoints = values.histogram.flatMap((value, index) => value === null ? [] : [{
+      time: currentBars[index].time as UTCTimestamp,
+      value,
+      color: value >= 0 ? 'rgba(8, 153, 129, .6)' : 'rgba(242, 54, 69, .6)',
+    }]);
+    if (!updatedTimes) macdPane.histogram.setData(histogramPoints);
+    else {
+      for (const time of updatedTimes) {
+        const point = histogramPoints.find((item) => Number(item.time) === time);
+        if (point) macdPane.histogram.update(point, true);
+      }
+    }
+  }
+  if (activeIndicators.has('rsi') && rsiPane) {
+    updateIndicatorSeries(rsiPane.line, rsi(closes, 14), updatedTimes);
+  }
+}
+
+function closeSymbolResults() {
+  symbolDialogLayer.hidden = true;
+  symbolSourceMenu.hidden = true;
+  symbolSourceTrigger.setAttribute('aria-expanded', 'false');
+  input.setAttribute('aria-expanded', 'false');
+  activeSymbolResult = -1;
+}
+
+function openSymbolDialog() {
+  symbolDialogLayer.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  symbolDialogInput.value = '';
+  renderSymbolSources();
+  renderSymbolResults();
+  window.requestAnimationFrame(() => symbolDialogInput.focus());
+}
+
+function renderSymbolSources() {
+  const sources = symbolSources[activeSymbolCategory];
+  if (!sources.some((source) => source.value === activeSymbolSource)) activeSymbolSource = 'all';
+  const selected = sources.find((source) => source.value === activeSymbolSource)!;
+  symbolSourceTrigger.textContent = selected.label;
+  symbolSourceMenu.replaceChildren();
+  for (const source of sources) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.role = 'menuitemradio';
+    button.setAttribute('aria-checked', String(source.value === activeSymbolSource));
+    button.textContent = source.label;
+    button.addEventListener('click', () => {
+      activeSymbolSource = source.value;
+      symbolSourceMenu.hidden = true;
+      symbolSourceTrigger.setAttribute('aria-expanded', 'false');
+      renderSymbolSources();
+      renderSymbolResults();
+      symbolSourceTrigger.focus();
+    });
+    symbolSourceMenu.append(button);
+  }
+}
+
+function setActiveSymbolResult(index: number) {
+  if (index >= visibleSymbolResults.length && visibleSymbolResults.length < matchingSymbolResults.length) {
+    appendNextSymbolResults();
+  }
+  if (!visibleSymbolResults.length) return;
+  activeSymbolResult = (index + visibleSymbolResults.length) % visibleSymbolResults.length;
+  for (const [buttonIndex, button] of [...symbolResults.querySelectorAll<HTMLButtonElement>('.symbol-result-row')].entries()) {
+    const active = buttonIndex === activeSymbolResult;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    if (active) button.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function appendNextSymbolResults() {
+  const start = visibleSymbolResults.length;
+  const next = matchingSymbolResults.slice(start, start + SYMBOL_RESULT_PAGE_SIZE);
+  visibleSymbolResults.push(...next);
+  for (const [offset, item] of next.entries()) {
+    const index = start + offset;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'symbol-result-row';
+    button.role = 'option';
+    button.setAttribute('aria-selected', 'false');
+    button.innerHTML = '<span class="symbol-result-code"></span><span class="symbol-result-name"><strong></strong></span><span class="symbol-result-kind"></span>';
+    button.prepend(createSymbolLogo(item));
+    button.querySelector('.symbol-result-code')!.textContent = item.code;
+    button.querySelector('strong')!.textContent = item.name;
+    const kind = button.querySelector('.symbol-result-kind')!;
+    kind.append(document.createTextNode(kindMetaLabels[item.kind]), createExchangeBadge(item.exchange));
+    button.title = `${item.code} ${item.name} ${kindLabels[item.kind]} ${item.exchange}`;
+    button.addEventListener('pointerdown', (event) => event.preventDefault());
+    button.addEventListener('click', () => void selectSymbol(item));
+    button.addEventListener('pointermove', () => setActiveSymbolResult(index));
+    symbolResults.append(button);
+  }
+  symbolResultCount.textContent = matchingSymbolResults.length
+    ? visibleSymbolResults.length < matchingSymbolResults.length
+      ? `已显示 ${visibleSymbolResults.length} / 共 ${matchingSymbolResults.length} 条`
+      : `共 ${matchingSymbolResults.length} 条`
+    : '';
+}
+
+function renderSymbolResults() {
+  matchingSymbolResults = listMarketSymbols(
+    marketSymbols,
+    symbolDialogInput.value,
+    activeSymbolCategory,
+    activeSymbolSource,
+    marketSymbols.length,
+  );
+  visibleSymbolResults = [];
+  symbolLogoObserver.disconnect();
+  symbolResults.replaceChildren();
+  if (!matchingSymbolResults.length) {
+    const empty = document.createElement('p');
+    empty.className = 'symbol-results-empty';
+    empty.textContent = '没有找到符合条件的证券';
+    symbolResults.append(empty);
+    symbolResultCount.textContent = '';
+    activeSymbolResult = -1;
+    return;
+  }
+  appendNextSymbolResults();
+  symbolResults.scrollTop = 0;
+  activeSymbolResult = -1;
+}
+
+function resolveInputSymbol(): MarketSymbol | undefined {
+  const query = symbolDialogInput.value.trim();
+  if ([currentSymbol.symbol, currentSymbol.code, currentSymbol.name].includes(query)) return currentSymbol;
+  return listMarketSymbols(marketSymbols, query, activeSymbolCategory, activeSymbolSource, 1)[0];
+}
+
+async function selectSymbol(symbol: MarketSymbol) {
+  input.value = symbol.code;
+  closeSymbolResults();
+  await openHistory(symbol, currentResolution, currentAdjustment);
+}
+
+function requestHistory(
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+  count: number,
+) {
+  const requestKey = `${historyCacheKey(symbol.symbol, resolution, adjustment)}|${count}`;
+  const existing = historyRequests.get(requestKey);
+  if (existing) return existing;
+  const request = invoke<HistoryResponse>('get_history_bars', {
+    symbol: symbol.symbol,
+    kind: symbol.kind,
+    resolution,
+    adjustment,
+    count,
+    includeQuote: false,
+  }).finally(() => historyRequests.delete(requestKey));
+  historyRequests.set(requestKey, request);
+  return request;
+}
+
+function replaceHistorySeries(bars: Bar[], preserveVisibleRange: boolean) {
+  const visibleRange = preserveVisibleRange ? chart.timeScale().getVisibleRange() : null;
+  currentBars = bars;
+  setPrimarySeriesData();
+  volumeSeries.setData(bars.map((bar) => ({
+    time: bar.time as UTCTimestamp,
+    value: bar.volume,
+    color: bar.close >= bar.open ? 'rgba(8, 153, 129, .48)' : 'rgba(242, 54, 69, .48)',
+  })));
+  refreshIndicators();
+  renderPriceLines();
+  renderSeriesMarkers();
+  requestAnimationFrame(() => {
+    if (visibleRange) chart.timeScale().setVisibleRange(visibleRange);
+    else chart.timeScale().setVisibleLogicalRange(initialVisibleLogicalRange(bars.length));
+  });
+}
+
+function showHistory(
+  response: HistoryResponse,
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+  source: 'network' | 'memory',
+) {
+  const previousDrawingScope = currentDrawingScope();
+  const nextDrawingScope = drawingScope(symbol.symbol, adjustment);
+  const priceScopeChanged = currentSymbol.symbol !== symbol.symbol
+    || currentResolution !== resolution
+    || currentAdjustment !== adjustment;
+  if (previousDrawingScope !== nextDrawingScope) commitDrawingState();
+  currentSymbol = symbol;
+  currentResolution = resolution;
+  currentAdjustment = adjustment;
+  currentQuote = null;
+  if (priceScopeChanged && !priceScaleAuto) {
+    priceScaleAuto = true;
+    chart.priceScale('right').setAutoScale(true);
+  }
+  replaceHistorySeries(response.bars, false);
+  if (currentPriceScale === 'logarithmic' && response.bars.some((bar) => bar.low <= 0)) {
+    showChartToast('当前复权价格含非正数，已切换为常规坐标');
+    applyPriceScale('normal');
+  }
+  if (!drawingsInitialized || previousDrawingScope !== nextDrawingScope) {
+    restoreDrawingScope();
+    drawingsInitialized = true;
+  }
+  renderSymbolLogo(instrumentLogo, symbol, true);
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
+    button.classList.toggle('active', button.dataset.resolution === currentResolution);
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
+    button.classList.toggle('active', button.dataset.adjustment === currentAdjustment);
+  }
+  legendSymbol.textContent = `${symbol.name} · ${resolutionLabels[currentResolution]} · ${symbol.exchange}${currentAdjustment === 'qfq' ? ' · 前复权' : ''}`;
+  const dateInputFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  goToDateInput.min = dateInputFormatter.format(new Date(response.bars[0].time * 1000));
+  goToDateInput.max = dateInputFormatter.format(new Date(response.bars.at(-1)!.time * 1000));
+  syncPriceLineMenu();
+  renderPriceLines();
+  renderWatchlist();
+  document.querySelector<HTMLDivElement>('#chart')!.setAttribute('aria-label', `${symbol.name}${resolutionLabels[currentResolution]}K线图`);
+  showLatest(response.bars);
+  status.className = 'connection-status ready';
+  status.querySelector('span')!.textContent = source === 'memory'
+    ? `缓存 · ${response.diagnostics.host}`
+    : `${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+}
+
+function clearDeepHistoryTimer() {
+  if (deepHistoryTimer !== undefined) window.clearTimeout(deepHistoryTimer);
+  deepHistoryTimer = undefined;
+  deepHistoryTimerKey = '';
+}
+
+async function loadDeepHistory(
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+) {
+  const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
+  if (historyCache.get(cacheKey)?.deep || deepHistoryLoading.has(cacheKey)) return;
+  deepHistoryLoading.add(cacheKey);
+  try {
+    const response = await requestHistory(symbol, resolution, adjustment, deepHistoryBars(resolution));
+    const cached = historyCache.get(cacheKey);
+    const cachedLastTime = cached?.value.bars.at(-1)?.time ?? 0;
+    const responseLastTime = response.bars.at(-1)?.time ?? 0;
+    if (responseLastTime < cachedLastTime) {
+      console.warn('market.history.deep_stale', {
+        symbol: symbol.symbol,
+        resolution,
+        adjustment,
+        cachedLastTime,
+        responseLastTime,
+      });
+      return;
+    }
+    historyCache.set(cacheKey, response, true);
+    if (currentSymbol.symbol !== symbol.symbol
+      || currentResolution !== resolution
+      || currentAdjustment !== adjustment) return;
+    replaceHistorySeries(response.bars, true);
+    showLatest(response.bars);
+    console.info('market.history.deep_ready', {
+      symbol: symbol.symbol,
+      resolution,
+      adjustment,
+      bars: response.bars.length,
+      latencyMs: response.diagnostics.latencyMs,
+    });
+  } catch (error) {
+    console.error('market.history.deep_error', {
+      symbol: symbol.symbol,
+      resolution,
+      adjustment,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    deepHistoryLoading.delete(cacheKey);
+    if (currentSymbol.symbol === symbol.symbol
+      && currentResolution === resolution
+      && currentAdjustment === adjustment) scheduleLatestPoll(0);
+  }
+}
+
+function scheduleDeepHistory(
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+  delayMs = DEEP_HISTORY_DELAY_MS,
+) {
+  const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
+  if (historyCache.get(cacheKey)?.deep || deepHistoryLoading.has(cacheKey)) return;
+  if (deepHistoryTimer !== undefined && deepHistoryTimerKey === cacheKey) return;
+  clearDeepHistoryTimer();
+  deepHistoryTimerKey = cacheKey;
+  deepHistoryTimer = window.setTimeout(() => {
+    deepHistoryTimer = undefined;
+    deepHistoryTimerKey = '';
+    void loadDeepHistory(symbol, resolution, adjustment);
+  }, delayMs);
+}
+
+async function openHistory(
+  requestedSymbol = resolveInputSymbol(),
+  requestedResolution: Resolution = currentResolution,
+  requestedAdjustment: Adjustment = currentAdjustment,
+) {
+  const match = requestedSymbol;
+  if (!match) {
+    errorLayer.hidden = false;
+    errorLayer.textContent = '没有找到这个股票、ETF 或指数';
+    return;
+  }
+  const generation = historyRequestGate.begin();
+  clearDeepHistoryTimer();
+  if (latestPollTimer !== undefined) window.clearTimeout(latestPollTimer);
+  latestPollTimer = undefined;
+  errorLayer.hidden = true;
+  const cacheKey = historyCacheKey(match.symbol, requestedResolution, requestedAdjustment);
+  const cached = historyCache.get(cacheKey);
+  if (cached) {
+    loadingLayer.hidden = true;
+    showHistory(cached.value, match, requestedResolution, requestedAdjustment, 'memory');
+    console.info('market.history.display', {
+      symbol: match.symbol,
+      resolution: requestedResolution,
+      adjustment: requestedAdjustment,
+      source: 'memory',
+      bars: cached.value.bars.length,
+    });
+    if (cached.deep) scheduleLatestPoll(0);
+    else scheduleDeepHistory(match, requestedResolution, requestedAdjustment);
+    return;
+  }
+  loadingLayer.hidden = false;
+  status.className = 'connection-status loading';
+  status.querySelector('span')!.textContent = `正在打开 ${match.code}`;
+  const startedAt = performance.now();
+  try {
+    const response = await requestHistory(match, requestedResolution, requestedAdjustment, INITIAL_HISTORY_BARS);
+    historyCache.set(cacheKey, response, false);
+    if (!historyRequestGate.isCurrent(generation)) return;
+    showHistory(response, match, requestedResolution, requestedAdjustment, 'network');
+    console.info('market.history.display', {
+      symbol: match.symbol,
+      resolution: requestedResolution,
+      adjustment: requestedAdjustment,
+      source: 'network',
+      bars: response.bars.length,
+      elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+    });
+    scheduleDeepHistory(match, requestedResolution, requestedAdjustment);
+  } catch (error) {
+    if (!historyRequestGate.isCurrent(generation)) return;
+    const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : String(error);
+    errorLayer.hidden = false;
+    errorLayer.textContent = `${match.name} 加载失败，图表保留上一份有效数据 · ${message}`;
+    status.className = 'connection-status error';
+    status.querySelector('span')!.textContent = '连接异常';
+  } finally {
+    if (historyRequestGate.isCurrent(generation)) loadingLayer.hidden = true;
+  }
+}
+
+async function pollLatestBars() {
+  if (document.hidden || latestPollInFlight || currentBars.length === 0) return;
+  const generation = historyRequestGate.current();
+  const symbol = currentSymbol;
+  const resolution = currentResolution;
+  const adjustment = currentAdjustment;
+  latestPollInFlight = true;
+  try {
+    const response = await invoke<HistoryResponse>('get_history_bars', {
+      symbol: symbol.symbol,
+      kind: symbol.kind,
+      resolution,
+      adjustment,
+      count: 2,
+      includeQuote: true,
+    });
+    if (!historyRequestGate.isCurrent(generation)
+      || currentSymbol.symbol !== symbol.symbol
+      || currentResolution !== resolution
+      || currentAdjustment !== adjustment) return;
+    const seriesUpdates = barsForSeriesUpdate(currentBars, response.bars);
+    currentBars = mergeLatestBars(currentBars, response.bars);
+    const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
+    const cached = historyCache.get(cacheKey);
+    historyCache.set(cacheKey, { ...response, bars: currentBars, quote: undefined }, cached?.deep ?? false);
+    for (const bar of seriesUpdates) {
+      updatePrimarySeries(bar);
+      volumeSeries.update({
+        time: bar.time as UTCTimestamp,
+        value: bar.volume,
+        color: bar.close >= bar.open ? 'rgba(8, 153, 129, .48)' : 'rgba(242, 54, 69, .48)',
+      });
+    }
+    refreshIndicators(response.bars.map((bar) => bar.time));
+    if (response.quote && isUsableQuote(response.quote)) {
+      currentQuote = response.quote;
+      renderPriceLines();
+    }
+    showCurrentSnapshot();
+    status.className = 'connection-status ready';
+    status.querySelector('span')!.textContent = `${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+  } catch (error) {
+    if (historyRequestGate.isCurrent(generation)) {
+      console.error('market.latest.error', {
+        symbol: symbol.symbol,
+        resolution,
+        adjustment,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      status.className = 'connection-status error';
+      status.querySelector('span')!.textContent = '实时更新暂停，保留最后数据';
+    }
+  } finally {
+    latestPollInFlight = false;
+  }
+}
+
+function chartScreenshot() {
+  return chart.takeScreenshot(true, true);
+}
+
+function downloadChartImage(canvas = chartScreenshot()) {
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      showChartToast('生成图片失败');
+      return;
+    }
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `TradeFlow-${currentSymbol.code}-${currentResolution}.png`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showChartToast('PNG 已保存');
+  }, 'image/png');
+}
+
+async function copyChartImage() {
+  const canvas = chartScreenshot();
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    showChartToast('生成图片失败');
+    return;
+  }
+  try {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('clipboard image unavailable');
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    showChartToast('图表已复制');
+  } catch {
+    downloadChartImage(canvas);
+    showChartToast('系统未允许复制，已保存 PNG');
+  }
+}
+
+chart.subscribeCrosshairMove((param) => {
+  if (param.time === undefined) { showCurrentSnapshot(); return; }
+  const bar = currentBars.find((item) => item.time === Number(param.time));
+  if (!bar) return;
+  const index = currentBars.indexOf(bar);
+  showBar(bar, index > 0 ? currentBars[index - 1] : undefined);
+});
+chart.subscribeClick((param) => {
+  if (!markerPlacementActive || param.time === undefined) return;
+  const time = Number(param.time);
+  if (!currentBars.some((bar) => bar.time === time)) {
+    showChartToast('请点在一根 K 线上');
+    return;
+  }
+  openMarkerEditor(time);
+});
+
+document.querySelector<HTMLButtonElement>('#open')!.addEventListener('click', openSymbolDialog);
+watchlistAdd.addEventListener('click', () => {
+  if (watchlistSymbols.includes(currentSymbol.symbol)) {
+    watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== currentSymbol.symbol);
+  } else {
+    if (watchlistSymbols.length >= 100) {
+      errorLayer.hidden = false;
+      errorLayer.textContent = '自选最多保存 100 个证券';
+      return;
+    }
+    watchlistSymbols = [...watchlistSymbols, currentSymbol.symbol];
+  }
+  persistWatchlist();
+  renderWatchlist();
+});
+document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.addEventListener('click', (event) => {
+  closeToolbarMenus();
+  watchlistPanel.hidden = !watchlistPanel.hidden;
+  drawingManager.hidden = true;
+  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
+  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !watchlistPanel.hidden);
+});
+document.querySelector<HTMLDivElement>('.symbol-control')!.addEventListener('click', openSymbolDialog);
+input.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  openSymbolDialog();
+});
+symbolDialogInput.addEventListener('input', renderSymbolResults);
+symbolResults.addEventListener('scroll', () => {
+  if (symbolResults.scrollTop + symbolResults.clientHeight >= symbolResults.scrollHeight - 120) {
+    appendNextSymbolResults();
+  }
+});
+symbolDialogInput.addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    setActiveSymbolResult(activeSymbolResult + 1);
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    setActiveSymbolResult(activeSymbolResult - 1);
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    const match = activeSymbolResult >= 0 ? visibleSymbolResults[activeSymbolResult] : resolveInputSymbol();
+    if (match) void selectSymbol(match);
+  }
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-symbol-category]')) {
+  button.addEventListener('click', () => {
+    activeSymbolCategory = button.dataset.symbolCategory as MarketSearchCategory;
+    activeSymbolSource = 'all';
+    symbolSourceMenu.hidden = true;
+    symbolSourceTrigger.setAttribute('aria-expanded', 'false');
+    for (const categoryButton of document.querySelectorAll<HTMLButtonElement>('[data-symbol-category]')) {
+      categoryButton.setAttribute('aria-selected', String(categoryButton === button));
+    }
+    renderSymbolSources();
+    renderSymbolResults();
+    symbolDialogInput.focus();
+  });
+}
+symbolSourceTrigger.addEventListener('click', () => {
+  symbolSourceMenu.hidden = !symbolSourceMenu.hidden;
+  symbolSourceTrigger.setAttribute('aria-expanded', String(!symbolSourceMenu.hidden));
+});
+document.querySelector<HTMLButtonElement>('#symbol-dialog-close')!.addEventListener('click', () => {
+  closeSymbolResults();
+  input.focus();
+});
+symbolDialogLayer.addEventListener('pointerdown', (event) => {
+  if (event.target === symbolDialogLayer) closeSymbolResults();
+});
+symbolDialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!symbolSourceMenu.hidden) {
+    symbolSourceMenu.hidden = true;
+    symbolSourceTrigger.setAttribute('aria-expanded', 'false');
+    symbolSourceTrigger.focus();
+    return;
+  }
+  closeSymbolResults();
+  input.focus();
+});
+document.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, currentAdjustment));
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
+  button.addEventListener('click', () => void openHistory(currentSymbol, button.dataset.resolution as Resolution, currentAdjustment));
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
+  button.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, button.dataset.adjustment as Adjustment));
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-chart-type]')) {
+  button.addEventListener('click', () => {
+    applyChartType(button.dataset.chartType as ChartType);
+    chartTypeMenu.open = false;
+  });
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-price-scale]')) {
+  button.addEventListener('click', () => {
+    applyPriceScale(button.dataset.priceScale as PriceScaleSetting);
+  });
+}
+priceScaleControls.addEventListener('toggle', () => {
+  if (!priceScaleControls.open) return;
+  priceScaleAuto = chart.priceScale('right').options().autoScale;
+  applyPriceScale(currentPriceScale);
+});
+document.querySelector<HTMLButtonElement>('#price-scale-auto')!.addEventListener('click', () => {
+  priceScaleAuto = !priceScaleAuto;
+  applyPriceScale(currentPriceScale);
+});
+document.querySelector<HTMLButtonElement>('#price-scale-invert')!.addEventListener('click', () => {
+  priceScaleInverted = !priceScaleInverted;
+  applyPriceScale(currentPriceScale);
+});
+document.querySelector<HTMLButtonElement>('#price-scale-manual')!.addEventListener('click', openManualPriceRange);
+document.querySelector<HTMLButtonElement>('#price-scale-reset')!.addEventListener('click', () => {
+  priceScaleAuto = true;
+  chart.priceScale('right').setAutoScale(true);
+  applyPriceScale(currentPriceScale);
+});
+document.querySelector<HTMLButtonElement>('#confirm-price-range')!.addEventListener('click', applyManualPriceRange);
+document.querySelector<HTMLButtonElement>('#cancel-price-range')!.addEventListener('click', () => { priceRangeEditor.hidden = true; });
+for (const input of [priceRangeMin, priceRangeMax]) {
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') applyManualPriceRange();
+    if (event.key === 'Escape') priceRangeEditor.hidden = true;
+  });
+}
+previousCloseToggle.addEventListener('click', () => {
+  const settings = currentPriceLineSettings();
+  settings.previousClose = !settings.previousClose;
+  persistChartPreferences();
+  renderPriceLines();
+  syncPriceLineMenu();
+  renderDrawingManager();
+});
+document.querySelector<HTMLButtonElement>('#edit-cost-price')!.addEventListener('click', () => openPriceLineEditor('cost'));
+document.querySelector<HTMLButtonElement>('#add-custom-price')!.addEventListener('click', () => openPriceLineEditor('custom'));
+document.querySelector<HTMLButtonElement>('#confirm-price-line')!.addEventListener('click', commitPriceLineEditor);
+document.querySelector<HTMLButtonElement>('#cancel-price-line')!.addEventListener('click', closePriceLineEditor);
+priceLineInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') commitPriceLineEditor();
+  if (event.key === 'Escape') closePriceLineEditor();
+});
+document.querySelector<HTMLButtonElement>('#copy-chart')!.addEventListener('click', () => {
+  document.querySelector<HTMLDetailsElement>('#chart-capture-menu')!.open = false;
+  void copyChartImage();
+});
+document.querySelector<HTMLButtonElement>('#save-chart')!.addEventListener('click', () => {
+  document.querySelector<HTMLDetailsElement>('#chart-capture-menu')!.open = false;
+  downloadChartImage();
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-time-range]')) {
+  button.addEventListener('click', () => {
+    const range = visibleRangeForPreset(currentBars, button.dataset.timeRange as TimeRangePreset);
+    if (range) chart.timeScale().setVisibleRange({ from: range.from as UTCTimestamp, to: range.to as UTCTimestamp });
+  });
+}
+document.querySelector<HTMLButtonElement>('#time-pan-left')!.addEventListener('click', () => {
+  const range = chart.timeScale().getVisibleLogicalRange();
+  if (range) chart.timeScale().setVisibleLogicalRange(panLogicalRange(range, -1));
+});
+document.querySelector<HTMLButtonElement>('#time-pan-right')!.addEventListener('click', () => {
+  const range = chart.timeScale().getVisibleLogicalRange();
+  if (range) chart.timeScale().setVisibleLogicalRange(panLogicalRange(range, 1));
+});
+document.querySelector<HTMLButtonElement>('#go-to-latest')!.addEventListener('click', () => chart.timeScale().scrollToRealTime());
+function goToSelectedDate() {
+  const timestamp = parseShanghaiDate(goToDateInput.value);
+  const index = timestamp === null ? null : nearestBarIndex(currentBars, timestamp);
+  if (index === null) { showChartToast('请选择有效日期'); return; }
+  chart.timeScale().setVisibleLogicalRange(logicalRangeAround(index, currentBars.length));
+}
+document.querySelector<HTMLButtonElement>('#go-to-date-button')!.addEventListener('click', goToSelectedDate);
+goToDateInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') goToSelectedDate(); });
+const toolbarMenus = [...document.querySelectorAll<HTMLDetailsElement>('.chart-control-menu, .indicator-menu, .price-scale-controls')];
+function closeToolbarMenus() {
+  for (const menu of toolbarMenus) menu.open = false;
+}
+for (const menu of toolbarMenus) {
+  menu.addEventListener('toggle', () => {
+    if (menu.open) for (const other of toolbarMenus) if (other !== menu) other.open = false;
+  });
+}
+status.addEventListener('click', async () => {
+  const historyGeneration = historyRequestGate.current();
+  status.disabled = true;
+  status.className = 'connection-status loading';
+  status.querySelector('span')!.textContent = '正在测试 19 台主站';
+  try {
+    const response = await invoke<HostBenchmarkResponse>('benchmark_hosts');
+    if (!historyRequestGate.isCurrent(historyGeneration)) return;
+    const healthy = response.probes.filter((probe) => probe.ok);
+    const fastest = healthy[0];
+    status.className = fastest ? 'connection-status ready' : 'connection-status error';
+    status.querySelector('span')!.textContent = fastest
+      ? `${fastest.host} · ${fastest.latencyMs}ms · ${healthy.length}/${response.probes.length}`
+      : '主站均不可用';
+    status.title = response.probes
+      .map((probe) => `${probe.host} · ${probe.ok ? `${probe.latencyMs}ms` : probe.error ?? '失败'}`)
+      .join('\n');
+  } catch (error) {
+    if (!historyRequestGate.isCurrent(historyGeneration)) return;
+    status.className = 'connection-status error';
+    status.querySelector('span')!.textContent = '主站测速失败';
+    status.title = String(error);
+  } finally {
+    status.disabled = false;
+  }
+});
+document.querySelector<HTMLButtonElement>('#fit-chart')!.addEventListener('click', () => chart.timeScale().fitContent());
+crosshairTool.addEventListener('click', () => {
+  cancelMarkerPlacement();
+  closeMarkerEditor();
+  leaveDrawingMode(true);
+});
+markerTool.setAttribute('aria-pressed', 'false');
+markerTool.addEventListener('click', () => {
+  closeToolbarMenus();
+  closeMarkerEditor();
+  leaveDrawingMode(true);
+  markerPlacementActive = true;
+  markerTool.classList.add('active');
+  markerTool.setAttribute('aria-pressed', 'true');
+  crosshairTool.classList.remove('active');
+  crosshairTool.setAttribute('aria-pressed', 'false');
+  drawingModeHint.textContent = '标记 · 点击要标记的 K 线';
+  drawingModeHint.hidden = false;
+  chartStage.classList.add('drawing-active');
+});
+document.querySelector<HTMLButtonElement>('#confirm-marker')!.addEventListener('click', commitMarkerEditor);
+document.querySelector<HTMLButtonElement>('#cancel-marker')!.addEventListener('click', closeMarkerEditor);
+deleteMarkerButton.addEventListener('click', deleteEditingMarker);
+markerText.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') commitMarkerEditor();
+  if (event.key === 'Escape') closeMarkerEditor();
+});
+for (const button of drawingButtons) {
+  button.setAttribute('aria-pressed', 'false');
+  button.addEventListener('click', () => startDrawing(button.dataset.drawingTool as DrawingToolType, button));
+}
+for (const menu of drawingMenus) {
+  menu.addEventListener('toggle', () => {
+    if (menu.open) for (const otherMenu of drawingMenus) if (otherMenu !== menu) otherMenu.open = false;
+  });
+}
+for (const control of drawingPropertyControls) {
+  control.addEventListener('toggle', () => {
+    if (control.open) for (const otherControl of drawingPropertyControls) if (otherControl !== control) otherControl.open = false;
+  });
+}
+function placeDrawingText() {
+  const button = pendingTextButton;
+  if (!button) return;
+  const value = drawingTextInput.value.trim() || '文字';
+  pendingTextButton = null;
+  startDrawing(button.dataset.drawingTool as 'Text' | 'Callout', button, value);
+}
+document.querySelector<HTMLButtonElement>('#place-drawing-text')!.addEventListener('click', placeDrawingText);
+drawingTextInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.stopPropagation();
+    placeDrawingText();
+  }
+});
+drawingColor.addEventListener('input', applySelectedDrawingStyle);
+drawingSize.addEventListener('input', () => {
+  drawingSizeValue.value = `${drawingSize.value}px`;
+  applySelectedDrawingStyle();
+});
+drawingOpacity.addEventListener('input', () => {
+  drawingOpacityValue.value = `${drawingOpacity.value}%`;
+  applySelectedDrawingStyle();
+});
+document.querySelector<HTMLButtonElement>('#delete-selected-drawing')!.addEventListener('click', () => {
+  if (!selectedDrawing) return;
+  lineTools.removeLineToolsById([selectedDrawing.id]);
+  hideDrawingProperties();
+  commitDrawingState();
+});
+document.querySelector<HTMLButtonElement>('#close-drawing-properties')!.addEventListener('click', hideDrawingProperties);
+const drawingPropertyGrip = drawingProperties.querySelector<HTMLElement>('.drawing-property-grip')!;
+let propertyDrag: { pointerId: number; x: number; y: number; left: number; top: number } | null = null;
+drawingPropertyGrip.addEventListener('pointerdown', (event) => {
+  propertyDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    left: drawingProperties.offsetLeft,
+    top: drawingProperties.offsetTop,
+  };
+  drawingPropertyGrip.setPointerCapture(event.pointerId);
+});
+drawingPropertyGrip.addEventListener('pointermove', (event) => {
+  if (!propertyDrag || propertyDrag.pointerId !== event.pointerId) return;
+  const left = Math.max(8, Math.min(chartStage.clientWidth - drawingProperties.offsetWidth - 8, propertyDrag.left + event.clientX - propertyDrag.x));
+  const top = Math.max(8, Math.min(chartStage.clientHeight - drawingProperties.offsetHeight - 8, propertyDrag.top + event.clientY - propertyDrag.y));
+  drawingProperties.style.left = `${Math.round(left)}px`;
+  drawingProperties.style.top = `${Math.round(top)}px`;
+});
+drawingPropertyGrip.addEventListener('pointerup', (event) => {
+  if (propertyDrag?.pointerId === event.pointerId) propertyDrag = null;
+});
+document.addEventListener('pointerdown', (event) => {
+  if (!symbolSourceMenu.hidden && !(event.target as Element).closest('.symbol-source-row')) {
+    symbolSourceMenu.hidden = true;
+    symbolSourceTrigger.setAttribute('aria-expanded', 'false');
+  }
+  if (!(event.target as Element).closest('.drawing-tool-menu')) {
+    for (const menu of drawingMenus) menu.open = false;
+  }
+  if (!(event.target as Element).closest('.drawing-property-control')) {
+    for (const control of drawingPropertyControls) control.open = false;
+  }
+});
+document.querySelector<HTMLButtonElement>('#lock-drawings')!.addEventListener('click', (event) => {
+  drawingsLocked = !drawingsLocked;
+  if (drawingsLocked) leaveDrawingMode(true);
+  lineTools.setLocked(drawingsLocked);
+  const button = event.currentTarget as HTMLButtonElement;
+  button.classList.toggle('active', drawingsLocked);
+  button.setAttribute('aria-pressed', String(drawingsLocked));
+  for (const drawingButton of drawingButtons) drawingButton.disabled = drawingsLocked;
+});
+document.querySelector<HTMLButtonElement>('#clear-drawings')!.addEventListener('click', () => {
+  leaveDrawingMode(true);
+  lineTools.removeAllLineTools();
+  commitDrawingState();
+});
+undoDrawing.addEventListener('click', () => {
+  const snapshot = drawingHistory.undo();
+  if (snapshot && applyDrawingSnapshot(snapshot)) persistDrawingSnapshot(snapshot);
+  updateDrawingHistoryButtons();
+});
+redoDrawing.addEventListener('click', () => {
+  const snapshot = drawingHistory.redo();
+  if (snapshot && applyDrawingSnapshot(snapshot)) persistDrawingSnapshot(snapshot);
+  updateDrawingHistoryButtons();
+});
+document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.addEventListener('click', (event) => {
+  closeToolbarMenus();
+  drawingManager.hidden = !drawingManager.hidden;
+  watchlistPanel.hidden = true;
+  document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.classList.remove('active');
+  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !drawingManager.hidden);
+  if (!drawingManager.hidden) renderDrawingManager();
+});
+document.querySelector<HTMLButtonElement>('#close-drawing-manager')!.addEventListener('click', () => {
+  drawingManager.hidden = true;
+  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
+});
+document.querySelector<HTMLButtonElement>('#zoom-tool')!.addEventListener('click', () => {
+  const range = chart.timeScale().getVisibleLogicalRange();
+  if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + 12, to: range.to - 12 });
+});
+document.querySelector<HTMLButtonElement>('#magnet-tool')!.addEventListener('click', (event) => {
+  magnetEnabled = !magnetEnabled;
+  chart.applyOptions({ crosshair: { mode: magnetEnabled ? CrosshairMode.Magnet : CrosshairMode.Normal } });
+  lineTools.setMagnetThreshold(magnetEnabled ? 12 : 0);
+  (event.currentTarget as HTMLButtonElement).classList.toggle('active', magnetEnabled);
+});
+document.querySelector<HTMLButtonElement>('#volume-toggle')!.addEventListener('click', (event) => {
+  setVolumeActive(!(event.currentTarget as HTMLButtonElement).classList.contains('active'));
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-indicator]')) {
+  button.addEventListener('click', () => {
+    const indicator = button.dataset.indicator as IndicatorName;
+    setIndicatorActive(indicator, !activeIndicators.has(indicator));
+  });
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange(positionDrawingProperties);
+chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (!range) return;
+  const cacheKey = historyCacheKey(currentSymbol.symbol, currentResolution, currentAdjustment);
+  const cached = historyCache.get(cacheKey);
+  if (shouldLoadDeepHistory(range.from, currentBars.length, cached?.deep ?? false)) {
+    scheduleDeepHistory(
+      currentSymbol,
+      currentResolution,
+      currentAdjustment,
+      0,
+    );
+  }
+});
+window.addEventListener('resize', positionDrawingProperties);
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    cancelMarkerPlacement();
+    closeMarkerEditor();
+    priceRangeEditor.hidden = true;
+    leaveDrawingMode(true);
+  }
+  if ((event.key === 'Delete' || event.key === 'Backspace') && selectedDrawing && !(event.target instanceof HTMLInputElement)) {
+    lineTools.removeLineToolsById([selectedDrawing.id]);
+    hideDrawingProperties();
+    commitDrawingState();
+  }
+});
+applyChartType(currentChartType, false);
+applyPriceScale(currentPriceScale);
+for (const indicator of [...activeIndicators]) setIndicatorActive(indicator, true, false);
+setVolumeActive(volumeVisible, false);
+applyMainSeriesOrder();
+renderSecondaryPaneOrder();
+renderWatchlist();
+void openHistory(defaultSymbol, currentResolution, currentAdjustment);
+
+function scheduleLatestPoll(delayMs = marketPollPlan(new Date(), document.hidden).delayMs) {
+  if (latestPollTimer !== undefined) window.clearTimeout(latestPollTimer);
+  latestPollTimer = window.setTimeout(async () => {
+    await pollLatestBars();
+    scheduleLatestPoll();
+  }, delayMs);
+}
+
+document.addEventListener('visibilitychange', () => scheduleLatestPoll(document.hidden ? 60_000 : 0));
+scheduleLatestPoll();

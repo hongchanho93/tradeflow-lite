@@ -1,0 +1,79 @@
+/* 来源 index.html 第 20863-20904 行，函数 injectThemeToolbarStyle()
+   覆盖：顶部工具栏右侧那颗切换亮/暗的月亮按钮 #tv-theme-toolbar-toggle */
+
+#tv-theme-toolbar-toggle {
+  width:38px;
+  height:38px;
+  min-width:38px;
+  margin:0;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:var(--tv-color-toolbar-button-text,#0f0f0f);
+  cursor:pointer;
+}
+#tv-reload-toolbar-button {
+  width:38px;
+  height:38px;
+  min-width:38px;
+  margin:0;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:var(--tv-color-toolbar-button-text,#0f0f0f);
+  cursor:pointer;
+}
+#tv-theme-toolbar-toggle[data-mode='dark'] {
+  color:var(--tv-color-toolbar-button-text,#d1d4dc);
+}
+body.theme-dark #tv-reload-toolbar-button {
+  color:var(--tv-color-toolbar-button-text,#d1d4dc);
+}
+#tv-theme-toolbar-toggle:hover {
+  background:var(--tv-color-toolbar-button-background-hover,rgba(120,123,134,.12));
+  color:var(--tv-color-toolbar-button-text-hover,#0f0f0f);
+}
+#tv-reload-toolbar-button:hover {
+  background:var(--tv-color-toolbar-button-background-hover,rgba(120,123,134,.12));
+  color:var(--tv-color-toolbar-button-text-hover,#0f0f0f);
+}
+#tv-theme-toolbar-toggle[data-mode='dark']:hover {
+  color:var(--tv-color-toolbar-button-text-hover,#f0f3fa);
+}
+body.theme-dark #tv-reload-toolbar-button:hover {
+  color:var(--tv-color-toolbar-button-text-hover,#f0f3fa);
+}
+#tv-theme-toolbar-toggle svg {
+  width:28px;
+  height:28px;
+  fill:currentColor;
+}
+#tv-reload-toolbar-button svg {
+  width:21px;
+  height:21px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.35;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+#tv-theme-toolbar-toggle .theme-sun {
+  display:none;
+}
+#tv-theme-toolbar-toggle[data-mode='light'] .theme-sun {
+  display:block;
+}
+#tv-theme-toolbar-toggle[data-mode='light'] .theme-moon {
+  display:none;
+}
+#header-toolbar-quick-search.tv-theme-replaced {
+  display:none!important;
+}

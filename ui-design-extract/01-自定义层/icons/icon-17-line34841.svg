@@ -1,0 +1,4 @@
+<svg width="' + w + '" height="' + h + '">
+<polyline fill="none" stroke="' + color +
+              '" stroke-width="1.5" points="' + pts + '"/>
+</svg>

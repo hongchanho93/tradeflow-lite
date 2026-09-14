@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 15 15" width="15" height="15" fill="none">
+<path stroke="currentColor" d="M11 2 7.5 5 4 2" class="bracket-up"/>
+<path stroke="currentColor" d="M4 13l3.5-3 3.5 3" class="bracket-down"/>
+</svg>

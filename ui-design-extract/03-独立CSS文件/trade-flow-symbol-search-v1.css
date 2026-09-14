@@ -1,0 +1,144 @@
+/* 原文件：charting_library-master-main/charting_library/trade-flow-symbol-search-v1.css
+   顶部代码输入框 302132 的搜索下拉样式 */
+
+/*
+ * Trade Flow symbol-search layout overrides.
+ *
+ * Charting Library v31.2.0 renders the native source selector inside the
+ * results heading grid. Trade Flow uses the same native position for the
+ * stock, index, ETF, Board, listed-futures and continuous-futures categories.
+ */
+:is([data-name="symbol-search-items-dialog"], [data-name="watchlist-symbol-search-dialog"])
+  [data-qa-id="sources-button"] {
+  color: inherit !important;
+}
+
+.tf-symbol-source-trigger,
+.tf-symbol-contract-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tf-symbol-contract-trigger {
+  margin-inline-end: 32px;
+}
+
+.tf-symbol-source-trigger::after,
+.tf-symbol-contract-trigger::after {
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: "";
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.tf-futures-contract-role-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font: 500 11px/18px -apple-system, system-ui, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
+  vertical-align: 1px;
+}
+
+.tf-futures-contract-role-badge[data-trade-flow-contract-role="dominant"] {
+  background: color-mix(in srgb, #f0b90b 16%, transparent);
+  color: #f0b90b;
+}
+
+.tf-futures-contract-role-badge[data-trade-flow-contract-role="secondary"] {
+  background: color-mix(in srgb, #2962ff 14%, transparent);
+  color: #5b8cff;
+}
+
+.tf-symbol-source-menu {
+  position: absolute;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 176px;
+  max-width: 240px;
+  max-height: min(360px, calc(100vh - 24px));
+  box-sizing: border-box;
+  padding: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 0;
+  border-radius: 6px;
+  background: var(--tv-custom-panel-bg, #1e1e1e);
+  color: var(--tv-custom-panel-text, #d1d4dc);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .2);
+  font: 14px/18px -apple-system, system-ui, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
+}
+
+.tf-symbol-source-menu-item {
+  display: flex;
+  flex: 0 0 40px;
+  align-items: center;
+  width: 100%;
+  min-width: 164px;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tf-symbol-source-menu-item:hover,
+.tf-symbol-source-menu-item:focus-visible {
+  outline: 0;
+  background: color-mix(in srgb, var(--tv-custom-panel-text, #d1d4dc) 12%, transparent);
+}
+
+.tf-symbol-source-menu-item[aria-checked="true"] {
+  background: var(--tv-custom-panel-text, #d1d4dc);
+  color: var(--tv-custom-panel-bg, #1e1e1e);
+}
+
+:is([data-name="symbol-search-items-dialog"], [data-name="watchlist-symbol-search-dialog"]):not(:has(#stock[aria-selected="true"])):not(:has(#index[aria-selected="true"])):not(:has(#fund[aria-selected="true"])):not(:has(#sector[aria-selected="true"])):not(:has(#futures[aria-selected="true"])):not(:has(#futures_continuous[aria-selected="true"]))
+  div:has(> div > [data-qa-id="sources-button"]) {
+  display: none !important;
+}
+
+@media (min-width: 520px) {
+  :is([data-name="symbol-search-items-dialog"], [data-name="watchlist-symbol-search-dialog"])
+    div:has(+ div > div > [data-qa-id="sources-button"]) {
+    display: none !important;
+  }
+
+  :is([data-name="symbol-search-items-dialog"], [data-name="watchlist-symbol-search-dialog"]):is(:has(#stock[aria-selected="true"]), :has(#index[aria-selected="true"]), :has(#fund[aria-selected="true"]), :has(#sector[aria-selected="true"]), :has(#futures[aria-selected="true"]), :has(#futures_continuous[aria-selected="true"]))
+    div:has(> div > [data-qa-id="sources-button"]) {
+    display: flex !important;
+    grid-column: 1 / -1 !important;
+    justify-content: flex-start !important;
+    padding-inline: 16px !important;
+  }
+
+  :is([data-name="symbol-search-items-dialog"], [data-name="watchlist-symbol-search-dialog"]):is(:has(#stock[aria-selected="true"]), :has(#index[aria-selected="true"]), :has(#fund[aria-selected="true"]), :has(#sector[aria-selected="true"]), :has(#futures[aria-selected="true"]), :has(#futures_continuous[aria-selected="true"]))
+    div:has(> div > [data-qa-id="sources-button"])
+    > div:first-child {
+    display: none !important;
+  }
+}
