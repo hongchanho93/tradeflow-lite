@@ -58,6 +58,15 @@ import horizontalRayDrawingIcon from './assets/drawing-tools/horizontal-ray.svg?
 import pathDrawingIcon from './assets/drawing-tools/path.svg?raw';
 import triangleDrawingIcon from './assets/drawing-tools/triangle.svg?raw';
 import verticalLineDrawingIcon from './assets/drawing-tools/vertical-line.svg?raw';
+import cursorToolbarIcon from './assets/drawing-toolbar/cursor.svg?raw';
+import lockActiveToolbarIcon from './assets/drawing-toolbar/lock-active.svg?raw';
+import lockToolbarIcon from './assets/drawing-toolbar/lock.svg?raw';
+import magnetToolbarIcon from './assets/drawing-toolbar/magnet.svg?raw';
+import objectTreeToolbarIcon from './assets/drawing-toolbar/object-tree.svg?raw';
+import redoToolbarIcon from './assets/drawing-toolbar/redo.svg?raw';
+import trashToolbarIcon from './assets/drawing-toolbar/trash.svg?raw';
+import undoToolbarIcon from './assets/drawing-toolbar/undo.svg?raw';
+import zoomToolbarIcon from './assets/drawing-toolbar/zoom.svg?raw';
 import priceScaleGearIcon from './assets/price-scale-gear.svg?raw';
 import { LineToolUpArrow } from './drawing-tools/up-arrow';
 import {
@@ -309,7 +318,7 @@ const icons = {
   camera: icon('<path d="M4 7h4l1.5-2h5L16 7h4v12H4V7Z"/><circle cx="12" cy="13" r="3.5"/>'),
   copy: icon('<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>'),
   download: icon('<path d="M12 3v12m-4-4 4 4 4-4"/><path d="M4 19h16"/>'),
-  crosshair: icon('<circle cx="12" cy="12" r="2"/><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/>'),
+  crosshair: cursorToolbarIcon,
   trend: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M7.354 21.354l14-14-.707-.707-14 14z"/><path d="M22.5 7c.828 0 1.5-.672 1.5-1.5S23.328 4 22.5 4 21 4.672 21 5.5 21.672 7 22.5 7zm0 1A2.5 2.5 0 1 1 25 5.5 2.5 2.5 0 0 1 22.5 8zM5.5 24c.828 0 1.5-.672 1.5-1.5S6.328 21 5.5 21 4 21.672 4 22.5 4.672 24 5.5 24zm0 1A2.5 2.5 0 1 1 8 22.5 2.5 2.5 0 0 1 5.5 25z"/></g>'),
   ray: drawingIcon('<g fill="currentColor" fill-rule="nonzero"><path d="M8.354 20.354l5-5-.707-.707-5 5zM16.354 12.354l8-8-.707-.707-8 8z"/><path d="M14.5 15c.828 0 1.5-.672 1.5-1.5S15.328 12 14.5 12s-1.5.672-1.5 1.5.672 1.5 1.5 1.5zm0 1a2.5 2.5 0 1 1 2.5-2.5 2.5 2.5 0 0 1-2.5 2.5zM6.5 23c.828 0 1.5-.672 1.5-1.5S7.328 20 6.5 20 5 20.672 5 21.5 5.672 23 6.5 23zm0 1A2.5 2.5 0 1 1 9 21.5 2.5 2.5 0 0 1 6.5 24z"/></g>'),
   arrow: drawingIcon('<g fill="currentColor"><path fill-rule="nonzero" d="M7.354 21.354l14-14-.707-.707-14 14z"/><path d="M21 7l-8 3 5 5z"/><path fill-rule="nonzero" d="M22.5 7c.828 0 1.5-.672 1.5-1.5S23.328 4 22.5 4 21 4.672 21 5.5 21.672 7 22.5 7zm0 1A2.5 2.5 0 1 1 25 5.5 2.5 2.5 0 0 1 22.5 8zM5.5 24c.828 0 1.5-.672 1.5-1.5S6.328 21 5.5 21 4 21.672 4 22.5 4.672 24 5.5 24zm0 1A2.5 2.5 0 1 1 8 22.5 2.5 2.5 0 0 1 5.5 25z"/></g>'),
@@ -331,14 +340,15 @@ const icons = {
   text: drawingIcon('<path fill="currentColor" d="M8 6.5c0-.28.22-.5.5-.5H14v16h-2v1h5v-1h-2V6h5.5c.28 0 .5.22.5.5V9h1V6.5c0-.83-.67-1.5-1.5-1.5h-12C7.67 5 7 5.67 7 6.5V9h1V6.5z"/>'),
   ruler: drawingIcon('<g fill="currentColor"><path fill-rule="nonzero" d="M4 5h16.5V4H4zM25 24H8.5v1H25z"/><path fill-rule="nonzero" d="M6.5 26A1.5 1.5 0 1 0 5 24.5 1.5 1.5 0 0 0 6.5 26zm0 1A2.5 2.5 0 1 1 9 24.5 2.5 2.5 0 0 1 6.5 27zM22.5 6A1.5 1.5 0 1 0 21 4.5 1.5 1.5 0 0 0 22.5 6zm0 1A2.5 2.5 0 1 1 25 4.5 2.5 2.5 0 0 1 22.5 7zM14 9v14h1V9z"/><path d="M14.5 6L17 9h-5z"/></g>'),
   position: drawingIcon('<path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M4.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 6.5A2.5 2.5 0 0 1 6.95 6H24v1H6.95A2.5 2.5 0 0 1 2 6.5zM4.5 15a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 16.5a2.5 2.5 0 0 1 4.95-.5h13.1a2.5 2.5 0 1 1 0 1H6.95A2.5 2.5 0 0 1 2 16.5zM22.5 15a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm-18 6a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2 22.5a2.5 2.5 0 0 1 4.95-.5H24v1H6.95A2.5 2.5 0 0 1 2 22.5z"/>'),
-  zoom: icon('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4M10.5 7v7m-3.5-3.5h7"/>'),
-  magnet: icon('<path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4H6Z"/>'),
-  lock: icon('<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'),
+  zoom: zoomToolbarIcon,
+  magnet: magnetToolbarIcon,
+  lock: lockToolbarIcon,
+  lockActive: lockActiveToolbarIcon,
   eye: icon('<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>'),
-  undo: icon('<path d="M9 7 4 12l5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/>'),
-  redo: icon('<path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/>'),
-  layers: icon('<path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/>'),
-  trash: icon('<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>'),
+  undo: undoToolbarIcon,
+  redo: redoToolbarIcon,
+  layers: objectTreeToolbarIcon,
+  trash: trashToolbarIcon,
   close: icon('<path d="m7 7 10 10M17 7 7 17"/>'),
   marker: drawingIcon('<path fill="currentColor" fill-rule="nonzero" d="M7.382 16h14.483l-4.167-5 4.167-5h-15.865v12.764l1.382-2.764zm-2.382 7v-18h19l-5 6 5 6h-16l-3 6z"/>'),
 };
@@ -484,7 +494,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
     <div class="workspace">
       <aside class="drawing-toolbar" aria-label="绘图工具栏">
-        <button id="crosshair-tool" class="rail-button active" aria-label="十字线">${icons.crosshair}</button>
+        <button id="crosshair-tool" class="rail-button active" aria-label="鼠标指针" title="鼠标指针">${icons.crosshair}</button>
         <span class="rail-divider"></span>
         <details class="drawing-tool-menu">
           <summary class="rail-button" aria-label="线条工具" title="线条工具">${icons.trend}</summary>
@@ -536,7 +546,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <span class="rail-divider"></span>
         <button id="zoom-tool" class="rail-button" aria-label="放大">${icons.zoom}</button>
         <button id="magnet-tool" class="rail-button" aria-label="磁铁">${icons.magnet}</button>
-        <button id="lock-drawings" class="rail-button" aria-label="锁定绘图" title="锁定绘图">${icons.lock}</button>
+        <button id="lock-drawings" class="rail-button" aria-label="锁定绘图" title="锁定绘图"><span data-icon-state="unlocked">${icons.lock}</span><span data-icon-state="locked">${icons.lockActive}</span></button>
         <button id="undo-drawing" class="rail-button" aria-label="撤销绘图操作" title="撤销" disabled>${icons.undo}</button>
         <button id="redo-drawing" class="rail-button" aria-label="重做绘图操作" title="重做" disabled>${icons.redo}</button>
         <button id="drawing-manager-toggle" class="rail-button" aria-label="绘图对象管理" title="对象管理">${icons.layers}</button>
