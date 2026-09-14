@@ -68,6 +68,7 @@ import {
   updateLatestBarInPlace,
 } from './bar-series';
 import { BollingerBandPrimitive } from './boll-band';
+import { loadChartSettings, saveChartSettings, type ChartSettings } from './chart-settings';
 import {
   loadChartPreferences,
   movePaneOrder,
@@ -269,6 +270,7 @@ let deepHistoryTimerKey = '';
 let deepHistoryNavigationReady = false;
 const deepHistoryLoading = new Set<string>();
 const chartPreferences = loadChartPreferences(localStorage);
+let chartSettings = loadChartSettings(localStorage);
 const activeIndicators = new Set<IndicatorName>(
   chartPreferences.activeSeries.filter((series): series is IndicatorName => series !== 'volume'),
 );
@@ -395,6 +397,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <button id="market-data-toggle" class="toolbar-button" aria-label="打开盘口和成交">盘口</button>
       <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
       <button id="fit-chart" class="toolbar-button" aria-label="适应全部数据">${icons.fullscreen}</button>
+      <button id="open-chart-settings" class="toolbar-button icon-only" aria-label="设置" title="设置">${priceScaleGearIcon}</button>
       <details id="chart-capture-menu" class="chart-control-menu chart-capture-menu">
         <summary class="toolbar-button icon-only" aria-label="生成快照" title="生成快照">${icons.camera}</summary>
         <div class="chart-control-menu-panel" aria-label="生成快照">
@@ -402,6 +405,54 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <button id="copy-chart" type="button" aria-label="复制图片">${icons.copy}<span>复制图片</span></button>
         </div>
       </details>
+    </div>
+
+    <div id="chart-settings-layer" class="chart-settings-layer" hidden>
+      <section id="chart-settings-dialog" class="chart-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="chart-settings-title">
+        <header class="chart-settings-header">
+          <h2 id="chart-settings-title">设置</h2>
+          <button id="close-chart-settings" type="button" aria-label="关闭设置">${icons.close}</button>
+        </header>
+        <nav class="chart-settings-tabs" aria-label="设置分类">
+          <button type="button" data-settings-tab="symbol" aria-selected="true">${icons.indicator}<span>商品代码</span></button>
+          <button type="button" data-settings-tab="status" aria-selected="false">${icons.layers}<span>状态行</span></button>
+          <button type="button" data-settings-tab="scales" aria-selected="false">${icons.priceLine}<span>坐标和线条</span></button>
+          <button type="button" data-settings-tab="appearance" aria-selected="false">${icons.fullscreen}<span>版面</span></button>
+        </nav>
+        <div class="chart-settings-content">
+          <div class="chart-settings-panel" data-settings-panel="symbol">
+            <h3>K线图</h3>
+            <label class="chart-settings-row"><span>上涨颜色</span><input data-chart-setting="upColor" type="color" aria-label="上涨颜色" /></label>
+            <label class="chart-settings-row"><span>下跌颜色</span><input data-chart-setting="downColor" type="color" aria-label="下跌颜色" /></label>
+            <label class="chart-settings-row"><span>边框</span><input data-chart-setting="borderVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>影线</span><input data-chart-setting="wickVisible" type="checkbox" /></label>
+            <div class="chart-settings-section-title">数据修改</div>
+            <label class="chart-settings-row"><span>时区</span><select aria-label="时区"><option>(UTC+8) 上海</option></select></label>
+          </div>
+          <div class="chart-settings-panel" data-settings-panel="status" hidden>
+            <h3>状态行</h3>
+            <label class="chart-settings-row"><span>商品代码和图标</span><input data-chart-setting="legendSymbolVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>开、高、低、收</span><input data-chart-setting="legendValuesVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>成交量数值</span><input data-chart-setting="volumeLegendVisible" type="checkbox" /></label>
+          </div>
+          <div class="chart-settings-panel" data-settings-panel="scales" hidden>
+            <h3>坐标和线条</h3>
+            <label class="chart-settings-row"><span>垂直网格线</span><input data-chart-setting="verticalGridVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>水平网格线</span><input data-chart-setting="horizontalGridVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>十字线标签</span><input data-chart-setting="crosshairLabelsVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>最新价格线和标签</span><input data-chart-setting="lastPriceLineVisible" type="checkbox" /></label>
+          </div>
+          <div class="chart-settings-panel" data-settings-panel="appearance" hidden>
+            <h3>版面</h3>
+            <label class="chart-settings-row"><span>Trade Flow 水印</span><input data-chart-setting="watermarkVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>底部时间导航</span><input data-chart-setting="timeNavigationVisible" type="checkbox" /></label>
+          </div>
+        </div>
+        <footer class="chart-settings-footer">
+          <button id="cancel-chart-settings" type="button">取消</button>
+          <button id="confirm-chart-settings" class="primary" type="button">确认</button>
+        </footer>
+      </section>
     </div>
 
     <div id="symbol-dialog-layer" class="symbol-dialog-layer" hidden>
@@ -630,11 +681,14 @@ const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
     fontSize: 11,
     panes: { separatorColor: 'rgba(148, 163, 184, .14)', separatorHoverColor: 'rgba(148, 163, 184, .18)', enableResize: true },
   },
-  grid: { vertLines: { color: '#242834' }, horzLines: { color: '#242834' } },
+  grid: {
+    vertLines: { color: '#242834', visible: chartSettings.verticalGridVisible },
+    horzLines: { color: '#242834', visible: chartSettings.horizontalGridVisible },
+  },
   crosshair: {
     mode: CrosshairMode.Normal,
-    vertLine: { color: '#666b74', width: 1, style: 3, labelBackgroundColor: '#363a40' },
-    horzLine: { color: '#666b74', width: 1, style: 3, labelBackgroundColor: '#363a40' },
+    vertLine: { color: '#666b74', width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: '#363a40' },
+    horzLine: { color: '#666b74', width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: '#363a40' },
   },
   timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 4, barSpacing: 3.5, minBarSpacing: 1.2 },
   rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 58, mode: priceScaleModes[currentPriceScale], scaleMargins: { top: 0.08, bottom: 0.08 } },
@@ -648,9 +702,11 @@ const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
 });
 
 const candleSeries = chart.addSeries(CandlestickSeries, {
-  upColor: '#089981', downColor: '#f23645', borderVisible: false,
-  wickUpColor: '#089981', wickDownColor: '#f23645', priceLineVisible: true,
-  priceLineColor: '#089981', lastValueVisible: true,
+  upColor: chartSettings.upColor, downColor: chartSettings.downColor, borderVisible: chartSettings.borderVisible,
+  borderUpColor: chartSettings.upColor, borderDownColor: chartSettings.downColor,
+  wickVisible: chartSettings.wickVisible, wickUpColor: chartSettings.upColor, wickDownColor: chartSettings.downColor,
+  priceLineVisible: chartSettings.lastPriceLineVisible, priceLineColor: chartSettings.upColor,
+  lastValueVisible: chartSettings.lastPriceLineVisible,
 }, 0);
 const barSeries = chart.addSeries(BarSeries, {
   upColor: '#089981', downColor: '#f23645', thinBars: true,
@@ -730,7 +786,8 @@ lineTools.registerLineTool('LongShortPosition', LineToolLongShortPosition);
 lineTools.registerLineTool('UpArrow' as LineToolType, LineToolUpArrow as never);
 lineTools.setTimeFormatter((time) => formatChartTime(time as Time));
 
-createTextWatermark(chart.panes()[0], {
+const chartWatermark = createTextWatermark(chart.panes()[0], {
+  visible: chartSettings.watermarkVisible,
   horzAlign: 'left', vertAlign: 'bottom',
   lines: [{ text: 'TF', color: 'rgba(235, 238, 245, 0.13)', fontSize: 24 }],
 });
@@ -809,6 +866,12 @@ const priceRangeMin = document.querySelector<HTMLInputElement>('#price-range-min
 const priceRangeMax = document.querySelector<HTMLInputElement>('#price-range-max')!;
 const priceRangeMessage = document.querySelector<HTMLParagraphElement>('#price-range-message')!;
 const goToDateInput = document.querySelector<HTMLInputElement>('#go-to-date')!;
+const chartSettingsLayer = document.querySelector<HTMLDivElement>('#chart-settings-layer')!;
+const chartSettingsDialog = document.querySelector<HTMLElement>('#chart-settings-dialog')!;
+const openChartSettingsButton = document.querySelector<HTMLButtonElement>('#open-chart-settings')!;
+const chartSettingInputs = [...chartSettingsDialog.querySelectorAll<HTMLInputElement>('[data-chart-setting]')];
+const chartSettingsTabs = [...chartSettingsDialog.querySelectorAll<HTMLButtonElement>('[data-settings-tab]')];
+let chartSettingsReturnFocus: HTMLElement | null = null;
 const drawingButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-drawing-tool]')];
 const drawingMenus = [...document.querySelectorAll<HTMLDetailsElement>('.drawing-tool-menu')];
 const drawingPropertyControls = [...drawingProperties.querySelectorAll<HTMLDetailsElement>('.drawing-property-control')];
@@ -856,6 +919,85 @@ function showChartToast(message: string) {
     chartToastTimer = undefined;
   }, 2200);
 }
+
+function applyChartSettings(settings: ChartSettings) {
+  chart.applyOptions({
+    grid: {
+      vertLines: { visible: settings.verticalGridVisible },
+      horzLines: { visible: settings.horizontalGridVisible },
+    },
+    crosshair: {
+      vertLine: { labelVisible: settings.crosshairLabelsVisible },
+      horzLine: { labelVisible: settings.crosshairLabelsVisible },
+    },
+  });
+  candleSeries.applyOptions({
+    upColor: settings.upColor,
+    downColor: settings.downColor,
+    borderVisible: settings.borderVisible,
+    borderUpColor: settings.upColor,
+    borderDownColor: settings.downColor,
+    wickVisible: settings.wickVisible,
+    wickUpColor: settings.upColor,
+    wickDownColor: settings.downColor,
+    priceLineColor: settings.upColor,
+    priceLineVisible: settings.lastPriceLineVisible && primarySeriesVisible && currentChartType === 'candles',
+    lastValueVisible: settings.lastPriceLineVisible && primarySeriesVisible && currentChartType === 'candles',
+  });
+  for (const series of [barSeries, closeLineSeries, areaSeries, baselineSeries]) {
+    series.applyOptions({
+      priceLineVisible: settings.lastPriceLineVisible,
+      lastValueVisible: settings.lastPriceLineVisible,
+    });
+  }
+  document.querySelector<HTMLElement>('#instrument-logo')!.hidden = !settings.legendSymbolVisible;
+  document.querySelector<HTMLElement>('#legend-symbol')!.hidden = !settings.legendSymbolVisible;
+  document.querySelector<HTMLElement>('#legend-values')!.hidden = !settings.legendValuesVisible;
+  document.querySelector<HTMLElement>('#volume-legend')!.hidden = !volumeVisible || !settings.volumeLegendVisible;
+  document.querySelector<HTMLElement>('#time-navigation')!.hidden = !settings.timeNavigationVisible;
+  document.querySelector<HTMLElement>('.chart-brand')!.hidden = !settings.watermarkVisible;
+  chartWatermark.applyOptions({ visible: settings.watermarkVisible });
+}
+
+function selectChartSettingsTab(tab: string) {
+  for (const button of chartSettingsTabs) button.setAttribute('aria-selected', String(button.dataset.settingsTab === tab));
+  for (const panel of chartSettingsDialog.querySelectorAll<HTMLElement>('[data-settings-panel]')) {
+    panel.hidden = panel.dataset.settingsPanel !== tab;
+  }
+}
+
+function openChartSettings() {
+  closeToolbarMenus();
+  chartSettingsReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : openChartSettingsButton;
+  for (const input of chartSettingInputs) {
+    const key = input.dataset.chartSetting as keyof ChartSettings;
+    if (input.type === 'checkbox') input.checked = chartSettings[key] as boolean;
+    else input.value = chartSettings[key] as string;
+  }
+  selectChartSettingsTab('symbol');
+  chartSettingsLayer.hidden = false;
+  requestAnimationFrame(() => chartSettingsTabs[0]?.focus());
+}
+
+function closeChartSettings() {
+  chartSettingsLayer.hidden = true;
+  chartSettingsReturnFocus?.focus();
+  chartSettingsReturnFocus = null;
+}
+
+function confirmChartSettings() {
+  const next = { ...chartSettings };
+  for (const input of chartSettingInputs) {
+    const key = input.dataset.chartSetting as keyof ChartSettings;
+    (next as Record<string, string | boolean>)[key] = input.type === 'checkbox' ? input.checked : input.value;
+  }
+  chartSettings = next;
+  applyChartSettings(chartSettings);
+  if (!saveChartSettings(localStorage, chartSettings)) showChartToast('设置未能保存');
+  closeChartSettings();
+}
+
+applyChartSettings(chartSettings);
 
 function currentPriceLineSettings(): PriceLineSettings {
   const existing = chartPreferences.priceLines[currentSymbol.symbol];
@@ -956,12 +1098,14 @@ function setPrimarySeriesData() {
   const closes = currentBars.map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.close }));
   const candlesVisible = primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
-    upColor: candlesVisible ? '#089981' : 'rgba(0, 0, 0, 0)',
-    downColor: candlesVisible ? '#f23645' : 'rgba(0, 0, 0, 0)',
-    wickUpColor: candlesVisible ? '#089981' : 'rgba(0, 0, 0, 0)',
-    wickDownColor: candlesVisible ? '#f23645' : 'rgba(0, 0, 0, 0)',
-    priceLineVisible: candlesVisible,
-    lastValueVisible: candlesVisible,
+    upColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
+    downColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
+    borderUpColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
+    borderDownColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
+    wickUpColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
+    wickDownColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
+    priceLineVisible: candlesVisible && chartSettings.lastPriceLineVisible,
+    lastValueVisible: candlesVisible && chartSettings.lastPriceLineVisible,
   });
   barSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'bars' });
   closeLineSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'line' });
@@ -1431,7 +1575,7 @@ function applyManagedSeriesVisibility(series: ManagedSeries) {
   const visible = isManagedSeriesVisible(series);
   if (series === 'volume') {
     volumeSeries.applyOptions({ visible });
-    document.querySelector<HTMLDivElement>('#volume-legend')!.hidden = !visible;
+    document.querySelector<HTMLDivElement>('#volume-legend')!.hidden = !visible || !chartSettings.volumeLegendVisible;
   }
   if (series === 'ma') maSeries.applyOptions({ visible });
   if (series === 'ema') emaSeries.applyOptions({ visible });
@@ -3309,6 +3453,32 @@ function goToSelectedDate() {
 }
 document.querySelector<HTMLButtonElement>('#go-to-date-button')!.addEventListener('click', goToSelectedDate);
 goToDateInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') goToSelectedDate(); });
+openChartSettingsButton.addEventListener('click', openChartSettings);
+document.querySelector<HTMLButtonElement>('#close-chart-settings')!.addEventListener('click', closeChartSettings);
+document.querySelector<HTMLButtonElement>('#cancel-chart-settings')!.addEventListener('click', closeChartSettings);
+document.querySelector<HTMLButtonElement>('#confirm-chart-settings')!.addEventListener('click', confirmChartSettings);
+for (const button of chartSettingsTabs) {
+  button.addEventListener('click', () => selectChartSettingsTab(button.dataset.settingsTab!));
+}
+chartSettingsLayer.addEventListener('pointerdown', (event) => {
+  if (event.target === chartSettingsLayer) closeChartSettings();
+});
+chartSettingsDialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const focusable = [...chartSettingsDialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled])')]
+    .filter((element) => !element.closest('[hidden]'));
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !chartSettingsLayer.hidden) {
+    event.preventDefault();
+    closeChartSettings();
+  }
+});
 const toolbarMenus = [...document.querySelectorAll<HTMLDetailsElement>('.chart-control-menu, .indicator-menu, .price-scale-controls')];
 function closeToolbarMenus() {
   for (const menu of toolbarMenus) menu.open = false;

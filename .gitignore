@@ -4,6 +4,7 @@ dist/
 __pycache__/
 *.pyc
 src-tauri/target/
+src-tauri/crates/*/target/
 src-tauri/gen/
 *.log
 .DS_Store
