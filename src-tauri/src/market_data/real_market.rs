@@ -5,7 +5,8 @@ use chrono::NaiveDate;
 use super::clock::{shanghai_timestamp, shanghai_today};
 use super::history::{HistoryData, HistoryQuery, load_history};
 use super::hosts::{self, DEFAULT_HOSTS, HostSuccess};
-use crate::contracts::{Adjustment, Bar, Resolution, SymbolKind};
+use crate::contracts::{Adjustment, Bar, Resolution, Symbol, SymbolKind};
+use crate::market_router::{self, HistoryRequest};
 use crate::tdx::SecurityCode;
 use crate::tdx::standard::Market;
 
@@ -87,6 +88,18 @@ fn real_market_matrix() {
         probes.len(),
         healthy[0]
     );
+
+    let routed = market_router::fetch_history(HistoryRequest {
+        symbol: Symbol::new("SH", "600000").unwrap(),
+        kind: SymbolKind::Stock,
+        resolution: Resolution::Day,
+        adjustment: Adjustment::None,
+        count: COUNT,
+        include_quote: true,
+    })
+    .expect("Rust router must preserve the existing TDX history path");
+    assert_eq!(routed.diagnostics.source, "tradeflow-tdx");
+    validate("router:stock:600000:1D:none", &routed.bars, false);
 
     let composite = fetch(
         &healthy,

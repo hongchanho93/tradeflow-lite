@@ -10,4 +10,5 @@ assert.deepEqual(marketPollPlan(atShanghai('2026-09-14T13:00:00')), { state: 'tr
 assert.deepEqual(marketPollPlan(atShanghai('2026-09-14T15:01:00')), { state: 'closed', delayMs: 60_000 });
 assert.deepEqual(marketPollPlan(atShanghai('2026-09-13T10:00:00')), { state: 'closed', delayMs: 60_000 });
 assert.deepEqual(marketPollPlan(atShanghai('2026-09-14T10:00:00'), true), { state: 'hidden', delayMs: 60_000 });
+assert.deepEqual(marketPollPlan(atShanghai('2026-09-13T10:00:00'), false, true), { state: 'trading', delayMs: 5_000 });
 console.log('China market poll schedule OK');

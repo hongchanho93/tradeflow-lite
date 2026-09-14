@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import {
   AreaSeries,
   BarSeries,
@@ -59,7 +60,13 @@ import triangleDrawingIcon from './assets/drawing-tools/triangle.svg?raw';
 import verticalLineDrawingIcon from './assets/drawing-tools/vertical-line.svg?raw';
 import priceScaleGearIcon from './assets/price-scale-gear.svg?raw';
 import { LineToolUpArrow } from './drawing-tools/up-arrow';
-import { barsForSeriesUpdate, initialVisibleLogicalRange, mergeLatestBars } from './bar-series';
+import {
+  barsForSeriesUpdate,
+  initialVisibleLogicalRange,
+  mergeDeepHistoryWithLiveTail,
+  mergeLatestBars,
+  updateLatestBarInPlace,
+} from './bar-series';
 import { BollingerBandPrimitive } from './boll-band';
 import {
   loadChartPreferences,
@@ -94,6 +101,16 @@ import { boll, bollBreakouts, ema, macd, rsi, sma, type BollBreakout, type Optio
 import { marketPollPlan } from './market-session';
 import marketUniversePackage from './market-universe.json';
 import {
+  binanceSpotSymbols,
+  buildBinanceSpotSymbols,
+  type BinanceSpotCatalogSymbol,
+} from './providers/binance/catalog';
+import {
+  binanceUsdMarginedSymbols,
+  buildBinanceUsdMarginedSymbols,
+  type BinanceUsdMarginedCatalogSymbol,
+} from './providers/binance/usdm-catalog';
+import {
   listMarketSymbols,
   type MarketSearchCategory,
   type MarketSearchSource,
@@ -101,6 +118,17 @@ import {
 } from './market-universe';
 import { exchangeLogoUrl, symbolLogoUrls } from './symbol-logos';
 import { isUsableQuote, type QuoteSnapshot } from './quote';
+import {
+  canApplyRealtimeBar,
+  marketDataRenderDelay,
+  matchesRealtimeSelection,
+  REALTIME_FRAME_FALLBACK_MS,
+  realtimeRequestSeed,
+  type RealtimeBarEvent,
+  type RealtimeDepthEvent,
+  type RealtimeStatusEvent,
+  type RealtimeTradeEvent,
+} from './realtime-market';
 import {
   loadMarkerScopes,
   markerScope,
@@ -148,17 +176,23 @@ const drawingToolTypes: DrawingToolType[] = [
 ];
 const knownDrawingTypes = new Set<string>(drawingToolTypes);
 
-const marketSymbols = (marketUniversePackage as { rows: MarketSymbol[] }).rows;
+let marketSymbols = [
+  ...(marketUniversePackage as { rows: MarketSymbol[] }).rows,
+  ...binanceSpotSymbols,
+  ...binanceUsdMarginedSymbols,
+];
 const marketSymbolById = new Map(marketSymbols.map((item) => [item.symbol, item]));
 const defaultSymbol = marketSymbols.find((item) => item.symbol === 'SH:600000' && item.kind === 'stock')!;
-const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数' };
-const kindMetaLabels: Record<MarketSymbol['kind'], string> = { stock: 'stock', etf: 'fund', index: 'index' };
+const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数', crypto: '数字货币' };
+const kindMetaLabels: Record<Exclude<MarketSymbol['kind'], 'crypto'>, string> = { stock: 'stock', etf: 'fund', index: 'index' };
 const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; label: string }[]> = {
   all: [
     { value: 'all', label: '全部来源' },
     { value: 'sh', label: '上海市场' },
     { value: 'sz', label: '深圳市场' },
     { value: 'bj', label: '北京市场' },
+    { value: 'binance_spot', label: '币安现货' },
+    { value: 'binance_usdm', label: '币安 U 本位永续' },
   ],
   stock: [
     { value: 'all', label: '全部来源' },
@@ -179,11 +213,26 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'sh', label: '沪市 ETF' },
     { value: 'sz', label: '深市 ETF' },
   ],
+  crypto: [
+    { value: 'all', label: '全部数字货币' },
+    { value: 'binance_spot', label: '币安现货' },
+    { value: 'binance_usdt', label: '币安现货 · USDT' },
+    { value: 'binance_usdc', label: '币安现货 · USDC' },
+    { value: 'binance_fdusd', label: '币安现货 · FDUSD' },
+    { value: 'binance_btc', label: '币安现货 · BTC' },
+    { value: 'binance_other', label: '币安现货 · 其他计价' },
+    { value: 'binance_usdm', label: '币安合约 · U 本位永续' },
+    { value: 'binance_usdm_usdt', label: 'U 本位永续 · USDT' },
+    { value: 'binance_usdm_usdc', label: 'U 本位永续 · USDC' },
+  ],
 };
 const resolutionLabels: Record<Resolution, string> = {
   '1': '1分', '5': '5分', '15': '15分', '30': '30分', '60': '1小时',
   '1D': '日', '1W': '周', '1M': '月',
 };
+const realtimeTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
 const chartTypeLabels: Record<ChartType, string> = {
   candles: 'K线', bars: '美国线', line: '折线', area: '面积', baseline: '基准',
 };
@@ -208,8 +257,16 @@ let selectedDrawing: SelectedDrawing | null = null;
 let suppressDrawingDeselect = false;
 let latestPollInFlight = false;
 let latestPollTimer: number | undefined;
+let realtimeRequestSequence = realtimeRequestSeed(Date.now());
+let activeRealtimeRequestId = 0;
+let realtimeConnected = false;
+let realtimeBarRequestId = 0;
+let latestDepth: RealtimeDepthEvent | null = null;
+let recentTrades: RealtimeTradeEvent[] = [];
+let activeMarketDataTab: 'depth' | 'trades' = 'depth';
 let deepHistoryTimer: number | undefined;
 let deepHistoryTimerKey = '';
+let deepHistoryNavigationReady = false;
 const deepHistoryLoading = new Set<string>();
 const chartPreferences = loadChartPreferences(localStorage);
 const activeIndicators = new Set<IndicatorName>(
@@ -335,6 +392,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="toolbar-spacer"></div>
       <button id="status" class="connection-status" aria-label="主站测速" title="点击重新测速"><i></i><span>正在连接</span></button>
       <button id="watchlist-toggle" class="toolbar-button" aria-label="打开自选列表">自选</button>
+      <button id="market-data-toggle" class="toolbar-button" aria-label="打开盘口和成交">盘口</button>
       <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
       <button id="fit-chart" class="toolbar-button" aria-label="适应全部数据">${icons.fullscreen}</button>
       <details id="chart-capture-menu" class="chart-control-menu chart-capture-menu">
@@ -361,6 +419,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <button type="button" data-symbol-category="stock" aria-selected="false">股票</button>
           <button type="button" data-symbol-category="index" aria-selected="false">指数</button>
           <button type="button" data-symbol-category="etf" aria-selected="false">ETF</button>
+          <button type="button" data-symbol-category="crypto" aria-selected="false">数字货币</button>
         </nav>
         <div class="symbol-source-row">
           <button id="symbol-source-trigger" class="symbol-source-trigger" type="button" aria-haspopup="menu" aria-expanded="false">全部来源</button>
@@ -368,7 +427,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <span id="symbol-result-count"></span>
         </div>
         <div id="symbol-results" class="symbol-results" role="listbox"></div>
-        <footer class="symbol-dialog-footer">输入代码、名称或拼音查找证券，点击结果即可切换图表</footer>
+        <footer class="symbol-dialog-footer">输入代码、名称或拼音查找品种，点击结果即可切换图表</footer>
       </section>
     </div>
 
@@ -528,6 +587,28 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div id="watchlist-items" class="watchlist-items"></div>
           <p id="watchlist-empty">点击顶部星标添加当前证券</p>
         </aside>
+        <aside id="market-data-panel" class="market-data-panel" hidden>
+          <header>
+            <div><strong id="market-data-title">盘口</strong><span id="market-data-symbol">--</span></div>
+            <button id="close-market-data" type="button" aria-label="关闭盘口">${icons.close}</button>
+          </header>
+          <nav class="market-data-tabs" aria-label="公开市场数据">
+            <button type="button" data-market-data-tab="depth" aria-selected="true">盘口</button>
+            <button type="button" data-market-data-tab="trades" aria-selected="false">成交</button>
+          </nav>
+          <div id="market-data-unavailable" class="market-data-unavailable">当前品种暂未接入盘口和逐笔成交</div>
+          <section id="market-depth-view" class="market-depth-view">
+            <div class="market-best-prices"><span>卖一 <strong id="best-ask">--</strong></span><span>买一 <strong id="best-bid">--</strong></span></div>
+            <div class="market-table-head"><span>档位</span><span>价格</span><span>数量</span></div>
+            <div id="market-depth-asks" class="market-depth-levels asks"></div>
+            <div class="market-depth-spread"><span>价差</span><strong id="market-depth-spread">--</strong></div>
+            <div id="market-depth-bids" class="market-depth-levels bids"></div>
+          </section>
+          <section id="market-trades-view" class="market-trades-view" hidden>
+            <div class="market-table-head"><span>时间</span><span>价格</span><span>数量</span></div>
+            <div id="market-trades" class="market-trades"></div>
+          </section>
+        </aside>
         <aside id="drawing-manager" class="drawing-manager" hidden>
           <header><strong>对象树</strong><button id="close-drawing-manager" aria-label="关闭对象树">${icons.close}</button></header>
           <div id="drawing-manager-items" class="drawing-manager-items"></div>
@@ -686,6 +767,18 @@ const watchlistAdd = document.querySelector<HTMLButtonElement>('#watchlist-add')
 const watchlistPanel = document.querySelector<HTMLElement>('#watchlist-panel')!;
 const watchlistItems = document.querySelector<HTMLDivElement>('#watchlist-items')!;
 const watchlistEmpty = document.querySelector<HTMLParagraphElement>('#watchlist-empty')!;
+const marketDataPanel = document.querySelector<HTMLElement>('#market-data-panel')!;
+const marketDataTitle = document.querySelector<HTMLElement>('#market-data-title')!;
+const marketDataSymbol = document.querySelector<HTMLElement>('#market-data-symbol')!;
+const marketDataUnavailable = document.querySelector<HTMLDivElement>('#market-data-unavailable')!;
+const marketDepthView = document.querySelector<HTMLElement>('#market-depth-view')!;
+const marketTradesView = document.querySelector<HTMLElement>('#market-trades-view')!;
+const marketDepthAsks = document.querySelector<HTMLDivElement>('#market-depth-asks')!;
+const marketDepthBids = document.querySelector<HTMLDivElement>('#market-depth-bids')!;
+const marketTrades = document.querySelector<HTMLDivElement>('#market-trades')!;
+const bestAsk = document.querySelector<HTMLElement>('#best-ask')!;
+const bestBid = document.querySelector<HTMLElement>('#best-bid')!;
+const marketDepthSpread = document.querySelector<HTMLElement>('#market-depth-spread')!;
 const undoDrawing = document.querySelector<HTMLButtonElement>('#undo-drawing')!;
 const redoDrawing = document.querySelector<HTMLButtonElement>('#redo-drawing')!;
 const drawingManager = document.querySelector<HTMLElement>('#drawing-manager')!;
@@ -1054,6 +1147,118 @@ function renderWatchlist() {
     row.append(removeButton);
     watchlistItems.append(row);
   }
+}
+
+function formatMarketPrice(value: number): string {
+  const digits = value >= 1_000 ? 2 : value >= 1 ? 4 : value >= 0.01 ? 6 : 8;
+  return value.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function formatMarketQuantity(value: number): string {
+  return marketQuantityFormatter.format(value);
+}
+
+const marketQuantityFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 });
+
+function isBinanceMarketDataSupported() {
+  return currentSymbol.kind === 'crypto'
+    && (currentSymbol.exchange === 'BINANCE' || currentSymbol.exchange === 'BINANCE_USDM');
+}
+
+function ensureMarketRows(container: HTMLElement, count: number, baseClass: string) {
+  if ([...container.children].some((child) => child.tagName !== 'DIV')) container.replaceChildren();
+  while (container.children.length < count) {
+    const row = document.createElement('div');
+    row.className = baseClass;
+    row.innerHTML = '<span></span><strong></strong><span></span>';
+    container.append(row);
+  }
+  while (container.children.length > count) container.lastElementChild?.remove();
+  return [...container.children] as HTMLElement[];
+}
+
+function updateDepthRows(
+  container: HTMLElement,
+  side: 'bid' | 'ask',
+  levels: Array<{ price: number; quantity: number }>,
+) {
+  const rows = ensureMarketRows(container, levels.length, 'market-depth-row');
+  for (const [index, level] of levels.entries()) {
+    const row = rows[index];
+    row.className = `market-depth-row ${side}`;
+    row.children[0].textContent = side === 'ask' ? `卖${levels.length - index}` : `买${index + 1}`;
+    row.children[1].textContent = formatMarketPrice(level.price);
+    row.children[2].textContent = formatMarketQuantity(level.quantity);
+  }
+}
+
+function renderMarketDepth() {
+  const depth = latestDepth;
+  if (!depth) {
+    ensureMarketRows(marketDepthAsks, 0, 'market-depth-row');
+    ensureMarketRows(marketDepthBids, 0, 'market-depth-row');
+    bestAsk.textContent = '--';
+    bestBid.textContent = '--';
+    marketDepthSpread.textContent = '等待实时深度';
+    return;
+  }
+  const ask = depth.asks[0];
+  const bid = depth.bids[0];
+  bestAsk.textContent = formatMarketPrice(ask.price);
+  bestBid.textContent = formatMarketPrice(bid.price);
+  marketDepthSpread.textContent = formatMarketPrice(ask.price - bid.price);
+  updateDepthRows(marketDepthAsks, 'ask', [...depth.asks].reverse());
+  updateDepthRows(marketDepthBids, 'bid', depth.bids);
+}
+
+function renderMarketTrades() {
+  if (!recentTrades.length) {
+    if (marketTrades.children.length !== 1 || marketTrades.firstElementChild?.tagName !== 'P') {
+      const empty = document.createElement('p');
+      empty.textContent = '等待实时成交';
+      marketTrades.replaceChildren(empty);
+    }
+    return;
+  }
+  const rows = ensureMarketRows(marketTrades, recentTrades.length, 'market-trade-row');
+  for (const [index, trade] of recentTrades.entries()) {
+    const row = rows[index];
+    row.className = `market-trade-row ${trade.buyerIsMaker ? 'sell' : 'buy'}`;
+    row.children[0].textContent = realtimeTimeFormatter.format(new Date(trade.tradeTimeMs));
+    row.children[1].textContent = formatMarketPrice(trade.price);
+    row.children[2].textContent = formatMarketQuantity(trade.quantity);
+  }
+}
+
+function renderMarketDataPanel() {
+  const supported = isBinanceMarketDataSupported();
+  marketDataSymbol.textContent = currentSymbol.code;
+  marketDataTitle.textContent = activeMarketDataTab === 'depth' ? '盘口' : '成交';
+  marketDataUnavailable.hidden = supported;
+  marketDepthView.hidden = !supported || activeMarketDataTab !== 'depth';
+  marketTradesView.hidden = !supported || activeMarketDataTab !== 'trades';
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-market-data-tab]')) {
+    button.setAttribute('aria-selected', String(button.dataset.marketDataTab === activeMarketDataTab));
+  }
+  if (!supported) return;
+  if (activeMarketDataTab === 'depth') renderMarketDepth();
+  else renderMarketTrades();
+}
+
+function resetMarketData() {
+  latestDepth = null;
+  recentTrades = [];
+  pendingRealtimeBar = null;
+  cancelRealtimeFrameSchedule();
+  pendingRealtimeDepth = null;
+  pendingRealtimeTrades = [];
+  if (marketDataTimerId !== undefined) window.clearTimeout(marketDataTimerId);
+  marketDataTimerId = undefined;
+  lastMarketDataRenderAt = 0;
+  if (realtimeIndicatorTimerId !== undefined) window.clearTimeout(realtimeIndicatorTimerId);
+  realtimeIndicatorTimerId = undefined;
+  pendingRealtimeIndicatorTime = undefined;
+  renderMarketDataPanel();
 }
 
 const drawingToolLabels: Record<string, string> = {
@@ -2077,6 +2282,52 @@ function closeSymbolResults() {
   activeSymbolResult = -1;
 }
 
+async function loadBinanceSpotCatalog() {
+  try {
+    const rows = await invoke<BinanceSpotCatalogSymbol[]>('list_binance_spot_symbols');
+    const dynamicSymbols = buildBinanceSpotSymbols(rows);
+    if (!dynamicSymbols.length) throw new Error('币安返回的现货目录为空');
+    marketSymbols = [
+      ...marketSymbols.filter((item) => item.exchange !== 'BINANCE'),
+      ...dynamicSymbols,
+    ];
+    marketSymbolById.clear();
+    for (const item of marketSymbols) marketSymbolById.set(item.symbol, item);
+    renderWatchlist();
+    if (!symbolDialogLayer.hidden) renderSymbolResults();
+    console.info('market.catalog.ready', { source: 'binance', symbols: dynamicSymbols.length });
+  } catch (error) {
+    console.warn('market.catalog.fallback', {
+      source: 'binance',
+      symbols: binanceSpotSymbols.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function loadBinanceUsdMarginedCatalog() {
+  try {
+    const rows = await invoke<BinanceUsdMarginedCatalogSymbol[]>('list_binance_usd_margined_symbols');
+    const dynamicSymbols = buildBinanceUsdMarginedSymbols(rows);
+    if (!dynamicSymbols.length) throw new Error('币安返回的 U 本位永续目录为空');
+    marketSymbols = [
+      ...marketSymbols.filter((item) => item.exchange !== 'BINANCE_USDM'),
+      ...dynamicSymbols,
+    ];
+    marketSymbolById.clear();
+    for (const item of marketSymbols) marketSymbolById.set(item.symbol, item);
+    renderWatchlist();
+    if (!symbolDialogLayer.hidden) renderSymbolResults();
+    console.info('market.catalog.ready', { source: 'binance_usdm', symbols: dynamicSymbols.length });
+  } catch (error) {
+    console.warn('market.catalog.fallback', {
+      source: 'binance_usdm',
+      symbols: binanceUsdMarginedSymbols.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function openSymbolDialog() {
   symbolDialogLayer.hidden = false;
   input.setAttribute('aria-expanded', 'true');
@@ -2132,7 +2383,7 @@ function appendNextSymbolResults() {
     const index = start + offset;
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'symbol-result-row';
+    button.className = `symbol-result-row${item.kind === 'crypto' ? ' crypto' : ''}`;
     button.role = 'option';
     button.setAttribute('aria-selected', 'false');
     button.innerHTML = '<span class="symbol-result-code"></span><span class="symbol-result-name"><strong></strong></span><span class="symbol-result-kind"></span>';
@@ -2140,7 +2391,10 @@ function appendNextSymbolResults() {
     button.querySelector('.symbol-result-code')!.textContent = item.code;
     button.querySelector('strong')!.textContent = item.name;
     const kind = button.querySelector('.symbol-result-kind')!;
-    kind.append(document.createTextNode(kindMetaLabels[item.kind]), createExchangeBadge(item.exchange));
+    const marketType = item.kind === 'crypto'
+      ? item.exchange === 'BINANCE_USDM' ? 'perpetual' : 'spot'
+      : kindMetaLabels[item.kind];
+    kind.append(document.createTextNode(marketType), createExchangeBadge(item.exchange));
     button.title = `${item.code} ${item.name} ${kindLabels[item.kind]} ${item.exchange}`;
     button.addEventListener('pointerdown', (event) => event.preventDefault());
     button.addEventListener('click', () => void selectSymbol(item));
@@ -2188,7 +2442,7 @@ function resolveInputSymbol(): MarketSymbol | undefined {
 async function selectSymbol(symbol: MarketSymbol) {
   input.value = symbol.code;
   closeSymbolResults();
-  await openHistory(symbol, currentResolution, currentAdjustment);
+  await openHistory(symbol, currentResolution, symbol.kind === 'crypto' ? 'none' : currentAdjustment);
 }
 
 function requestHistory(
@@ -2214,6 +2468,7 @@ function requestHistory(
 
 function replaceHistorySeries(bars: Bar[], preserveVisibleRange: boolean) {
   const visibleRange = preserveVisibleRange ? chart.timeScale().getVisibleRange() : null;
+  deepHistoryNavigationReady = false;
   currentBars = bars;
   setPrimarySeriesData();
   volumeSeries.setData(bars.map((bar) => ({
@@ -2227,6 +2482,9 @@ function replaceHistorySeries(bars: Bar[], preserveVisibleRange: boolean) {
   requestAnimationFrame(() => {
     if (visibleRange) chart.timeScale().setVisibleRange(visibleRange);
     else chart.timeScale().setVisibleLogicalRange(initialVisibleLogicalRange(bars.length));
+    requestAnimationFrame(() => {
+      deepHistoryNavigationReady = true;
+    });
   });
 }
 
@@ -2247,6 +2505,7 @@ function showHistory(
   currentResolution = resolution;
   currentAdjustment = adjustment;
   currentQuote = null;
+  resetMarketData();
   if (priceScopeChanged && !priceScaleAuto) {
     priceScaleAuto = true;
     chart.priceScale('right').setAutoScale(true);
@@ -2266,10 +2525,11 @@ function showHistory(
   }
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
     button.classList.toggle('active', button.dataset.adjustment === currentAdjustment);
+    button.disabled = symbol.kind === 'crypto' && button.dataset.adjustment === 'qfq';
   }
   legendSymbol.textContent = `${symbol.name} · ${resolutionLabels[currentResolution]} · ${symbol.exchange}${currentAdjustment === 'qfq' ? ' · 前复权' : ''}`;
   const dateInputFormatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    timeZone: symbol.kind === 'crypto' ? 'UTC' : 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   });
   goToDateInput.min = dateInputFormatter.format(new Date(response.bars[0].time * 1000));
   goToDateInput.max = dateInputFormatter.format(new Date(response.bars.at(-1)!.time * 1000));
@@ -2313,12 +2573,23 @@ async function loadDeepHistory(
       });
       return;
     }
-    historyCache.set(cacheKey, response, true);
-    if (currentSymbol.symbol !== symbol.symbol
-      || currentResolution !== resolution
-      || currentAdjustment !== adjustment) return;
-    replaceHistorySeries(response.bars, true);
-    showLatest(response.bars);
+    const isCurrentRequest = currentSymbol.symbol === symbol.symbol
+      && currentResolution === resolution
+      && currentAdjustment === adjustment;
+    const displayResponse = isCurrentRequest
+      ? {
+          ...response,
+          bars: mergeDeepHistoryWithLiveTail(
+            response.bars,
+            currentBars,
+            realtimeBarRequestId === activeRealtimeRequestId,
+          ),
+        }
+      : response;
+    historyCache.set(cacheKey, displayResponse, true);
+    if (!isCurrentRequest) return;
+    replaceHistorySeries(displayResponse.bars, true);
+    showLatest(displayResponse.bars);
     console.info('market.history.deep_ready', {
       symbol: symbol.symbol,
       resolution,
@@ -2367,10 +2638,12 @@ async function openHistory(
   const match = requestedSymbol;
   if (!match) {
     errorLayer.hidden = false;
-    errorLayer.textContent = '没有找到这个股票、ETF 或指数';
+    errorLayer.textContent = '没有找到这个行情品种';
     return;
   }
+  if (match.kind === 'crypto') requestedAdjustment = 'none';
   const generation = historyRequestGate.begin();
+  stopRealtimeMarket();
   clearDeepHistoryTimer();
   if (latestPollTimer !== undefined) window.clearTimeout(latestPollTimer);
   latestPollTimer = undefined;
@@ -2380,6 +2653,7 @@ async function openHistory(
   if (cached) {
     loadingLayer.hidden = true;
     showHistory(cached.value, match, requestedResolution, requestedAdjustment, 'memory');
+    void startRealtimeMarket(match, requestedResolution, generation);
     console.info('market.history.display', {
       symbol: match.symbol,
       resolution: requestedResolution,
@@ -2388,7 +2662,6 @@ async function openHistory(
       bars: cached.value.bars.length,
     });
     if (cached.deep) scheduleLatestPoll(0);
-    else scheduleDeepHistory(match, requestedResolution, requestedAdjustment);
     return;
   }
   loadingLayer.hidden = false;
@@ -2400,6 +2673,7 @@ async function openHistory(
     historyCache.set(cacheKey, response, false);
     if (!historyRequestGate.isCurrent(generation)) return;
     showHistory(response, match, requestedResolution, requestedAdjustment, 'network');
+    void startRealtimeMarket(match, requestedResolution, generation);
     console.info('market.history.display', {
       symbol: match.symbol,
       resolution: requestedResolution,
@@ -2408,7 +2682,6 @@ async function openHistory(
       bars: response.bars.length,
       elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
     });
-    scheduleDeepHistory(match, requestedResolution, requestedAdjustment);
   } catch (error) {
     if (!historyRequestGate.isCurrent(generation)) return;
     const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : String(error);
@@ -2476,6 +2749,313 @@ async function pollLatestBars() {
   } finally {
     latestPollInFlight = false;
   }
+}
+
+function stopRealtimeMarket() {
+  const requestId = ++realtimeRequestSequence;
+  activeRealtimeRequestId = requestId;
+  realtimeConnected = false;
+  void invoke('stop_realtime_market', { requestId }).catch((error) => {
+    console.error('market.realtime.stop_error', { requestId, error: String(error) });
+  });
+}
+
+async function startRealtimeMarket(
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  historyGeneration: number,
+) {
+  if (symbol.kind !== 'crypto') return;
+  const requestId = ++realtimeRequestSequence;
+  activeRealtimeRequestId = requestId;
+  realtimeConnected = false;
+  await realtimeListenersReady;
+  if (!historyRequestGate.isCurrent(historyGeneration)
+    || currentSymbol.symbol !== symbol.symbol
+    || currentResolution !== resolution) return;
+  try {
+    await invoke('start_realtime_market', {
+      requestId,
+      symbol: symbol.symbol,
+      kind: symbol.kind,
+      resolution,
+    });
+  } catch (error) {
+    if (activeRealtimeRequestId !== requestId) return;
+    console.error('market.realtime.start_error', {
+      requestId,
+      symbol: symbol.symbol,
+      resolution,
+      error: String(error),
+    });
+    status.className = 'connection-status error';
+    status.querySelector('span')!.textContent = '实时连接失败，已使用轮询';
+    scheduleLatestPoll(0);
+  }
+}
+
+function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
+  if (!matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+  )) return;
+  if (!canApplyRealtimeBar(currentBars, event.bar)) {
+    console.warn('market.realtime.stale_bar', {
+      symbol: event.symbol,
+      resolution: event.resolution,
+      incomingTime: event.bar.time,
+      latestTime: currentBars.at(-1)?.time,
+    });
+    return;
+  }
+
+  if (updateLatestBarInPlace(currentBars, event.bar) === 'rejected') return;
+  updatePrimarySeries(event.bar);
+  volumeSeries.update({
+    time: event.bar.time as UTCTimestamp,
+    value: event.bar.volume,
+    color: event.bar.close >= event.bar.open ? 'rgba(8, 153, 129, .48)' : 'rgba(242, 54, 69, .48)',
+  });
+  scheduleRealtimeIndicators(event.bar.time);
+  currentQuote = null;
+  showLatest(currentBars);
+  realtimeConnected = true;
+  realtimeBarRequestId = event.requestId;
+  const now = performance.now();
+  if (now - lastRealtimeStatusRenderAt >= 1_000) {
+    lastRealtimeStatusRenderAt = now;
+    status.className = 'connection-status ready';
+    const streamLabel = event.source === 'aggTrade' ? 'aggTrade' : 'Kline 校准';
+    const statusText = `实时 · Binance ${streamLabel} · ${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
+    status.querySelector('span')!.textContent = statusText;
+    status.setAttribute('aria-label', statusText);
+    status.title = event.source === 'aggTrade'
+      ? `最后一条币安聚合成交：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`
+      : `最后一次币安 K 线校准：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
+  }
+}
+
+let pendingRealtimeBar: RealtimeBarEvent<Bar> | null = null;
+let pendingRealtimeBarQueuedAt = 0;
+let realtimeFrameId: number | undefined;
+let realtimeFrameFallbackTimerId: number | undefined;
+let marketDataTimerId: number | undefined;
+let lastMarketDataRenderAt = 0;
+let lastRealtimeStatusRenderAt = 0;
+let realtimeIndicatorTimerId: number | undefined;
+let pendingRealtimeIndicatorTime: number | undefined;
+let realtimeHealthStartedAt = performance.now();
+let realtimeHealthBarsReceived = 0;
+let realtimeHealthBarsApplied = 0;
+let realtimeHealthDepthReceived = 0;
+let realtimeHealthTradesReceived = 0;
+let realtimeHealthMarketRenders = 0;
+let realtimeHealthMaxQueueMs = 0;
+let realtimeHealthMaxEventAgeMs = 0;
+let realtimeHealthMaxFrameMs = 0;
+let realtimeHealthMaxArrivalGapMs = 0;
+let realtimeHealthMaxApplyGapMs = 0;
+let realtimeHealthLastArrivalAt = 0;
+let realtimeHealthLastApplyAt = 0;
+let realtimeHealthRequestId = 0;
+let realtimeHealthFallbackFlushes = 0;
+
+function scheduleRealtimeIndicators(time: number) {
+  if (activeIndicators.size === 0) return;
+  pendingRealtimeIndicatorTime = time;
+  if (realtimeIndicatorTimerId !== undefined) return;
+  realtimeIndicatorTimerId = window.setTimeout(() => {
+    realtimeIndicatorTimerId = undefined;
+    const pendingTime = pendingRealtimeIndicatorTime;
+    pendingRealtimeIndicatorTime = undefined;
+    if (pendingTime !== undefined) refreshIndicators([pendingTime]);
+  }, 250);
+}
+
+function reportRealtimeRenderHealth(now: number) {
+  if (now - realtimeHealthStartedAt < 10_000) return;
+  const barsCoalesced = Math.max(0, realtimeHealthBarsReceived - realtimeHealthBarsApplied);
+  void invoke('report_realtime_render_health', {
+    requestId: activeRealtimeRequestId,
+    symbol: currentSymbol.symbol,
+    resolution: currentResolution,
+    barsReceived: realtimeHealthBarsReceived,
+    barsApplied: realtimeHealthBarsApplied,
+    barsCoalesced,
+    depthReceived: realtimeHealthDepthReceived,
+    tradesReceived: realtimeHealthTradesReceived,
+    marketRenders: realtimeHealthMarketRenders,
+    maxQueueMs: Math.round(realtimeHealthMaxQueueMs * 10) / 10,
+    maxEventAgeMs: Math.round(realtimeHealthMaxEventAgeMs),
+    maxFrameMs: Math.round(realtimeHealthMaxFrameMs * 10) / 10,
+    maxArrivalGapMs: Math.round(realtimeHealthMaxArrivalGapMs),
+    maxApplyGapMs: Math.round(realtimeHealthMaxApplyGapMs),
+    fallbackFlushes: realtimeHealthFallbackFlushes,
+  }).catch((error) => console.warn('market.realtime.render_health_error', { error: String(error) }));
+  realtimeHealthStartedAt = now;
+  realtimeHealthBarsReceived = 0;
+  realtimeHealthBarsApplied = 0;
+  realtimeHealthDepthReceived = 0;
+  realtimeHealthTradesReceived = 0;
+  realtimeHealthMarketRenders = 0;
+  realtimeHealthMaxQueueMs = 0;
+  realtimeHealthMaxEventAgeMs = 0;
+  realtimeHealthMaxFrameMs = 0;
+  realtimeHealthMaxArrivalGapMs = 0;
+  realtimeHealthMaxApplyGapMs = 0;
+  realtimeHealthFallbackFlushes = 0;
+}
+
+function flushMarketDataEvents(now: number) {
+  const depth = pendingRealtimeDepth;
+  pendingRealtimeDepth = null;
+  if (depth && (!latestDepth || depth.lastUpdateId > latestDepth.lastUpdateId)) latestDepth = depth;
+  if (pendingRealtimeTrades.length) {
+    const newestKnownId = recentTrades[0]?.aggregateTradeId ?? -1;
+    const fresh = pendingRealtimeTrades.filter((trade) => trade.aggregateTradeId > newestKnownId);
+    recentTrades = [...fresh.reverse(), ...recentTrades].slice(0, 100);
+    pendingRealtimeTrades = [];
+  }
+  lastMarketDataRenderAt = now;
+  if (!marketDataPanel.hidden) renderMarketDataPanel();
+  realtimeHealthMarketRenders += 1;
+}
+
+function scheduleMarketDataTimer(delayMs: number) {
+  if (marketDataTimerId !== undefined) return;
+  marketDataTimerId = window.setTimeout(() => {
+    marketDataTimerId = undefined;
+    queueRealtimeFrame();
+  }, delayMs);
+}
+
+function cancelRealtimeFrameSchedule() {
+  if (realtimeFrameId !== undefined) window.cancelAnimationFrame(realtimeFrameId);
+  if (realtimeFrameFallbackTimerId !== undefined) window.clearTimeout(realtimeFrameFallbackTimerId);
+  realtimeFrameId = undefined;
+  realtimeFrameFallbackTimerId = undefined;
+}
+
+function flushRealtimeFrame(now: number, fallback = false) {
+  cancelRealtimeFrameSchedule();
+  if (fallback) realtimeHealthFallbackFlushes += 1;
+  const frameStartedAt = performance.now();
+  const pendingBar = pendingRealtimeBar;
+  pendingRealtimeBar = null;
+  if (pendingBar) {
+    if (realtimeHealthLastApplyAt > 0) {
+      realtimeHealthMaxApplyGapMs = Math.max(
+        realtimeHealthMaxApplyGapMs,
+        frameStartedAt - realtimeHealthLastApplyAt,
+      );
+    }
+    realtimeHealthLastApplyAt = frameStartedAt;
+    realtimeHealthBarsApplied += 1;
+    realtimeHealthMaxQueueMs = Math.max(realtimeHealthMaxQueueMs, frameStartedAt - pendingRealtimeBarQueuedAt);
+    realtimeHealthMaxEventAgeMs = Math.max(realtimeHealthMaxEventAgeMs, Date.now() - pendingBar.eventTimeMs);
+    applyRealtimeBar(pendingBar);
+  }
+  if (pendingRealtimeDepth || pendingRealtimeTrades.length) {
+    const delay = marketDataRenderDelay(now, lastMarketDataRenderAt);
+    if (delay === 0) flushMarketDataEvents(now);
+    else scheduleMarketDataTimer(delay);
+  }
+  realtimeHealthMaxFrameMs = Math.max(realtimeHealthMaxFrameMs, performance.now() - frameStartedAt);
+  reportRealtimeRenderHealth(now);
+}
+
+function queueRealtimeFrame() {
+  if (realtimeFrameId !== undefined || realtimeFrameFallbackTimerId !== undefined) return;
+  realtimeFrameId = window.requestAnimationFrame((now) => flushRealtimeFrame(now));
+  realtimeFrameFallbackTimerId = window.setTimeout(() => {
+    flushRealtimeFrame(performance.now(), true);
+  }, REALTIME_FRAME_FALLBACK_MS);
+}
+
+function queueRealtimeBar(event: RealtimeBarEvent<Bar>) {
+  if (!matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+  )) return;
+  const receivedAt = performance.now();
+  if (realtimeHealthRequestId !== event.requestId) {
+    realtimeHealthRequestId = event.requestId;
+    realtimeHealthLastArrivalAt = 0;
+    realtimeHealthLastApplyAt = 0;
+  }
+  if (realtimeHealthLastArrivalAt > 0) {
+    realtimeHealthMaxArrivalGapMs = Math.max(
+      realtimeHealthMaxArrivalGapMs,
+      receivedAt - realtimeHealthLastArrivalAt,
+    );
+  }
+  realtimeHealthLastArrivalAt = receivedAt;
+  realtimeHealthBarsReceived += 1;
+  pendingRealtimeBar = event;
+  pendingRealtimeBarQueuedAt = receivedAt;
+  queueRealtimeFrame();
+}
+
+function applyRealtimeStatus(event: RealtimeStatusEvent) {
+  if (!matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+  )) return;
+  if (event.status === 'connected') {
+    realtimeConnected = true;
+    status.className = 'connection-status ready';
+    status.querySelector('span')!.textContent = '实时 · Binance WS';
+    status.setAttribute('aria-label', '实时 · Binance WS');
+    status.title = '币安 WebSocket 已连接，等待实时 K 线推送';
+    scheduleLatestPoll(60_000);
+    return;
+  }
+  realtimeConnected = false;
+  status.className = 'connection-status loading';
+  status.querySelector('span')!.textContent = event.status === 'connecting'
+    ? '正在连接 Binance WS'
+    : '实时重连中 · 轮询保护';
+  status.setAttribute('aria-label', status.querySelector('span')!.textContent ?? '币安实时行情');
+  status.title = event.message ?? '正在建立币安 WebSocket 连接';
+  if (event.status === 'reconnecting') scheduleLatestPoll(0);
+}
+
+let pendingRealtimeDepth: RealtimeDepthEvent | null = null;
+let pendingRealtimeTrades: RealtimeTradeEvent[] = [];
+
+function queueRealtimeDepth(event: RealtimeDepthEvent) {
+  if (!matchesRealtimeSelection(event, activeRealtimeRequestId, currentSymbol.symbol, currentResolution)) return;
+  if (latestDepth && event.lastUpdateId <= latestDepth.lastUpdateId) return;
+  realtimeHealthDepthReceived += 1;
+  pendingRealtimeDepth = event;
+  const delay = marketDataRenderDelay(performance.now(), lastMarketDataRenderAt);
+  if (delay === 0) queueRealtimeFrame();
+  else scheduleMarketDataTimer(delay);
+}
+
+function queueRealtimeTrade(event: RealtimeTradeEvent) {
+  if (!matchesRealtimeSelection(event, activeRealtimeRequestId, currentSymbol.symbol, currentResolution)) return;
+  realtimeHealthTradesReceived += 1;
+  pendingRealtimeTrades.push(event);
+  if (pendingRealtimeTrades.length > 100) pendingRealtimeTrades.splice(0, pendingRealtimeTrades.length - 100);
+  const delay = marketDataRenderDelay(performance.now(), lastMarketDataRenderAt);
+  if (delay === 0) queueRealtimeFrame();
+  else scheduleMarketDataTimer(delay);
+}
+
+async function installRealtimeListeners() {
+  await Promise.all([
+    listen<RealtimeBarEvent<Bar>>('market-realtime-bar', (event) => queueRealtimeBar(event.payload)),
+    listen<RealtimeStatusEvent>('market-realtime-status', (event) => applyRealtimeStatus(event.payload)),
+    listen<RealtimeDepthEvent>('market-realtime-depth', (event) => queueRealtimeDepth(event.payload)),
+    listen<RealtimeTradeEvent>('market-realtime-trade', (event) => queueRealtimeTrade(event.payload)),
+  ]);
 }
 
 function chartScreenshot() {
@@ -2550,10 +3130,32 @@ watchlistAdd.addEventListener('click', () => {
 document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.addEventListener('click', (event) => {
   closeToolbarMenus();
   watchlistPanel.hidden = !watchlistPanel.hidden;
+  marketDataPanel.hidden = true;
+  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
   drawingManager.hidden = true;
   document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
   (event.currentTarget as HTMLButtonElement).classList.toggle('active', !watchlistPanel.hidden);
 });
+document.querySelector<HTMLButtonElement>('#market-data-toggle')!.addEventListener('click', (event) => {
+  closeToolbarMenus();
+  marketDataPanel.hidden = !marketDataPanel.hidden;
+  watchlistPanel.hidden = true;
+  drawingManager.hidden = true;
+  document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.classList.remove('active');
+  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
+  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !marketDataPanel.hidden);
+  if (!marketDataPanel.hidden) renderMarketDataPanel();
+});
+document.querySelector<HTMLButtonElement>('#close-market-data')!.addEventListener('click', () => {
+  marketDataPanel.hidden = true;
+  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-market-data-tab]')) {
+  button.addEventListener('click', () => {
+    activeMarketDataTab = button.dataset.marketDataTab as 'depth' | 'trades';
+    renderMarketDataPanel();
+  });
+}
 document.querySelector<HTMLDivElement>('.symbol-control')!.addEventListener('click', openSymbolDialog);
 input.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -2875,7 +3477,9 @@ document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.addEventLi
   closeToolbarMenus();
   drawingManager.hidden = !drawingManager.hidden;
   watchlistPanel.hidden = true;
+  marketDataPanel.hidden = true;
   document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.classList.remove('active');
+  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
   (event.currentTarget as HTMLButtonElement).classList.toggle('active', !drawingManager.hidden);
   if (!drawingManager.hidden) renderDrawingManager();
 });
@@ -2904,7 +3508,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-indicat
 }
 chart.timeScale().subscribeVisibleLogicalRangeChange(positionDrawingProperties);
 chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-  if (!range) return;
+  if (!range || !deepHistoryNavigationReady) return;
   const cacheKey = historyCacheKey(currentSymbol.symbol, currentResolution, currentAdjustment);
   const cached = historyCache.get(cacheKey);
   if (shouldLoadDeepHistory(range.from, currentBars.length, cached?.deep ?? false)) {
@@ -2937,9 +3541,14 @@ setVolumeActive(volumeVisible, false);
 applyMainSeriesOrder();
 renderSecondaryPaneOrder();
 renderWatchlist();
+void loadBinanceSpotCatalog();
+void loadBinanceUsdMarginedCatalog();
+const realtimeListenersReady = installRealtimeListeners();
 void openHistory(defaultSymbol, currentResolution, currentAdjustment);
 
-function scheduleLatestPoll(delayMs = marketPollPlan(new Date(), document.hidden).delayMs) {
+function scheduleLatestPoll(delayMs = currentSymbol.kind === 'crypto' && realtimeConnected
+  ? 60_000
+  : marketPollPlan(new Date(), document.hidden, currentSymbol.kind === 'crypto').delayMs) {
   if (latestPollTimer !== undefined) window.clearTimeout(latestPollTimer);
   latestPollTimer = window.setTimeout(async () => {
     await pollLatestBars();

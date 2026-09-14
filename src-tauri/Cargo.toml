@@ -8,6 +8,10 @@ edition = "2024"
 name = "tradeflow_lite_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["provider-binance"]
+provider-binance = ["dep:tradeflow-binance-market-data"]
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
@@ -17,3 +21,4 @@ flate2 = "1.1.10"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.11.5", features = [] }
+tradeflow-binance-market-data = { path = "crates/binance-market-data", optional = true }

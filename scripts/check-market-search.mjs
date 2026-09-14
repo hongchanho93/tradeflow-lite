@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { listMarketSymbols, marketSymbolMatchesSource, searchMarketSymbols } from '../src/market-universe.ts';
+import { binanceSpotSymbols, buildBinanceSpotSymbols } from '../src/providers/binance/catalog.ts';
+import { binanceUsdMarginedSymbols, buildBinanceUsdMarginedSymbols } from '../src/providers/binance/usdm-catalog.ts';
 
 const marketPackage = JSON.parse(readFileSync(new URL('../src/market-universe.json', import.meta.url), 'utf8'));
-const rows = marketPackage.rows;
+const rows = [...marketPackage.rows, ...binanceSpotSymbols, ...binanceUsdMarginedSymbols];
 
 const stock = searchMarketSymbols(rows, '600000')[0];
 if (stock?.symbol !== 'SH:600000' || stock.kind !== 'stock') throw new Error('stock code search failed');
@@ -23,6 +25,8 @@ const fixtures = [
   { symbol: 'BJ:920000', code: '920000', name: '北交样本', exchange: 'BJ', kind: 'stock' },
   { symbol: 'SH:000001', code: '000001', name: '上证指数', exchange: 'SH', kind: 'index' },
   { symbol: 'SZ:159915', code: '159915', name: '创业板ETF', exchange: 'SZ', kind: 'etf' },
+  { symbol: 'BINANCE:BTCUSDT', code: 'BTC/USDT', name: 'Bitcoin / TetherUS', exchange: 'BINANCE', kind: 'crypto', quoteAsset: 'USDT' },
+  { symbol: 'BINANCE_USDM:BTCUSDT', code: 'BTC/USDT 永续', name: 'Bitcoin / TetherUS Perpetual', exchange: 'BINANCE_USDM', kind: 'crypto', quoteAsset: 'USDT' },
 ];
 if (!marketSymbolMatchesSource(fixtures[3], 'stock', 'chinext')) throw new Error('302 stock must be classified as ChiNext');
 if (marketSymbolMatchesSource(fixtures[1], 'stock', 'sh_main')) throw new Error('STAR stock leaked into SH main board');
@@ -31,5 +35,37 @@ if (listMarketSymbols(fixtures, '000001', 'index', 'all', 20)[0]?.kind !== 'inde
 if (listMarketSymbols(fixtures, '', 'etf', 'sz', 20)[0]?.symbol !== 'SZ:159915') throw new Error('ETF exchange filter failed');
 if (listMarketSymbols(rows, '899050', 'index', 'bj', rows.length)[0]?.symbol !== 'BJ:899050') throw new Error('BJ index missing from search');
 if (listMarketSymbols(rows, '', 'stock', 'all', rows.length).length <= 80) throw new Error('full stock browse result was truncated');
+if (searchMarketSymbols(rows, 'BTCUSD')[0]?.symbol !== 'BINANCE:BTCUSDT') throw new Error('Binance pair search failed');
+if (!marketSymbolMatchesSource(fixtures[7], 'crypto', 'binance_spot')) throw new Error('Binance spot hierarchy failed');
+if (listMarketSymbols(fixtures, '', 'crypto', 'binance_spot', 20)[0]?.symbol !== 'BINANCE:BTCUSDT') {
+  throw new Error('crypto secondary filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdt', 20)[0]?.symbol !== 'BINANCE:BTCUSDT') {
+  throw new Error('crypto quote-asset filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm', 20)[0]?.symbol !== 'BINANCE_USDM:BTCUSDT') {
+  throw new Error('USD-M perpetual secondary filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm_usdt', 20)[0]?.symbol !== 'BINANCE_USDM:BTCUSDT') {
+  throw new Error('USD-M perpetual quote-asset filter failed');
+}
+const dynamic = buildBinanceSpotSymbols([
+  { symbol: 'WTRY', baseAsset: 'W', quoteAsset: 'TRY' },
+  { symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT' },
+]);
+if (dynamic[0]?.symbol !== 'BINANCE:WTRY' || dynamic[0]?.quoteAsset !== 'TRY') {
+  throw new Error('dynamic Binance catalog conversion failed');
+}
+if (dynamic[1]?.name !== 'Bitcoin / TetherUS') throw new Error('curated Binance symbol metadata was lost');
+const perpetuals = buildBinanceUsdMarginedSymbols([
+  { symbol: 'WIFUSDT', baseAsset: 'WIF', quoteAsset: 'USDT' },
+  { symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT' },
+]);
+if (perpetuals[0]?.symbol !== 'BINANCE_USDM:WIFUSDT' || perpetuals[0]?.code !== 'WIF/USDT 永续') {
+  throw new Error('dynamic Binance USD-M catalog conversion failed');
+}
+if (perpetuals[1]?.name !== 'Bitcoin / TetherUS Perpetual') {
+  throw new Error('curated Binance USD-M symbol metadata was lost');
+}
 
 console.log(`Market search OK (${rows.length} instruments)`);

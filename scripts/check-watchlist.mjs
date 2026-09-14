@@ -4,8 +4,8 @@ import { loadWatchlist, moveWatchlistSymbol, normalizeWatchlist, saveWatchlist, 
 
 const known = new Set(['SH:600000', 'SH:510050', 'SH:000001']);
 assert.deepEqual(
-  normalizeWatchlist(['SH:600000', 'bad', 'SH:600000', 'SH:510050'], known),
-  ['SH:600000', 'SH:510050'],
+  normalizeWatchlist(['SH:600000', 'bad', 'SH:600000', 'SH:510050', 'BINANCE:NEWUSDT', 'BINANCE_USDM:NEWUSDT'], known),
+  ['SH:600000', 'SH:510050', 'BINANCE:NEWUSDT', 'BINANCE_USDM:NEWUSDT'],
 );
 assert.deepEqual(moveWatchlistSymbol(['a', 'b', 'c'], 1, -1), ['b', 'a', 'c']);
 assert.deepEqual(moveWatchlistSymbol(['a', 'b'], 0, -1), ['a', 'b']);

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 const markup = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+const defaultCapability = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'));
 const upArrowTool = readFileSync(new URL('../src/drawing-tools/up-arrow.ts', import.meta.url), 'utf8');
 const chartTypeAssets = {
   'bars.svg': 'cae5df3735549d56910a2e85697368ffb2241a151aabd33050b394559ec9fc56',
@@ -20,6 +21,26 @@ const requiredMarkup = [
   'volume-legend',
   'connection-status',
   'benchmark_hosts',
+  'start_realtime_market',
+  'stop_realtime_market',
+  'report_realtime_render_health',
+  'market-realtime-bar',
+  'market-realtime-status',
+  'market-realtime-depth',
+  'market-realtime-trade',
+  'updateLatestBarInPlace(currentBars, event.bar)',
+  'scheduleRealtimeIndicators(event.bar.time)',
+  'marketDataRenderDelay(now, lastMarketDataRenderAt)',
+  'realtimeFrameFallbackTimerId = window.setTimeout',
+  'fallbackFlushes: realtimeHealthFallbackFlushes',
+  'ensureMarketRows(marketTrades, recentTrades.length',
+  'if (!range || !deepHistoryNavigationReady) return;',
+  'list_binance_spot_symbols',
+  'list_binance_usd_margined_symbols',
+  'BINANCE_USDM',
+  '实时 · Binance WS',
+  '实时 · Binance ${streamLabel}',
+  "'aggTrade' ? 'aggTrade' : 'Kline 校准'",
   '正在测试 19 台主站',
   'HistogramSeries',
   'subscribeCrosshairMove',
@@ -97,6 +118,7 @@ const requiredMarkup = [
   'data-symbol-category="stock"',
   'data-symbol-category="index"',
   'data-symbol-category="etf"',
+  'data-symbol-category="crypto"',
   'id="symbol-source-trigger"',
   'id="symbol-source-menu"',
   'id="symbol-dialog-close"',
@@ -193,7 +215,6 @@ const forbiddenMarkup = [
   '卖出',
   '买入',
   '模拟账户',
-  '盘口',
   '信号',
   '快讯',
 ];
@@ -233,6 +254,9 @@ const requiredStyles = [
   '.chart-toast',
   '.watchlist-panel',
   '.watchlist-row',
+  '.market-data-panel',
+  '.market-depth-row',
+  '.market-trade-row',
   '.drawing-toolbar',
   '.drawing-mode-hint',
   '.drawing-tool-menu',
@@ -260,8 +284,24 @@ if (markup.includes('image.src = exchangeLogoUrl(exchange)')) throw new Error('e
 const mainWindow = tauriConfig.app?.windows?.[0];
 if (mainWindow?.decorations !== true) throw new Error('native window title bar is not enabled');
 if (mainWindow?.resizable !== true) throw new Error('native window resizing is not enabled');
+if (!defaultCapability.permissions?.includes('core:event:allow-listen')) {
+  throw new Error('Tauri main window cannot listen for realtime market events');
+}
 if (markup.includes('data-tauri-drag-region') || markup.includes('window-drag-region')) {
   throw new Error('custom drag region remains after restoring native window chrome');
+}
+if (markup.includes('currentBars = mergeLatestBars(currentBars, [event.bar])')) {
+  throw new Error('realtime still rebuilds and sorts the complete history on every forming-bar update');
+}
+if (markup.includes('marketDepthAsks.replaceChildren();') || markup.includes('marketDepthBids.replaceChildren();')) {
+  throw new Error('realtime depth still destroys every DOM row before each update');
+}
+const openHistoryBody = markup.slice(markup.indexOf('async function openHistory('), markup.indexOf('async function pollLatestBars('));
+if (openHistoryBody.includes('scheduleDeepHistory(')) {
+  throw new Error('opening a symbol still schedules an automatic deep-history replacement over realtime');
+}
+if (!markup.includes('shouldLoadDeepHistory(range.from') || !markup.includes('scheduleDeepHistory(\n      currentSymbol,')) {
+  throw new Error('deep history must remain available when the user reaches the left history edge');
 }
 for (const contract of [
   '#chart-type-menu > summary { width: 40px; min-width: 40px; height: 40px;',

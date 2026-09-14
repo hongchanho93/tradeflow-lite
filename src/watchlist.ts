@@ -2,11 +2,23 @@ export const WATCHLIST_STORAGE_KEY = 'tradeflow-lite.watchlist.v1';
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
+function isStoredBinanceSymbol(value: string): boolean {
+  const prefix = value.startsWith('BINANCE_USDM:')
+    ? 'BINANCE_USDM:'
+    : value.startsWith('BINANCE:') ? 'BINANCE:' : '';
+  const code = prefix ? value.slice(prefix.length) : '';
+  return code.length <= 96
+    && [...code].length >= 2
+    && [...code].length <= 32
+    && /^[\p{L}\p{N}]+$/u.test(code);
+}
+
 export function normalizeWatchlist(symbols: unknown, knownSymbols: Set<string>): string[] {
   if (!Array.isArray(symbols)) return [];
   const unique = new Set<string>();
   for (const symbol of symbols) {
-    if (typeof symbol === 'string' && knownSymbols.has(symbol)) unique.add(symbol);
+    if (typeof symbol === 'string'
+      && (knownSymbols.has(symbol) || isStoredBinanceSymbol(symbol))) unique.add(symbol);
     if (unique.size >= 100) break;
   }
   return [...unique];

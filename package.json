@@ -7,8 +7,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "test:ui": "node scripts/check-ui-contract.mjs",
-    "test:contracts": "node scripts/check-market-search.mjs && node scripts/check-symbol-logos.mjs && node scripts/check-latest-request.mjs && node scripts/check-bar-series.mjs && node scripts/check-history-loader.mjs && node scripts/check-market-session.mjs && node scripts/check-quote.mjs && node scripts/check-indicators.mjs && node scripts/check-watchlist.mjs && node scripts/check-drawing-state.mjs && node scripts/check-chart-controls.mjs && node scripts/check-time-navigation.mjs && node scripts/check-marker-state.mjs",
+    "test:contracts": "node scripts/check-market-search.mjs && node scripts/check-symbol-logos.mjs && node scripts/check-latest-request.mjs && node scripts/check-bar-series.mjs && node scripts/check-realtime-market.mjs && node scripts/check-history-loader.mjs && node scripts/check-market-session.mjs && node scripts/check-quote.mjs && node scripts/check-indicators.mjs && node scripts/check-watchlist.mjs && node scripts/check-drawing-state.mjs && node scripts/check-chart-controls.mjs && node scripts/check-time-navigation.mjs && node scripts/check-marker-state.mjs",
     "test:real-market": "cargo test --manifest-path src-tauri/Cargo.toml real_market_matrix -- --ignored --nocapture",
+    "test:real-binance": "cargo test --manifest-path src-tauri/Cargo.toml binance_spot_real_market -- --ignored --nocapture",
+    "test:real-binance-ws": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_aggregate_trade_and_kline_events -- --ignored --exact --nocapture",
+    "test:real-binance-usdm": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_usd_margined_perpetual_market -- --ignored --exact --nocapture",
+    "test:real-binance-usdm-ws": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_usd_margined_realtime_events -- --ignored --exact --nocapture",
     "tauri": "tauri"
   },
   "dependencies": {

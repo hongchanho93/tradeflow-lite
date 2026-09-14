@@ -7,15 +7,18 @@ pub struct Symbol(String);
 impl Symbol {
     pub fn new(exchange: &str, code: &str) -> Result<Self, AppError> {
         let exchange = exchange.trim().to_ascii_uppercase();
-        let code = code.trim();
-        if !matches!(exchange.as_str(), "SH" | "SZ" | "BJ")
-            || code.len() != 6
-            || !code.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(AppError::new(
-                "invalid_symbol",
-                "证券代码必须是 SH/SZ/BJ 加六位数字",
-            ));
+        let code = code.trim().to_ascii_uppercase();
+        let valid = match exchange.as_str() {
+            "SH" | "SZ" | "BJ" => code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),
+            "BINANCE" | "BINANCE_USDM" => {
+                (2..=32).contains(&code.chars().count())
+                    && code.len() <= 96
+                    && code.chars().all(char::is_alphanumeric)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(AppError::new("invalid_symbol", "不支持的行情品种代码"));
         }
         Ok(Self(format!("{exchange}:{code}")))
     }
@@ -33,6 +36,7 @@ pub enum SymbolKind {
     Stock,
     Etf,
     Index,
+    Crypto,
 }
 
 impl SymbolKind {
@@ -41,6 +45,7 @@ impl SymbolKind {
             Self::Stock => "stock",
             Self::Etf => "etf",
             Self::Index => "index",
+            Self::Crypto => "crypto",
         }
     }
 }
@@ -51,6 +56,22 @@ pub struct SymbolInfo {
     pub symbol: Symbol,
     pub name: String,
     pub kind: SymbolKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinanceSpotSymbol {
+    pub symbol: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinanceUsdMarginedSymbol {
+    pub symbol: String,
+    pub base_asset: String,
+    pub quote_asset: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,5 +265,11 @@ mod tests {
         assert_eq!(serde_json::to_value(info).unwrap()["symbol"], "SH:600000");
         assert_eq!(serde_json::to_value(Resolution::Day).unwrap(), "1D");
         assert_eq!(serde_json::to_value(Adjustment::None).unwrap(), "none");
+        assert_eq!(
+            serde_json::to_value(Symbol::new("binance", "btcusdt").unwrap()).unwrap(),
+            "BINANCE:BTCUSDT"
+        );
+        assert_eq!(serde_json::to_value(SymbolKind::Crypto).unwrap(), "crypto");
+        assert!(Symbol::new("BINANCE", "BTC/USDT").is_err());
     }
 }

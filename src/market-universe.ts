@@ -1,18 +1,21 @@
-export type MarketSymbolKind = 'stock' | 'etf' | 'index';
+export type MarketSymbolKind = 'stock' | 'etf' | 'index' | 'crypto';
 export type MarketSearchCategory = 'all' | MarketSymbolKind;
-export type MarketSearchSource = 'all' | 'sh' | 'sz' | 'bj' | 'sh_main' | 'star' | 'sz_main' | 'chinext';
+export type MarketSearchSource = 'all' | 'sh' | 'sz' | 'bj' | 'sh_main' | 'star' | 'sz_main' | 'chinext'
+  | 'binance_spot' | 'binance_usdt' | 'binance_usdc' | 'binance_fdusd' | 'binance_btc' | 'binance_other'
+  | 'binance_usdm' | 'binance_usdm_usdt' | 'binance_usdm_usdc';
 
 export type MarketSymbol = {
   symbol: string;
   code: string;
   name: string;
-  exchange: 'SH' | 'SZ' | 'BJ';
+  exchange: 'SH' | 'SZ' | 'BJ' | 'BINANCE' | 'BINANCE_USDM';
   kind: MarketSymbolKind;
+  quoteAsset?: string;
   aliases?: string[];
 };
 
 export function normalizeSearchText(value: string): string {
-  return value.normalize('NFKC').trim().toLocaleLowerCase('zh-CN').replace(/[\s:._-]+/g, '');
+  return value.normalize('NFKC').trim().toLocaleLowerCase('zh-CN').replace(/[\s/:._-]+/g, '');
 }
 
 function matchRank(item: MarketSymbol, query: string): number | null {
@@ -32,6 +35,19 @@ export function marketSymbolMatchesSource(
 ): boolean {
   if (category !== 'all' && item.kind !== category) return false;
   if (source === 'all') return true;
+  if (source === 'binance_spot') return item.kind === 'crypto' && item.exchange === 'BINANCE';
+  if (source === 'binance_usdm') return item.kind === 'crypto' && item.exchange === 'BINANCE_USDM';
+  if (source.startsWith('binance_usdm_')) {
+    return item.kind === 'crypto'
+      && item.exchange === 'BINANCE_USDM'
+      && item.quoteAsset?.toUpperCase() === source.slice('binance_usdm_'.length).toUpperCase();
+  }
+  if (source.startsWith('binance_')) {
+    if (item.kind !== 'crypto' || item.exchange !== 'BINANCE') return false;
+    const quote = item.quoteAsset?.toUpperCase();
+    if (source === 'binance_other') return !['USDT', 'USDC', 'FDUSD', 'BTC'].includes(quote ?? '');
+    return quote === source.slice('binance_'.length).toUpperCase();
+  }
   if (source === 'sh' || source === 'sz' || source === 'bj') return item.exchange === source.toUpperCase();
   if (item.kind !== 'stock') return false;
   if (source === 'star') return item.exchange === 'SH' && /^(688|689)/.test(item.code);
@@ -61,7 +77,7 @@ export function listMarketSymbols(
       .slice(0, limit)
       .map(({ item }) => item);
   }
-  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, index: 1, etf: 2 };
+  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, index: 1, etf: 2, crypto: 3 };
   return filtered
     .sort((left, right) => kindOrder[left.kind] - kindOrder[right.kind]
       || left.code.localeCompare(right.code)
@@ -72,7 +88,7 @@ export function listMarketSymbols(
 export function searchMarketSymbols(rows: MarketSymbol[], rawQuery: string, limit = 30): MarketSymbol[] {
   const query = normalizeSearchText(rawQuery);
   if (!query || limit <= 0) return [];
-  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, etf: 1, index: 2 };
+  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, etf: 1, index: 2, crypto: 3 };
   return rows
     .flatMap((item) => {
       const rank = matchRank(item, query);
