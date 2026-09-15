@@ -31,3 +31,5 @@ Packaging, signing, release publication, and Windows verification are outside th
 ## Polymarket read-only gateway
 
 Networks that cannot reach Polymarket directly can point the Polymarket adapter at the standalone read-only gateway in [`server/polymarket-gateway.mjs`](server/polymarket-gateway.mjs). Deployment and client configuration are documented in [`server/README.md`](server/README.md). The gateway exposes public market data only; it has no wallet, account, deposit, or order route.
+
+The public release does not embed or default to the maintainer's Cloudflare test domain. Without an explicit developer/user-owned gateway configuration, Lite connects directly to the official Polymarket APIs.

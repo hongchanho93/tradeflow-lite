@@ -51,18 +51,17 @@ curl https://poly-api.pan911.cn/healthz
 TRADEFLOW_POLYMARKET_GATEWAY_URL=http://127.0.0.1:8787 npm run tauri dev
 ```
 
-正式构建时把 HTTPS 网关地址写入编译环境：
+当前 `poly-api.pan911.cn` 只供个人开发测试，不属于 TradeFlow Lite 的发布基础设施。官方发布构建不得设置该变量，也不会内置或默认使用这个域名；用户安装后默认仍直连 Polymarket 官方 API，所在网络无法访问时由用户自行配置网络或自行维护网关。
 
-```sh
-TRADEFLOW_POLYMARKET_GATEWAY_URL=https://你的只读数据域名 npm run tauri build
-```
+该配置只在进程启动时读取，不支持把地址编进构建产物。维护自有网关的用户需要在启动 Lite 进程时自行设置环境变量。
 
-配置网关后，Lite 不会在网关故障时偷偷回退到 Polymarket 直连。这样可以避免不同用户得到不一致路由，并让故障明确显示为行情不可用。未配置时仍保持原来的 Polymarket 官方 API 直连行为。
+配置自有网关后，Lite 不会在网关故障时偷偷回退到 Polymarket 直连。这样可以避免同一次使用得到不一致路由，并让故障明确显示为行情不可用。未配置时保持 Polymarket 官方 API 直连行为。
 
 ## 接口与缓存
 
 - `GET /healthz`
 - `GET /v1/polymarket/gamma/markets`
+- `GET /v1/polymarket/gamma/markets-keyset`
 - `GET /v1/polymarket/clob/prices-history`
 - `GET /v1/polymarket/clob/midpoint`
 - `GET /v1/polymarket/clob/book`

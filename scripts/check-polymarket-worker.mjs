@@ -36,7 +36,7 @@ const health = await call('/healthz');
 assert.equal(health.status, 200);
 assert.equal((await health.json()).service, 'tradeflow-polymarket-worker');
 
-const catalogPath = '/v1/polymarket/gamma/markets?active=true&closed=false&limit=100&order=volume24hr&ascending=false';
+const catalogPath = '/v1/polymarket/gamma/markets?active=true&closed=false&limit=100&offset=0&order=volume24hr&ascending=false';
 const first = await call(catalogPath);
 assert.equal(first.status, 200);
 assert.equal(first.headers.get('x-tradeflow-cache'), 'MISS');
@@ -50,6 +50,16 @@ assert.equal(upstreamRequests, 1);
 const invalid = await call('/v1/polymarket/clob/midpoint?token_id=https%3A%2F%2Fexample.com');
 assert.equal(invalid.status, 400);
 assert.equal(upstreamRequests, 1);
+
+const invalidOffset = await call('/v1/polymarket/gamma/markets?active=true&closed=false&limit=100&offset=1&order=volume24hr&ascending=false');
+assert.equal(invalidOffset.status, 400);
+assert.equal(upstreamRequests, 1);
+
+const keysetPage = await call('/v1/polymarket/gamma/markets-keyset?closed=false&limit=100&order=volume24hr&ascending=false&after_cursor=MTAwMA%3D%3D');
+assert.equal(keysetPage.status, 200);
+assert.match((await keysetPage.json()).path, /^\/markets\/keyset\?/);
+const unsafeCursor = await call('/v1/polymarket/gamma/markets-keyset?closed=false&limit=100&order=volume24hr&ascending=false&after_cursor=https%3A%2F%2Fexample.com');
+assert.equal(unsafeCursor.status, 400);
 
 const fullHistory = await call('/v1/polymarket/clob/prices-history?market=123&interval=max&fidelity=1440');
 assert.equal(fullHistory.status, 200);

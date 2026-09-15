@@ -117,7 +117,7 @@ import {
   listMarketSymbols,
   marketProviderKey,
   marketSymbolFromCatalog,
-  type MarketCatalogSymbol,
+  type MarketCatalogPage,
   type MarketProviderDescriptor,
   type MarketSearchCategory,
   type MarketSearchSource,
@@ -1002,6 +1002,15 @@ const drawingMenus = [...document.querySelectorAll<HTMLDetailsElement>('.drawing
 const drawingPropertyControls = [...drawingProperties.querySelectorAll<HTMLDetailsElement>('.drawing-property-control')];
 let pendingTextButton: HTMLButtonElement | null = null;
 const SYMBOL_RESULT_PAGE_SIZE = 80;
+type MarketCatalogLoadState = {
+  descriptor: MarketProviderDescriptor;
+  venue: string;
+  nextCursor: string | null;
+  loading: boolean;
+  pages: number;
+  symbols: number;
+};
+const marketCatalogLoadStates = new Map<string, MarketCatalogLoadState>();
 let matchingSymbolResults: MarketSymbol[] = [];
 let visibleSymbolResults: MarketSymbol[] = [];
 let activeSymbolResult = -1;
@@ -2710,45 +2719,22 @@ async function loadMarketCatalogs() {
   try {
     const descriptors = await invoke<MarketProviderDescriptor[]>('list_market_providers');
     marketProviderById.clear();
+    marketCatalogLoadStates.clear();
     for (const descriptor of descriptors) marketProviderById.set(descriptor.id, descriptor);
-    let loaded = 0;
     for (const descriptor of descriptors) {
       if (!descriptor.enabled || !descriptor.capabilities.catalog) continue;
       for (const venue of descriptor.capabilities.venues) {
-        try {
-          const rows = await invoke<MarketCatalogSymbol[]>('list_market_catalog', {
-            providerId: descriptor.id,
-            venue,
-          });
-          const dynamicSymbols = rows
-            .filter((row) => row.providerId === descriptor.id)
-            .map((row) => marketSymbolFromCatalog(row, descriptor, venue));
-          if (!dynamicSymbols.length) continue;
-          marketSymbols = [
-            ...marketSymbols.filter((item) => !(item.providerId === descriptor.id && item.venue === venue)),
-            ...dynamicSymbols,
-          ];
-          loaded += dynamicSymbols.length;
-          console.info('market.catalog.ready', {
-            providerId: descriptor.id,
-            provider: descriptor.displayName,
-            venue,
-            symbols: dynamicSymbols.length,
-          });
-        } catch (error) {
-          console.warn('market.catalog.fallback', {
-            providerId: descriptor.id,
-            provider: descriptor.displayName,
-            venue,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        const state: MarketCatalogLoadState = {
+          descriptor,
+          venue,
+          nextCursor: null,
+          loading: false,
+          pages: 0,
+          symbols: 0,
+        };
+        marketCatalogLoadStates.set(marketProviderKey(descriptor.id, venue), state);
+        await loadNextMarketCatalogPage(state);
       }
-    }
-    if (loaded > 0) {
-      rebuildMarketSymbolIndex();
-      renderWatchlist();
-      if (!symbolDialogLayer.hidden) renderSymbolResults();
     }
   } catch (error) {
     console.warn('market.catalog.descriptors_unavailable', {
@@ -2756,6 +2742,82 @@ async function loadMarketCatalogs() {
       curated: binanceSpotSymbols.length + binanceUsdMarginedSymbols.length,
     });
   }
+}
+
+async function loadNextMarketCatalogPage(state: MarketCatalogLoadState) {
+  if (state.loading || (state.pages > 0 && !state.nextCursor)) return;
+  state.loading = true;
+  const previousVisibleCount = visibleSymbolResults.length;
+  const previousScrollTop = symbolResults.scrollTop;
+  try {
+    const page = await invoke<MarketCatalogPage>('list_market_catalog_page', {
+      providerId: state.descriptor.id,
+      venue: state.venue,
+      cursor: state.nextCursor,
+      limit: 100,
+    });
+    const dynamicSymbols = page.symbols
+      .filter((row) => row.providerId === state.descriptor.id)
+      .map((row) => marketSymbolFromCatalog(row, state.descriptor, state.venue));
+    const incoming = new Set(dynamicSymbols.map((item) => marketProviderKey(item.providerId, item.symbol)));
+    marketSymbols = [
+      ...marketSymbols.filter((item) => {
+        if (state.pages === 0 && item.providerId === state.descriptor.id && item.venue === state.venue) return false;
+        return !incoming.has(marketProviderKey(item.providerId, item.symbol));
+      }),
+      ...dynamicSymbols,
+    ];
+    state.pages += 1;
+    state.symbols += dynamicSymbols.length;
+    state.nextCursor = page.nextCursor ?? null;
+    rebuildMarketSymbolIndex();
+    renderWatchlist();
+    if (!symbolDialogLayer.hidden) {
+      renderSymbolResults(previousVisibleCount + SYMBOL_RESULT_PAGE_SIZE, previousScrollTop);
+    }
+    console.info('market.catalog.page', {
+      providerId: state.descriptor.id,
+      provider: state.descriptor.displayName,
+      venue: state.venue,
+      page: state.pages,
+      pageSymbols: dynamicSymbols.length,
+      symbols: state.symbols,
+      hasMore: Boolean(state.nextCursor),
+    });
+    if (!state.nextCursor) {
+      console.info('market.catalog.ready', {
+        providerId: state.descriptor.id,
+        provider: state.descriptor.displayName,
+        venue: state.venue,
+        pages: state.pages,
+        symbols: state.symbols,
+      });
+    }
+  } catch (error) {
+    const message = typeof error === 'object' && error && 'message' in error
+      ? String(error.message)
+      : String(error);
+    console.warn(state.pages === 0 ? 'market.catalog.fallback' : 'market.catalog.partial', {
+      providerId: state.descriptor.id,
+      provider: state.descriptor.displayName,
+      venue: state.venue,
+      pages: state.pages,
+      symbols: state.symbols,
+      error: message,
+    });
+  } finally {
+    state.loading = false;
+  }
+}
+
+function polymarketCatalogState(): MarketCatalogLoadState | undefined {
+  return marketCatalogLoadStates.get(marketProviderKey('polymarket', 'POLYMARKET'));
+}
+
+function shouldLoadMorePolymarketSymbols(): boolean {
+  return symbolDialogInput.value.trim() === ''
+    && (activeSymbolCategory === 'prediction' || activeSymbolSource === 'polymarket')
+    && Boolean(polymarketCatalogState()?.nextCursor);
 }
 
 function openSymbolDialog() {
@@ -2831,14 +2893,17 @@ function appendNextSymbolResults() {
     button.addEventListener('pointermove', () => setActiveSymbolResult(index));
     symbolResults.append(button);
   }
+  const remoteHasMore = shouldLoadMorePolymarketSymbols();
   symbolResultCount.textContent = matchingSymbolResults.length
     ? visibleSymbolResults.length < matchingSymbolResults.length
       ? `已显示 ${visibleSymbolResults.length} / 共 ${matchingSymbolResults.length} 条`
-      : `共 ${matchingSymbolResults.length} 条`
+      : remoteHasMore
+        ? `已加载 ${matchingSymbolResults.length} 条 · 下滑继续加载`
+        : `共 ${matchingSymbolResults.length} 条`
     : '';
 }
 
-function renderSymbolResults() {
+function renderSymbolResults(minimumVisible = SYMBOL_RESULT_PAGE_SIZE, restoreScrollTop = 0) {
   matchingSymbolResults = listMarketSymbols(
     marketSymbols,
     symbolDialogInput.value,
@@ -2858,8 +2923,10 @@ function renderSymbolResults() {
     activeSymbolResult = -1;
     return;
   }
-  appendNextSymbolResults();
-  symbolResults.scrollTop = 0;
+  while (visibleSymbolResults.length < minimumVisible && visibleSymbolResults.length < matchingSymbolResults.length) {
+    appendNextSymbolResults();
+  }
+  symbolResults.scrollTop = restoreScrollTop;
   activeSymbolResult = -1;
 }
 
@@ -3837,10 +3904,14 @@ input.addEventListener('keydown', (event) => {
   event.preventDefault();
   openSymbolDialog();
 });
-symbolDialogInput.addEventListener('input', renderSymbolResults);
+symbolDialogInput.addEventListener('input', () => renderSymbolResults());
 symbolResults.addEventListener('scroll', () => {
   if (symbolResults.scrollTop + symbolResults.clientHeight >= symbolResults.scrollHeight - 120) {
     appendNextSymbolResults();
+    if (visibleSymbolResults.length >= matchingSymbolResults.length && shouldLoadMorePolymarketSymbols()) {
+      const state = polymarketCatalogState();
+      if (state) void loadNextMarketCatalogPage(state);
+    }
   }
 });
 symbolDialogInput.addEventListener('keydown', (event) => {

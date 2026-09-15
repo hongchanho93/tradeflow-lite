@@ -96,6 +96,14 @@ pub struct CatalogRequest {
     pub venue: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPageRequest {
+    pub provider_id: String,
+    pub venue: String,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
 /// 目录返回的 provider-neutral 稳定身份。`symbol` 必须是包含 venue 的 `VENUE:CODE`。
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +116,14 @@ pub struct CatalogSymbol {
     pub quote_asset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prediction: Option<PredictionMarketMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPage {
+    pub symbols: Vec<CatalogSymbol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -140,6 +156,23 @@ pub trait QuoteAdapter: Sync {
 
 pub trait CatalogAdapter: Sync {
     fn list_symbols(&self, request: CatalogRequest) -> Result<Vec<CatalogSymbol>, AppError>;
+
+    fn list_symbols_page(&self, request: CatalogPageRequest) -> Result<CatalogPage, AppError> {
+        if request.cursor.is_some() {
+            return Err(AppError::new(
+                "catalog_cursor_invalid",
+                "该行情源目录不支持继续分页",
+            ));
+        }
+        let symbols = self.list_symbols(CatalogRequest {
+            provider_id: request.provider_id,
+            venue: request.venue,
+        })?;
+        Ok(CatalogPage {
+            symbols,
+            next_cursor: None,
+        })
+    }
 }
 
 /// Provider 产生的实时事件。`RealtimeRequest` 中的 identity 会被复制到每个 envelope，

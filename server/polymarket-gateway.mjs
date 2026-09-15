@@ -16,8 +16,24 @@ const ROUTES = new Map([
         active: (value) => value === 'true',
         closed: (value) => value === 'false',
         limit: (value) => integerInRange(value, 1, 100),
+        offset: (value) => integerInRange(value, 0, 9_900) && Number(value) % 100 === 0,
         order: (value) => value === 'volume24hr',
         ascending: (value) => value === 'false',
+      });
+    },
+  }],
+  ['/v1/polymarket/gamma/markets-keyset', {
+    upstreamPath: '/markets/keyset',
+    source: 'gamma',
+    cacheMs: 30_000,
+    validate(searchParams) {
+      return validateParameters(searchParams, {
+        closed: (value) => value === 'false',
+        limit: (value) => integerInRange(value, 1, 100),
+        order: (value) => value === 'volume24hr',
+        ascending: (value) => value === 'false',
+      }, {
+        after_cursor: validCatalogCursor,
       });
     },
   }],
@@ -73,14 +89,26 @@ function validTokenId(value) {
   return /^\d{1,96}$/.test(value);
 }
 
+function validCatalogCursor(value) {
+  return /^[A-Za-z0-9._~+/=-]{1,512}$/.test(value);
+}
+
 function validateExactParameters(searchParams, validators) {
-  const expected = new Set(Object.keys(validators));
+  return validateParameters(searchParams, validators);
+}
+
+function validateParameters(searchParams, required, optional = {}) {
+  const expected = new Set([...Object.keys(required), ...Object.keys(optional)]);
   for (const key of searchParams.keys()) {
     if (!expected.has(key)) return `不支持参数 ${key}`;
   }
-  for (const [key, validate] of Object.entries(validators)) {
+  for (const [key, validate] of Object.entries(required)) {
     const values = searchParams.getAll(key);
     if (values.length !== 1 || !validate(values[0])) return `参数 ${key} 无效`;
+  }
+  for (const [key, validate] of Object.entries(optional)) {
+    const values = searchParams.getAll(key);
+    if (values.length > 1 || (values.length === 1 && !validate(values[0]))) return `参数 ${key} 无效`;
   }
   return null;
 }

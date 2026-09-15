@@ -9,11 +9,11 @@ use crate::market_providers::binance::{BinanceSpotAdapter, BinanceUsdMarginedAda
 use crate::market_providers::polymarket::PolymarketAdapter;
 
 pub use crate::market_adapter::{
-    AdapterRegistration, AdapterRegistry, CatalogAdapter, CatalogRequest, CatalogSymbol,
-    HistoryRequest, MarketDataAdapter, MarketDataSnapshot, PredictionMarketMetadata,
-    ProviderCapabilities, ProviderDescriptor, QuoteRequest, QuoteResponse, QuoteSnapshot,
-    RealtimeAdapter, RealtimeEventEnvelope, RealtimePayload, RealtimePriceLevel, RealtimeRequest,
-    RealtimeSink,
+    AdapterRegistration, AdapterRegistry, CatalogAdapter, CatalogPage, CatalogPageRequest,
+    CatalogRequest, CatalogSymbol, HistoryRequest, MarketDataAdapter, MarketDataSnapshot,
+    PredictionMarketMetadata, ProviderCapabilities, ProviderDescriptor, QuoteRequest,
+    QuoteResponse, QuoteSnapshot, RealtimeAdapter, RealtimeEventEnvelope, RealtimePayload,
+    RealtimePriceLevel, RealtimeRequest, RealtimeSink,
 };
 
 struct TdxAdapter;
@@ -320,6 +320,29 @@ impl MarketRouter {
         let symbols = catalog.list_symbols(request)?;
         validate_catalog_symbols(descriptor, &venue, &symbols)?;
         Ok(symbols)
+    }
+
+    pub fn list_catalog_page(&self, request: CatalogPageRequest) -> Result<CatalogPage, AppError> {
+        let registration = self
+            .registry
+            .resolve_catalog(&request.provider_id, &request.venue)?;
+        let descriptor = registration.descriptor();
+        if !descriptor.enabled {
+            return Err(AppError::new(
+                "market_data_source_unavailable",
+                format!("{} 行情适配器未启用", descriptor.display_name),
+            ));
+        }
+        let Some(catalog) = registration.catalog_adapter() else {
+            return Err(AppError::new(
+                "unsupported_capability",
+                format!("{} 没有目录 facet", descriptor.display_name),
+            ));
+        };
+        let venue = request.venue.clone();
+        let page = catalog.list_symbols_page(request)?;
+        validate_catalog_symbols(descriptor, &venue, &page.symbols)?;
+        Ok(page)
     }
 
     pub fn fetch_quote(&self, request: QuoteRequest) -> Result<QuoteResponse, AppError> {

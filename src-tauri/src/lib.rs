@@ -12,8 +12,8 @@ use contracts::{
 };
 use market_data::{HistoryResponse, HostBenchmarkResponse};
 use market_router::{
-    CatalogRequest, CatalogSymbol, HistoryRequest, MarketRouter, ProviderDescriptor, QuoteRequest,
-    QuoteResponse,
+    CatalogPage, CatalogPageRequest, CatalogRequest, CatalogSymbol, HistoryRequest, MarketRouter,
+    ProviderDescriptor, QuoteRequest, QuoteResponse,
 };
 use realtime::RealtimeState;
 use tauri::{AppHandle, State};
@@ -129,6 +129,32 @@ async fn list_market_catalog(
     venue: String,
 ) -> Result<Vec<CatalogSymbol>, AppError> {
     list_catalog_for_router(router.inner().clone(), provider_id, venue).await
+}
+
+#[tauri::command]
+async fn list_market_catalog_page(
+    router: State<'_, MarketRouter>,
+    provider_id: String,
+    venue: String,
+    cursor: Option<String>,
+    limit: usize,
+) -> Result<CatalogPage, AppError> {
+    let router = router.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        router.list_catalog_page(CatalogPageRequest {
+            provider_id,
+            venue,
+            cursor,
+            limit,
+        })
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "catalog_task_failed",
+            format!("品种目录分页任务异常结束：{error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -303,6 +329,7 @@ pub fn run_with_router(router: MarketRouter) {
             get_quote_snapshot,
             list_market_providers,
             list_market_catalog,
+            list_market_catalog_page,
             benchmark_hosts,
             list_binance_spot_symbols,
             list_binance_usd_margined_symbols,

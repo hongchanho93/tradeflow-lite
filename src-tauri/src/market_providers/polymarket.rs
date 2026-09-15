@@ -12,9 +12,9 @@ use crate::contracts::{
     Adjustment, AppError, MarketSeriesKind, ProbabilityPoint, Resolution, SymbolKind,
 };
 use crate::market_adapter::{
-    CatalogAdapter, CatalogRequest, CatalogSymbol, POLYMARKET_PROVIDER_DESCRIPTOR,
-    PredictionMarketMetadata, ProviderDescriptor, RealtimeAdapter, RealtimePayload,
-    RealtimePriceLevel, RealtimeRequest, RealtimeSink,
+    CatalogAdapter, CatalogPage, CatalogPageRequest, CatalogRequest, CatalogSymbol,
+    POLYMARKET_PROVIDER_DESCRIPTOR, PredictionMarketMetadata, ProviderDescriptor, RealtimeAdapter,
+    RealtimePayload, RealtimePriceLevel, RealtimeRequest, RealtimeSink,
 };
 use crate::market_data::{HistoryDiagnostics, HistoryResponse};
 use crate::market_router::{HistoryRequest, MarketDataAdapter};
@@ -22,7 +22,7 @@ use crate::market_router::{HistoryRequest, MarketDataAdapter};
 const GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const CLOB_BASE: &str = "https://clob.polymarket.com";
 const GATEWAY_ENV: &str = "TRADEFLOW_POLYMARKET_GATEWAY_URL";
-const CATALOG_LIMIT: usize = 100;
+const CATALOG_PAGE_SIZE: usize = 100;
 const SOURCE: &str = "polymarket";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -39,14 +39,16 @@ struct ApiBases {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GammaMarket {
-    question: String,
+    question: Option<String>,
     condition_id: String,
     #[serde(default)]
-    description: String,
+    description: Option<String>,
     #[serde(default)]
-    resolution_source: String,
+    resolution_source: Option<String>,
     #[serde(default)]
-    end_date: String,
+    end_date: Option<String>,
+    #[serde(default)]
+    active: Option<bool>,
     #[serde(default)]
     outcomes: Value,
     #[serde(default)]
@@ -59,6 +61,14 @@ struct GammaMarket {
     volume_num: Option<f64>,
     #[serde(default)]
     liquidity_num: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct GammaMarketPage {
+    #[serde(default)]
+    markets: Vec<GammaMarket>,
+    #[serde(default)]
+    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -154,10 +164,7 @@ fn api_bases_from(gateway: Option<&str>) -> Result<ApiBases, AppError> {
 
 fn api_bases() -> Result<ApiBases, AppError> {
     let runtime = std::env::var(GATEWAY_ENV).ok();
-    let configured = runtime
-        .as_deref()
-        .or(option_env!("TRADEFLOW_POLYMARKET_GATEWAY_URL"));
-    api_bases_from(configured)
+    api_bases_from(runtime.as_deref())
 }
 
 fn map_http_error(error: reqwest::Error) -> AppError {
@@ -184,6 +191,13 @@ fn catalog_symbols(markets: Vec<GammaMarket>) -> Vec<CatalogSymbol> {
     markets
         .into_iter()
         .filter_map(|market| {
+            if market.active == Some(false) {
+                return None;
+            }
+            let question = market.question?.trim().to_string();
+            if question.is_empty() {
+                return None;
+            }
             let outcomes = value_string_array(&market.outcomes)?;
             let token_ids = value_string_array(&market.clob_token_ids)?;
             let prices = value_string_array(&market.outcome_prices).unwrap_or_default();
@@ -210,7 +224,7 @@ fn catalog_symbols(markets: Vec<GammaMarket>) -> Vec<CatalogSymbol> {
             Some(CatalogSymbol {
                 provider_id: POLYMARKET_PROVIDER_DESCRIPTOR.id.to_string(),
                 symbol: format!("POLYMARKET:{yes_token}"),
-                name: market.question,
+                name: question,
                 kind: SymbolKind::Prediction,
                 base_asset: Some("YES".to_string()),
                 quote_asset: None,
@@ -218,9 +232,9 @@ fn catalog_symbols(markets: Vec<GammaMarket>) -> Vec<CatalogSymbol> {
                     condition_id: market.condition_id,
                     outcome: "YES".to_string(),
                     opposing_symbol: format!("POLYMARKET:{no_token}"),
-                    description: market.description,
-                    resolution_source: market.resolution_source,
-                    end_date: market.end_date,
+                    description: market.description.unwrap_or_default(),
+                    resolution_source: market.resolution_source.unwrap_or_default(),
+                    end_date: market.end_date.unwrap_or_default(),
                     volume: market.volume_num.unwrap_or(0.0).max(0.0),
                     liquidity: market.liquidity_num.unwrap_or(0.0).max(0.0),
                     probability,
@@ -229,6 +243,58 @@ fn catalog_symbols(markets: Vec<GammaMarket>) -> Vec<CatalogSymbol> {
             })
         })
         .collect()
+}
+
+fn validate_catalog_cursor(cursor: Option<&str>) -> Result<(), AppError> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if cursor.is_empty()
+        || cursor.len() > 512
+        || !cursor
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(&byte))
+    {
+        return Err(AppError::new(
+            "catalog_cursor_invalid",
+            "Polymarket 目录游标无效",
+        ));
+    }
+    Ok(())
+}
+
+fn fetch_catalog_page(request: CatalogPageRequest) -> Result<CatalogPage, AppError> {
+    if request.provider_id != POLYMARKET_PROVIDER_DESCRIPTOR.id || request.venue != "POLYMARKET" {
+        return Err(AppError::new(
+            "catalog_route_not_found",
+            "目录市场与 Polymarket provider 不匹配",
+        ));
+    }
+    validate_catalog_cursor(request.cursor.as_deref())?;
+    let limit = request.limit.clamp(1, CATALOG_PAGE_SIZE);
+    let bases = api_bases()?;
+    let mut query = vec![
+        ("closed", "false".to_string()),
+        ("limit", limit.to_string()),
+        ("order", "volume24hr".to_string()),
+        ("ascending", "false".to_string()),
+    ];
+    if let Some(cursor) = request.cursor {
+        query.push(("after_cursor", cursor));
+    }
+    let page = client()?
+        .get(format!("{}/markets-keyset", bases.gamma))
+        .query(&query)
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(map_http_error)?
+        .json::<GammaMarketPage>()
+        .map_err(map_http_error)?;
+    let symbols = catalog_symbols(page.markets);
+    Ok(CatalogPage {
+        symbols,
+        next_cursor: page.next_cursor.filter(|cursor| !cursor.is_empty()),
+    })
 }
 
 fn resolution_seconds(resolution: Resolution) -> i64 {
@@ -423,29 +489,13 @@ fn sleep_while_active(request: &RealtimeRequest) {
 
 impl CatalogAdapter for PolymarketAdapter {
     fn list_symbols(&self, request: CatalogRequest) -> Result<Vec<CatalogSymbol>, AppError> {
-        if request.provider_id != POLYMARKET_PROVIDER_DESCRIPTOR.id || request.venue != "POLYMARKET"
-        {
-            return Err(AppError::new(
-                "catalog_route_not_found",
-                "目录市场与 Polymarket provider 不匹配",
-            ));
-        }
-        let bases = api_bases()?;
-        let markets = client()?
-            .get(format!("{}/markets", bases.gamma))
-            .query(&[
-                ("active", "true"),
-                ("closed", "false"),
-                ("limit", &CATALOG_LIMIT.to_string()),
-                ("order", "volume24hr"),
-                ("ascending", "false"),
-            ])
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(map_http_error)?
-            .json::<Vec<GammaMarket>>()
-            .map_err(map_http_error)?;
-        let symbols = catalog_symbols(markets);
+        let symbols = fetch_catalog_page(CatalogPageRequest {
+            provider_id: request.provider_id,
+            venue: request.venue,
+            cursor: None,
+            limit: CATALOG_PAGE_SIZE,
+        })?
+        .symbols;
         if symbols.is_empty() {
             return Err(AppError::new(
                 "empty_catalog",
@@ -453,6 +503,10 @@ impl CatalogAdapter for PolymarketAdapter {
             ));
         }
         Ok(symbols)
+    }
+
+    fn list_symbols_page(&self, request: CatalogPageRequest) -> Result<CatalogPage, AppError> {
+        fetch_catalog_page(request)
     }
 }
 
@@ -570,9 +624,9 @@ impl MarketDataAdapter for PolymarketAdapter {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiBases, CatalogAdapter, CatalogRequest, GammaMarket, HistoryRequest, MarketDataAdapter,
-        PolymarketAdapter, Resolution, SymbolKind, api_bases_from, catalog_symbols,
-        bucket_time, value_string_array,
+        ApiBases, CatalogAdapter, CatalogPageRequest, GammaMarket, HistoryRequest,
+        MarketDataAdapter, PolymarketAdapter, Resolution, SymbolKind, api_bases_from, bucket_time,
+        catalog_symbols, validate_catalog_cursor, value_string_array,
     };
     use crate::contracts::{Adjustment, MarketSeriesKind, Symbol};
     use serde_json::json;
@@ -588,11 +642,12 @@ mod tests {
             ["Up", "Down"]
         );
         let rows = catalog_symbols(vec![GammaMarket {
-            question: "Will it happen?".to_string(),
+            question: Some("Will it happen?".to_string()),
             condition_id: "0xabc".to_string(),
-            description: "Rules".to_string(),
-            resolution_source: "https://example.com".to_string(),
-            end_date: "2026-12-31T00:00:00Z".to_string(),
+            description: Some("Rules".to_string()),
+            resolution_source: Some("https://example.com".to_string()),
+            end_date: Some("2026-12-31T00:00:00Z".to_string()),
+            active: Some(true),
             outcomes: json!("[\"No\",\"Yes\"]"),
             clob_token_ids: json!("[\"222\",\"111\"]"),
             outcome_prices: json!("[\"0.4\",\"0.6\"]"),
@@ -631,16 +686,43 @@ mod tests {
     }
 
     #[test]
+    fn catalog_cursor_is_opaque_bounded_and_url_safe() {
+        assert!(validate_catalog_cursor(None).is_ok());
+        assert!(validate_catalog_cursor(Some("MTAwMA==")).is_ok());
+        assert!(validate_catalog_cursor(Some("")).is_err());
+        assert!(validate_catalog_cursor(Some("cursor with spaces")).is_err());
+        assert!(validate_catalog_cursor(Some("https://example.com")).is_err());
+    }
+
+    #[test]
     #[ignore = "connects to Polymarket public REST APIs"]
     fn real_polymarket_catalog_and_probability_history() {
         let adapter = PolymarketAdapter;
-        let catalog = adapter
-            .list_symbols(CatalogRequest {
+        let first_page = adapter
+            .list_symbols_page(CatalogPageRequest {
                 provider_id: "polymarket".to_string(),
                 venue: "POLYMARKET".to_string(),
+                cursor: None,
+                limit: 100,
             })
             .expect("Polymarket catalog must be reachable");
-        let first = &catalog[0];
+        assert!(!first_page.symbols.is_empty());
+        let second_page = adapter
+            .list_symbols_page(CatalogPageRequest {
+                provider_id: "polymarket".to_string(),
+                venue: "POLYMARKET".to_string(),
+                cursor: first_page.next_cursor.clone(),
+                limit: 100,
+            })
+            .expect("Polymarket second catalog page must be reachable");
+        assert!(!second_page.symbols.is_empty());
+        assert!(first_page.symbols.iter().all(|first| {
+            second_page
+                .symbols
+                .iter()
+                .all(|second| second.symbol != first.symbol)
+        }));
+        let first = &first_page.symbols[0];
         let (_, token_id) = first.symbol.split_once(':').unwrap();
         let response = adapter
             .fetch_history(HistoryRequest {

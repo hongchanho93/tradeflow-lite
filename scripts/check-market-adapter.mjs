@@ -9,6 +9,7 @@ const binance = fs.readFileSync('src-tauri/src/market_providers/binance.rs', 'ut
 const tdxHistory = fs.readFileSync('src-tauri/src/market_data/history.rs', 'utf8');
 const frontendQuote = fs.readFileSync('src/quote.ts', 'utf8');
 const frontendRealtime = fs.readFileSync('src/realtime-market.ts', 'utf8');
+const frontendMain = fs.readFileSync('src/main.ts', 'utf8');
 
 assert.match(adapter, /pub const ADAPTER_CONTRACT_VERSION: &str = "2"/);
 assert.match(adapter, /pub struct PredictionMarketMetadata/);
@@ -23,6 +24,10 @@ assert.match(adapter, /pub trait QuoteAdapter/);
 assert.match(adapter, /pub struct QuoteResponse/);
 assert.match(adapter, /pub trait CatalogAdapter/);
 assert.match(adapter, /pub struct CatalogSymbol/);
+assert.match(adapter, /pub struct CatalogPageRequest/);
+assert.match(adapter, /pub struct CatalogPage/);
+assert.match(adapter, /fn list_symbols_page\(/);
+assert.doesNotMatch(adapter, /option_env!\("TRADEFLOW_POLYMARKET_GATEWAY_URL"\)/);
 for (const field of ['provider_id', 'symbol', 'name', 'kind']) {
   assert.match(adapter, new RegExp(`pub ${field}:`));
 }
@@ -44,6 +49,7 @@ assert.match(router, /AdapterRegistration::new\(&BINANCE_USDM_ADAPTER\)/);
 assert.match(router, /validate_history_capability\(registration, &request\)/);
 assert.match(router, /pub fn fetch_quote\(/);
 assert.match(router, /pub fn list_catalog\(/);
+assert.match(router, /pub fn list_catalog_page\(/);
 assert.doesNotMatch(router, /serde_json/);
 
 assert.match(lib, /pub fn run_with_router\(router: MarketRouter\)/);
@@ -51,9 +57,15 @@ assert.match(lib, /\.manage\(router\)/);
 assert.match(lib, /State<'_, MarketRouter>/);
 assert.match(lib, /list_market_providers/);
 assert.match(lib, /list_market_catalog/);
+assert.match(lib, /list_market_catalog_page/);
 assert.match(lib, /router\.fetch_history\(/);
 assert.match(lib, /\.list_catalog\(CatalogRequest/);
 assert.match(lib, /router\.fetch_quote\(/);
+assert.match(frontendMain, /invoke<MarketCatalogPage>\('list_market_catalog_page'/);
+assert.match(frontendMain, /function shouldLoadMorePolymarketSymbols/);
+assert.match(frontendMain, /下滑继续加载/);
+assert.match(frontendMain, /market\.catalog\.partial/);
+assert.doesNotMatch(frontendMain, /while \(pages < 100\)/);
 
 assert.match(realtime, /resolve_for_provider\(&provider_id, &symbol, &kind\)/);
 assert.match(realtime, /provider_id/);

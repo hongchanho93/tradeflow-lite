@@ -84,6 +84,11 @@ export type MarketCatalogSymbol = {
   prediction?: PredictionMarketMetadata | null;
 };
 
+export type MarketCatalogPage = {
+  symbols: MarketCatalogSymbol[];
+  nextCursor?: string | null;
+};
+
 export function marketSymbolFromCatalog(
   row: MarketCatalogSymbol,
   descriptor: MarketProviderDescriptor,

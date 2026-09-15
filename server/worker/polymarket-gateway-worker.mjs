@@ -12,8 +12,24 @@ const ROUTES = new Map([
         active: (value) => value === 'true',
         closed: (value) => value === 'false',
         limit: (value) => integerInRange(value, 1, 100),
+        offset: (value) => integerInRange(value, 0, 9_900) && Number(value) % 100 === 0,
         order: (value) => value === 'volume24hr',
         ascending: (value) => value === 'false',
+      });
+    },
+  }],
+  ['/v1/polymarket/gamma/markets-keyset', {
+    base: GAMMA_BASE,
+    path: '/markets/keyset',
+    cacheSeconds: 30,
+    validate(params) {
+      return validateParameters(params, {
+        closed: (value) => value === 'false',
+        limit: (value) => integerInRange(value, 1, 100),
+        order: (value) => value === 'volume24hr',
+        ascending: (value) => value === 'false',
+      }, {
+        after_cursor: validCatalogCursor,
       });
     },
   }],
@@ -66,14 +82,26 @@ function validTokenId(value) {
   return /^\d{1,96}$/.test(value);
 }
 
+function validCatalogCursor(value) {
+  return /^[A-Za-z0-9._~+/=-]{1,512}$/.test(value);
+}
+
 function validateExact(params, validators) {
-  const allowed = new Set(Object.keys(validators));
+  return validateParameters(params, validators);
+}
+
+function validateParameters(params, required, optional = {}) {
+  const allowed = new Set([...Object.keys(required), ...Object.keys(optional)]);
   for (const key of params.keys()) {
     if (!allowed.has(key)) return `不支持参数 ${key}`;
   }
-  for (const [key, validate] of Object.entries(validators)) {
+  for (const [key, validate] of Object.entries(required)) {
     const values = params.getAll(key);
     if (values.length !== 1 || !validate(values[0])) return `参数 ${key} 无效`;
+  }
+  for (const [key, validate] of Object.entries(optional)) {
+    const values = params.getAll(key);
+    if (values.length > 1 || (values.length === 1 && !validate(values[0]))) return `参数 ${key} 无效`;
   }
   return null;
 }

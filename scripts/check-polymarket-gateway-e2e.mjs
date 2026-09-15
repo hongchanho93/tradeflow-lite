@@ -17,20 +17,22 @@ const close = (server) => new Promise((resolveClose, reject) => {
 const upstream = createServer((request, response) => {
   const url = new URL(request.url, 'http://upstream.test');
   response.setHeader('content-type', 'application/json');
-  if (url.pathname === '/markets') {
-    response.end(JSON.stringify([{
-      question: 'Will the gateway integration work?',
-      conditionId: '0xtradeflow',
+  if (url.pathname === '/markets/keyset') {
+    const secondPage = url.searchParams.get('after_cursor') === 'second';
+    response.end(JSON.stringify({ markets: [{
+      question: secondPage ? 'Will the second page stay distinct?' : 'Will the gateway integration work?',
+      conditionId: secondPage ? '0xtradeflow-page-2' : '0xtradeflow',
       description: 'Gateway integration contract',
       resolutionSource: 'https://example.test/rules',
       endDate: '2027-01-01T00:00:00Z',
       outcomes: '["Yes","No"]',
-      clobTokenIds: '["111","222"]',
+      clobTokenIds: secondPage ? '["333","444"]' : '["111","222"]',
       outcomePrices: '["0.61","0.39"]',
       oneDayPriceChange: 0.01,
       volumeNum: 1000,
       liquidityNum: 500,
-    }]));
+      active: true,
+    }], next_cursor: secondPage ? null : 'second' }));
     return;
   }
   if (url.pathname === '/prices-history' && url.searchParams.get('market') === '111') {

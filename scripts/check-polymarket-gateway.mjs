@@ -38,13 +38,17 @@ try {
     service: 'tradeflow-polymarket-gateway',
   });
 
-  const catalogUrl = `${gatewayBase}/v1/polymarket/gamma/markets?active=true&closed=false&limit=100&order=volume24hr&ascending=false`;
+  const catalogUrl = `${gatewayBase}/v1/polymarket/gamma/markets?active=true&closed=false&limit=100&offset=0&order=volume24hr&ascending=false`;
   const firstCatalog = await fetch(catalogUrl);
   assert.equal(firstCatalog.status, 200);
   assert.match((await firstCatalog.json()).path, /^\/markets\?/);
   const secondCatalog = await fetch(catalogUrl);
   assert.equal(secondCatalog.status, 200);
   assert.equal(upstreamRequests, 1, 'successful identical requests should use the gateway cache');
+
+  const keysetPage = await fetch(`${gatewayBase}/v1/polymarket/gamma/markets-keyset?closed=false&limit=100&order=volume24hr&ascending=false&after_cursor=MTAwMA%3D%3D`);
+  assert.equal(keysetPage.status, 200);
+  assert.match((await keysetPage.json()).path, /^\/markets\/keyset\?/);
 
   const history = await fetch(`${gatewayBase}/v1/polymarket/clob/prices-history?market=123456&startTs=1&endTs=2&fidelity=60`);
   assert.equal(history.status, 200);
@@ -56,15 +60,15 @@ try {
 
   const invalidToken = await fetch(`${gatewayBase}/v1/polymarket/clob/midpoint?token_id=https%3A%2F%2Fexample.com`);
   assert.equal(invalidToken.status, 400);
-  assert.equal(upstreamRequests, 3, 'invalid parameters must not reach an upstream');
+  assert.equal(upstreamRequests, 4, 'invalid parameters must not reach an upstream');
 
   const arbitraryProxy = await fetch(`${gatewayBase}/v1/proxy?url=https%3A%2F%2Fexample.com`);
   assert.equal(arbitraryProxy.status, 404);
-  assert.equal(upstreamRequests, 3, 'the gateway must not expose an arbitrary proxy');
+  assert.equal(upstreamRequests, 4, 'the gateway must not expose an arbitrary proxy');
 
   const catalogAfterEviction = await fetch(catalogUrl);
   assert.equal(catalogAfterEviction.status, 200);
-  assert.equal(upstreamRequests, 4, 'the bounded cache should evict its oldest entry');
+  assert.equal(upstreamRequests, 5, 'the bounded cache should evict its oldest entry');
 
   const post = await fetch(catalogUrl, { method: 'POST' });
   assert.equal(post.status, 405);
