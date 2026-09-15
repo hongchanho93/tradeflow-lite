@@ -88,13 +88,6 @@ assert.deepEqual(candlestickColorOptions(settings), {
   wickUpColor: '#089981',
   wickDownColor: 'rgba(255, 152, 0, 0.2)',
 }, 'every visible candle layer must retain its independent saved opacity');
-assert.deepEqual(candlestickColorOptions(settings, false), {
-  upColor: 'rgba(0, 0, 0, 0)',
-  downColor: 'rgba(0, 0, 0, 0)',
-  borderUpColor: 'rgba(0, 0, 0, 0)',
-  borderDownColor: 'rgba(0, 0, 0, 0)',
-  wickUpColor: 'rgba(0, 0, 0, 0)',
-  wickDownColor: 'rgba(0, 0, 0, 0)',
-}, 'switching chart type must hide candles without replacing saved colors');
+assert.equal(candlestickColorOptions.length, 1, 'chart visibility must not be encoded by replacing saved candle colors');
 
 console.log('Chart settings state OK');

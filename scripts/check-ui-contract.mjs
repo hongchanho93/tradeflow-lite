@@ -87,8 +87,9 @@ const requiredMarkup = [
   'data-tf-color-opacity-target="chart-settings-wick-up-opacity"',
   'data-tf-color-opacity-target="chart-settings-wick-down-opacity"',
   'data-chart-setting="bodyVisible"',
-  '...candlestickColorOptions(settings, candlesVisible)',
-  '...candlestickColorOptions(chartSettings, candlesVisible)',
+  '...candlestickColorOptions(settings)',
+  '...candlestickColorOptions(chartSettings)',
+  'visible: candlesVisible',
   "console.info('chart.candlestick_appearance.reapplied'",
   'id="chart-type-menu"',
   'data-chart-type="candles"',
@@ -456,6 +457,11 @@ const primarySeriesBody = markup.slice(markup.indexOf('function setPrimarySeries
 if (primarySeriesBody.includes('candlesVisible ? chartSettings.upColor')
   || primarySeriesBody.includes('borderUpColor: candlesVisible ? chartSettings.upColor')) {
   throw new Error('period and symbol reloads must not overwrite saved candle opacity or independent border/wick colors');
+}
+if (markup.includes('candlestickColorOptions(settings, candlesVisible)')
+  || markup.includes('candlestickColorOptions(chartSettings, candlesVisible)')
+  || markup.includes("const hidden = 'rgba(0, 0, 0, 0)'")) {
+  throw new Error('candle visibility must use the series visible option instead of replacing saved colors with transparency');
 }
 if (!markup.includes('shouldLoadDeepHistory(range.from') || !markup.includes('scheduleDeepHistory(\n      currentSymbol,')) {
   throw new Error('deep history must remain available when the user reaches the left history edge');

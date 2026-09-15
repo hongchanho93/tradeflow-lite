@@ -971,6 +971,7 @@ const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
 
 const candleSeries = chart.addSeries(CandlestickSeries, {
   ...candlestickColorOptions(chartSettings),
+  visible: true,
   borderVisible: chartSettings.borderVisible,
   wickVisible: chartSettings.wickVisible,
   priceLineVisible: chartSettings.lastPriceLineVisible,
@@ -1367,7 +1368,8 @@ function applyChartSettings(settings: ChartSettings) {
   });
   const candlesVisible = currentSeriesKind !== 'probability' && primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
-    ...candlestickColorOptions(settings, candlesVisible),
+    ...candlestickColorOptions(settings),
+    visible: candlesVisible,
     borderVisible: settings.borderVisible,
     wickVisible: settings.wickVisible,
     priceLineColor: chartColorWithOpacity(settings.upColor, settings.upOpacity),
@@ -1570,7 +1572,8 @@ function setPrimarySeriesData() {
   const isProbability = currentSeriesKind === 'probability';
   const candlesVisible = !isProbability && primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
-    ...candlestickColorOptions(chartSettings, candlesVisible),
+    ...candlestickColorOptions(chartSettings),
+    visible: candlesVisible,
     borderVisible: chartSettings.borderVisible,
     wickVisible: chartSettings.wickVisible,
     priceLineVisible: candlesVisible && chartSettings.lastPriceLineVisible,

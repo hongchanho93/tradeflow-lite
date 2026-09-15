@@ -108,15 +108,14 @@ export function chartColorWithOpacity(color: string, opacity: number): string {
   return `rgba(${red}, ${green}, ${blue}, ${opacity / 100})`;
 }
 
-export function candlestickColorOptions(settings: ChartSettings, visible = true) {
-  const hidden = 'rgba(0, 0, 0, 0)';
+export function candlestickColorOptions(settings: ChartSettings) {
   return {
-    upColor: visible ? chartColorWithOpacity(settings.upColor, settings.bodyVisible ? settings.upOpacity : 0) : hidden,
-    downColor: visible ? chartColorWithOpacity(settings.downColor, settings.bodyVisible ? settings.downOpacity : 0) : hidden,
-    borderUpColor: visible ? chartColorWithOpacity(settings.borderUpColor, settings.borderUpOpacity) : hidden,
-    borderDownColor: visible ? chartColorWithOpacity(settings.borderDownColor, settings.borderDownOpacity) : hidden,
-    wickUpColor: visible ? chartColorWithOpacity(settings.wickUpColor, settings.wickUpOpacity) : hidden,
-    wickDownColor: visible ? chartColorWithOpacity(settings.wickDownColor, settings.wickDownOpacity) : hidden,
+    upColor: chartColorWithOpacity(settings.upColor, settings.bodyVisible ? settings.upOpacity : 0),
+    downColor: chartColorWithOpacity(settings.downColor, settings.bodyVisible ? settings.downOpacity : 0),
+    borderUpColor: chartColorWithOpacity(settings.borderUpColor, settings.borderUpOpacity),
+    borderDownColor: chartColorWithOpacity(settings.borderDownColor, settings.borderDownOpacity),
+    wickUpColor: chartColorWithOpacity(settings.wickUpColor, settings.wickUpOpacity),
+    wickDownColor: chartColorWithOpacity(settings.wickDownColor, settings.wickDownOpacity),
   };
 }
 
