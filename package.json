@@ -16,6 +16,8 @@
     "test:real-binance-ws": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_aggregate_trade_and_kline_events -- --ignored --exact --nocapture",
     "test:real-binance-usdm": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_usd_margined_perpetual_market -- --ignored --exact --nocapture",
     "test:real-binance-usdm-ws": "cargo test --manifest-path src-tauri/crates/binance-market-data/Cargo.toml tests::receives_real_usd_margined_realtime_events -- --ignored --exact --nocapture",
+    "test:real-okx": "cargo test --manifest-path src-tauri/Cargo.toml market_providers::okx::tests::okx_real_market -- --ignored --exact --nocapture",
+    "test:real-okx-ws": "cargo test --manifest-path src-tauri/Cargo.toml market_providers::okx::tests::okx_real_realtime -- --ignored --exact --nocapture",
     "test:real-polymarket": "cargo test --manifest-path src-tauri/Cargo.toml market_providers::polymarket::tests::real_polymarket_catalog_and_probability_history -- --ignored --exact --nocapture",
     "test:polymarket-gateway": "node scripts/check-polymarket-gateway.mjs",
     "test:polymarket-gateway-e2e": "node scripts/check-polymarket-gateway-e2e.mjs",

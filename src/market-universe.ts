@@ -2,7 +2,9 @@ export type MarketSymbolKind = 'stock' | 'etf' | 'index' | 'crypto' | 'predictio
 export type MarketSearchCategory = 'all' | MarketSymbolKind;
 export type MarketSearchSource = 'all' | 'sh' | 'sz' | 'bj' | 'sh_main' | 'star' | 'sz_main' | 'chinext'
   | 'binance_spot' | 'binance_usdt' | 'binance_usdc' | 'binance_fdusd' | 'binance_btc' | 'binance_other'
-  | 'binance_usdm' | 'binance_usdm_usdt' | 'binance_usdm_usdc' | 'polymarket';
+  | 'binance_usdm' | 'binance_usdm_usdt' | 'binance_usdm_usdc'
+  | 'okx_spot' | 'okx_spot_usdt' | 'okx_spot_usdc' | 'okx_spot_other'
+  | 'okx_swap' | 'okx_swap_usdt' | 'okx_swap_usdc' | 'okx_swap_usd' | 'polymarket';
 
 export type PredictionMarketMetadata = {
   conditionId: string;
@@ -138,6 +140,19 @@ export function marketSymbolMatchesSource(
   if (category !== 'all' && item.kind !== category) return false;
   if (source === 'all') return true;
   if (source === 'polymarket') return item.kind === 'prediction' && item.exchange === 'POLYMARKET';
+  if (source === 'okx_spot') return item.kind === 'crypto' && item.exchange === 'OKX';
+  if (source === 'okx_swap') return item.kind === 'crypto' && item.exchange === 'OKX_SWAP';
+  if (source.startsWith('okx_spot_')) {
+    if (item.kind !== 'crypto' || item.exchange !== 'OKX') return false;
+    const quote = item.quoteAsset?.toUpperCase();
+    if (source === 'okx_spot_other') return !['USDT', 'USDC'].includes(quote ?? '');
+    return quote === source.slice('okx_spot_'.length).toUpperCase();
+  }
+  if (source.startsWith('okx_swap_')) {
+    return item.kind === 'crypto'
+      && item.exchange === 'OKX_SWAP'
+      && item.quoteAsset?.toUpperCase() === source.slice('okx_swap_'.length).toUpperCase();
+  }
   if (source === 'binance_spot') return item.kind === 'crypto' && item.exchange === 'BINANCE';
   if (source === 'binance_usdm') return item.kind === 'crypto' && item.exchange === 'BINANCE_USDM';
   if (source.startsWith('binance_usdm_')) {

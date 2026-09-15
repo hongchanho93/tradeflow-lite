@@ -5,6 +5,8 @@ use crate::market_adapter::{HistoryResponse, QuoteAdapter, TDX_PROVIDER_DESCRIPT
 use crate::market_data;
 #[cfg(feature = "provider-binance")]
 use crate::market_providers::binance::{BinanceSpotAdapter, BinanceUsdMarginedAdapter};
+#[cfg(feature = "provider-okx")]
+use crate::market_providers::okx::{OkxSpotAdapter, OkxSwapAdapter};
 #[cfg(feature = "provider-polymarket")]
 use crate::market_providers::polymarket::PolymarketAdapter;
 
@@ -94,9 +96,53 @@ impl MarketDataAdapter for BinanceUsdMarginedAdapter {
     }
 }
 
+#[cfg(not(feature = "provider-okx"))]
+struct OkxSpotAdapter;
+
+#[cfg(not(feature = "provider-okx"))]
+impl MarketDataAdapter for OkxSpotAdapter {
+    fn descriptor(&self) -> &'static ProviderDescriptor {
+        &crate::market_adapter::OKX_SPOT_DISABLED_DESCRIPTOR
+    }
+
+    fn history_available(&self) -> bool {
+        false
+    }
+
+    fn fetch_history(&self, _request: HistoryRequest) -> Result<HistoryResponse, AppError> {
+        Err(AppError::new(
+            "market_data_source_unavailable",
+            "OKX 现货行情适配器未启用",
+        ))
+    }
+}
+
+#[cfg(not(feature = "provider-okx"))]
+struct OkxSwapAdapter;
+
+#[cfg(not(feature = "provider-okx"))]
+impl MarketDataAdapter for OkxSwapAdapter {
+    fn descriptor(&self) -> &'static ProviderDescriptor {
+        &crate::market_adapter::OKX_SWAP_DISABLED_DESCRIPTOR
+    }
+
+    fn history_available(&self) -> bool {
+        false
+    }
+
+    fn fetch_history(&self, _request: HistoryRequest) -> Result<HistoryResponse, AppError> {
+        Err(AppError::new(
+            "market_data_source_unavailable",
+            "OKX 永续行情适配器未启用",
+        ))
+    }
+}
+
 static TDX_ADAPTER: TdxAdapter = TdxAdapter;
 static BINANCE_SPOT_ADAPTER: BinanceSpotAdapter = BinanceSpotAdapter;
 static BINANCE_USDM_ADAPTER: BinanceUsdMarginedAdapter = BinanceUsdMarginedAdapter;
+static OKX_SPOT_ADAPTER: OkxSpotAdapter = OkxSpotAdapter;
+static OKX_SWAP_ADAPTER: OkxSwapAdapter = OkxSwapAdapter;
 #[cfg(feature = "provider-polymarket")]
 static POLYMARKET_ADAPTER: PolymarketAdapter = PolymarketAdapter;
 
@@ -106,6 +152,8 @@ static REGISTERED_ADAPTERS: &[AdapterRegistration] = &[
     AdapterRegistration::new(&TDX_ADAPTER),
     AdapterRegistration::new(&BINANCE_SPOT_ADAPTER),
     AdapterRegistration::new(&BINANCE_USDM_ADAPTER),
+    AdapterRegistration::new(&OKX_SPOT_ADAPTER),
+    AdapterRegistration::new(&OKX_SWAP_ADAPTER),
     #[cfg(feature = "provider-polymarket")]
     AdapterRegistration::new(&POLYMARKET_ADAPTER),
 ];
@@ -602,7 +650,8 @@ mod tests {
     #[test]
     fn provider_descriptors_declare_real_facets() {
         let descriptors = provider_descriptors();
-        assert_eq!(descriptors.len(), 4);
+        let expected = 5 + usize::from(cfg!(feature = "provider-polymarket"));
+        assert_eq!(descriptors.len(), expected);
         assert!(descriptors.iter().all(|descriptor| {
             !descriptor.id.is_empty()
                 && !descriptor.display_name.is_empty()
@@ -636,6 +685,27 @@ mod tests {
                 cfg!(feature = "provider-binance"),
             )
         );
+
+        for provider_id in ["okx_spot", "okx_swap"] {
+            let okx = descriptors
+                .iter()
+                .find(|item| item.id == provider_id)
+                .unwrap();
+            assert_eq!(
+                (
+                    okx.capabilities.catalog,
+                    okx.capabilities.history,
+                    okx.capabilities.quote,
+                    okx.capabilities.realtime,
+                ),
+                (
+                    cfg!(feature = "provider-okx"),
+                    cfg!(feature = "provider-okx"),
+                    cfg!(feature = "provider-okx"),
+                    cfg!(feature = "provider-okx"),
+                )
+            );
+        }
     }
 
     #[test]
@@ -774,6 +844,45 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(realtime_error.code, "market_data_source_unavailable");
+    }
+
+    #[cfg(not(feature = "provider-okx"))]
+    #[test]
+    fn disabled_okx_providers_do_not_fall_through_to_other_routes() {
+        let router = MarketRouter::builtin().unwrap();
+        for (provider_id, venue, code) in [
+            ("okx_spot", "OKX", "BTC-USDT"),
+            ("okx_swap", "OKX_SWAP", "BTC-USDT-SWAP"),
+        ] {
+            let symbol = Symbol::new(venue, code).unwrap();
+            let history = router
+                .fetch_history(HistoryRequest {
+                    provider_id: provider_id.to_string(),
+                    symbol: symbol.clone(),
+                    kind: SymbolKind::Crypto,
+                    resolution: Resolution::Minute1,
+                    adjustment: Adjustment::None,
+                    count: 2,
+                    include_quote: false,
+                })
+                .unwrap_err();
+            assert_eq!(history.code, "market_data_source_unavailable");
+            let quote = router
+                .fetch_quote(QuoteRequest {
+                    provider_id: provider_id.to_string(),
+                    symbol,
+                    kind: SymbolKind::Crypto,
+                })
+                .unwrap_err();
+            assert_eq!(quote.code, "market_data_source_unavailable");
+            let catalog = router
+                .list_catalog(CatalogRequest {
+                    provider_id: provider_id.to_string(),
+                    venue: venue.to_string(),
+                })
+                .unwrap_err();
+            assert_eq!(catalog.code, "market_data_source_unavailable");
+        }
     }
 
     #[test]

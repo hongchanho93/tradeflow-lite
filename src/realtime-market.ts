@@ -1,4 +1,4 @@
-export type RealtimeBarSource = 'kline' | 'aggTrade';
+export type RealtimeBarSource = 'kline' | 'aggTrade' | 'trade';
 
 export type RealtimeBarEvent<TBar> = {
   requestId: number;
@@ -70,7 +70,7 @@ type RealtimeSequenceIdentity = {
 };
 
 function normalizeRealtimeBarSource(source: unknown): RealtimeBarSource | 'unknown' {
-  return source === 'kline' || source === 'aggTrade' ? source : 'unknown';
+  return source === 'kline' || source === 'aggTrade' || source === 'trade' ? source : 'unknown';
 }
 
 export function realtimeSequenceKey(

@@ -67,10 +67,16 @@ assert.equal(
 );
 const klineSequenceEvent = { ...current, source: 'kline' };
 const aggregateTradeSequenceEvent = { ...current, source: 'aggTrade' };
+const okxTradeSequenceEvent = { ...current, source: 'trade' };
 assert.notEqual(
   realtimeSequenceKey(klineSequenceEvent, 'bar'),
   realtimeSequenceKey(aggregateTradeSequenceEvent, 'bar'),
   'kline and aggregate-trade bar sequences must use separate source domains',
+);
+assert.equal(
+  realtimeSequenceKey(okxTradeSequenceEvent, 'bar'),
+  `${current.requestId}:${current.providerId}:${current.symbol}:${current.resolution}:bar:trade`,
+  'OKX trade-derived bars must use their own sequence domain',
 );
 const sourceScopedSequences = new Map([
   [realtimeSequenceKey(klineSequenceEvent, 'bar'), 6_600_000_000],

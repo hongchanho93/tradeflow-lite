@@ -4280,6 +4280,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tradeflow-binance-market-data",
+ "tungstenite",
 ]
 
 [[package]]

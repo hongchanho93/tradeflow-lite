@@ -111,6 +111,8 @@ const fixtures = [
   { symbol: 'SZ:159915', code: '159915', name: '创业板ETF', exchange: 'SZ', kind: 'etf' },
   { symbol: 'BINANCE:BTCUSDT', code: 'BTC/USDT', name: 'Bitcoin / TetherUS', exchange: 'BINANCE', kind: 'crypto', quoteAsset: 'USDT' },
   { symbol: 'BINANCE_USDM:BTCUSDT', code: 'BTC/USDT 永续', name: 'Bitcoin / TetherUS Perpetual', exchange: 'BINANCE_USDM', kind: 'crypto', quoteAsset: 'USDT' },
+  { symbol: 'OKX:BTC-USDT', code: 'BTC/USDT', name: 'BTC / USDT', exchange: 'OKX', kind: 'crypto', quoteAsset: 'USDT' },
+  { symbol: 'OKX_SWAP:BTC-USDT-SWAP', code: 'BTC/USDT 永续', name: 'BTC / USDT Perpetual', exchange: 'OKX_SWAP', kind: 'crypto', quoteAsset: 'USDT' },
   predictionSymbol,
 ];
 if (!marketSymbolMatchesSource(fixtures[3], 'stock', 'chinext')) throw new Error('302 stock must be classified as ChiNext');
@@ -133,6 +135,12 @@ if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm', 20)[0]?.symbol !==
 }
 if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm_usdt', 20)[0]?.symbol !== 'BINANCE_USDM:BTCUSDT') {
   throw new Error('USD-M perpetual quote-asset filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'crypto', 'okx_spot_usdt', 20)[0]?.symbol !== 'OKX:BTC-USDT') {
+  throw new Error('OKX spot quote-asset filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'crypto', 'okx_swap_usdt', 20)[0]?.symbol !== 'OKX_SWAP:BTC-USDT-SWAP') {
+  throw new Error('OKX swap quote-asset filter failed');
 }
 if (listMarketSymbols(fixtures, '', 'prediction', 'polymarket', 20)[0]?.symbol !== 'POLYMARKET:YES_TOKEN') {
   throw new Error('prediction category filter failed');

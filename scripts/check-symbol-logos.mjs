@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { symbolLogoUrls } from '../src/symbol-logos.ts';
+import { exchangeLogoUrl, symbolLogoUrls } from '../src/symbol-logos.ts';
 
 const marketPackage = JSON.parse(readFileSync(new URL('../src/market-universe.json', import.meta.url), 'utf8'));
 const logos = JSON.parse(readFileSync(new URL('../src/symbol-logos.json', import.meta.url), 'utf8'));
@@ -14,6 +14,15 @@ if (!logos.logos['BJ:920000:stock']?.startsWith('https://basic.10jqka.com.cn/ai_
 if (logos.logos['BJ:920000:stock'] === logos.logos['BJ:920001:stock']) {
   throw new Error('Beijing stock logos should be company-specific');
 }
+
+const binanceLogo = exchangeLogoUrl('BINANCE');
+const okxSpotLogo = exchangeLogoUrl('OKX');
+const okxSwapLogo = exchangeLogoUrl('OKX_SWAP');
+if (okxSpotLogo !== 'https://s3-symbol-logo.tradingview.com/source/OKX.svg') {
+  throw new Error(`unexpected OKX spot logo: ${okxSpotLogo}`);
+}
+if (okxSwapLogo !== okxSpotLogo) throw new Error('OKX spot and swap should share the OKX brand logo');
+if (okxSpotLogo === binanceLogo) throw new Error('OKX and Binance must not share an exchange logo');
 
 for (const item of marketPackage.rows) {
   const urls = symbolLogoUrls(item);

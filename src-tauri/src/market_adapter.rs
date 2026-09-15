@@ -644,6 +644,100 @@ pub static BINANCE_USDM_DISABLED_DESCRIPTOR: ProviderDescriptor = ProviderDescri
     },
 };
 
+#[cfg(feature = "provider-okx")]
+pub static OKX_SPOT_PROVIDER_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "okx_spot",
+    display_name: "OKX 现货",
+    version: "1",
+    contract_version: ADAPTER_CONTRACT_VERSION,
+    enabled: true,
+    capabilities: ProviderCapabilities {
+        catalog: true,
+        history: true,
+        quote: true,
+        realtime: true,
+        venues: &["OKX"],
+        kinds: &[SymbolKind::Crypto],
+        resolutions: &[
+            Resolution::Minute1,
+            Resolution::Minute5,
+            Resolution::Minute15,
+            Resolution::Minute30,
+            Resolution::Minute60,
+            Resolution::Day,
+            Resolution::Week,
+            Resolution::Month,
+        ],
+        adjustments: &[Adjustment::None],
+    },
+};
+
+#[cfg(not(feature = "provider-okx"))]
+pub static OKX_SPOT_DISABLED_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "okx_spot",
+    display_name: "OKX 现货",
+    version: "1",
+    contract_version: ADAPTER_CONTRACT_VERSION,
+    enabled: false,
+    capabilities: ProviderCapabilities {
+        catalog: false,
+        history: false,
+        quote: false,
+        realtime: false,
+        venues: &["OKX"],
+        kinds: &[SymbolKind::Crypto],
+        resolutions: &[],
+        adjustments: &[],
+    },
+};
+
+#[cfg(feature = "provider-okx")]
+pub static OKX_SWAP_PROVIDER_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "okx_swap",
+    display_name: "OKX 永续合约",
+    version: "1",
+    contract_version: ADAPTER_CONTRACT_VERSION,
+    enabled: true,
+    capabilities: ProviderCapabilities {
+        catalog: true,
+        history: true,
+        quote: true,
+        realtime: true,
+        venues: &["OKX_SWAP"],
+        kinds: &[SymbolKind::Crypto],
+        resolutions: &[
+            Resolution::Minute1,
+            Resolution::Minute5,
+            Resolution::Minute15,
+            Resolution::Minute30,
+            Resolution::Minute60,
+            Resolution::Day,
+            Resolution::Week,
+            Resolution::Month,
+        ],
+        adjustments: &[Adjustment::None],
+    },
+};
+
+#[cfg(not(feature = "provider-okx"))]
+pub static OKX_SWAP_DISABLED_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "okx_swap",
+    display_name: "OKX 永续合约",
+    version: "1",
+    contract_version: ADAPTER_CONTRACT_VERSION,
+    enabled: false,
+    capabilities: ProviderCapabilities {
+        catalog: false,
+        history: false,
+        quote: false,
+        realtime: false,
+        venues: &["OKX_SWAP"],
+        kinds: &[SymbolKind::Crypto],
+        resolutions: &[],
+        adjustments: &[],
+    },
+};
+
 #[cfg(feature = "provider-polymarket")]
 pub static POLYMARKET_PROVIDER_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "polymarket",

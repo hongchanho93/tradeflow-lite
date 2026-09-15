@@ -2,6 +2,10 @@ export type TimeRangePreset = '1m' | '3m' | '6m' | 'ytd' | '1y' | 'all';
 
 type Timed = { time: number };
 
+export function resolutionShowsIntradayTime(resolution: string) {
+  return ['1', '5', '15', '30', '60'].includes(resolution);
+}
+
 function subtractUtcMonths(timestamp: number, months: number): number {
   const date = new Date(timestamp * 1000);
   date.setUTCMonth(date.getUTCMonth() - months);

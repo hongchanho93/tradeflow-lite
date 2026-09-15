@@ -161,6 +161,7 @@ import {
   nearestBarIndex,
   panLogicalRange,
   parseShanghaiDate,
+  resolutionShowsIntradayTime,
   visibleRangeForPreset,
   type TimeRangePreset,
 } from './time-navigation';
@@ -280,6 +281,8 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'bj', label: '北京市场' },
     { value: 'binance_spot', label: '币安现货' },
     { value: 'binance_usdm', label: '币安 U 本位永续' },
+    { value: 'okx_spot', label: 'OKX 现货' },
+    { value: 'okx_swap', label: 'OKX 永续合约' },
     { value: 'polymarket', label: 'Polymarket' },
   ],
   stock: [
@@ -312,6 +315,14 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'binance_usdm', label: '币安合约 · U 本位永续' },
     { value: 'binance_usdm_usdt', label: 'U 本位永续 · USDT' },
     { value: 'binance_usdm_usdc', label: 'U 本位永续 · USDC' },
+    { value: 'okx_spot', label: 'OKX 现货' },
+    { value: 'okx_spot_usdt', label: 'OKX 现货 · USDT' },
+    { value: 'okx_spot_usdc', label: 'OKX 现货 · USDC' },
+    { value: 'okx_spot_other', label: 'OKX 现货 · 其他计价' },
+    { value: 'okx_swap', label: 'OKX 永续合约' },
+    { value: 'okx_swap_usdt', label: 'OKX 永续 · USDT' },
+    { value: 'okx_swap_usdc', label: 'OKX 永续 · USDC' },
+    { value: 'okx_swap_usd', label: 'OKX 永续 · USD' },
   ],
   prediction: [
     { value: 'all', label: '全部预测市场' },
@@ -2437,7 +2448,14 @@ lineTools.subscribeLineToolsSingleClick(({ selectionState, selectedLineTool }) =
 
 function formatChartTime(time: Time): string {
   if (typeof time === 'number') {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time * 1000));
+    const showTime = resolutionShowsIntradayTime(currentResolution);
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: currentSymbol.kind === 'crypto' || currentSymbol.kind === 'prediction' ? 'UTC' : 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      ...(showTime ? { hour: '2-digit', minute: '2-digit', hour12: false } : {}),
+    }).format(new Date(time * 1000));
   }
   return typeof time === 'string' ? time : `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`;
 }
@@ -3104,6 +3122,10 @@ function showHistory(
   currentResolution = resolution;
   currentAdjustment = adjustment;
   currentSeriesKind = response.seriesKind;
+  chart.timeScale().applyOptions({
+    timeVisible: resolutionShowsIntradayTime(currentResolution),
+    secondsVisible: false,
+  });
   if (currentSeriesKind === 'probability') activeMarketDataTab = 'rules';
   else if (activeMarketDataTab === 'rules') activeMarketDataTab = 'depth';
   const requiredChartType = currentSeriesKind === 'probability' ? 'line' : chartPreferences.chartType;
