@@ -304,6 +304,8 @@ fn resolution_seconds(resolution: Resolution) -> i64 {
         Resolution::Minute15 => 15 * 60,
         Resolution::Minute30 => 30 * 60,
         Resolution::Minute60 => 60 * 60,
+        Resolution::Minute120 => 2 * 60 * 60,
+        Resolution::Minute240 => 4 * 60 * 60,
         Resolution::Day => 24 * 60 * 60,
         Resolution::Week => 7 * 24 * 60 * 60,
         Resolution::Month => 30 * 24 * 60 * 60,

@@ -20,12 +20,14 @@ const PRODUCTS: [(SymbolKind, Market, &str); 8] = [
     (SymbolKind::Index, Market::Shenzhen, "399001"),
     (SymbolKind::Index, Market::Beijing, "899050"),
 ];
-const RESOLUTIONS: [Resolution; 8] = [
+const RESOLUTIONS: [Resolution; 10] = [
     Resolution::Minute1,
     Resolution::Minute5,
     Resolution::Minute15,
     Resolution::Minute30,
     Resolution::Minute60,
+    Resolution::Minute120,
+    Resolution::Minute240,
     Resolution::Day,
     Resolution::Week,
     Resolution::Month,

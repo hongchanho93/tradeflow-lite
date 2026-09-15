@@ -50,6 +50,9 @@ pub(crate) fn period_for(resolution: Resolution) -> BarPeriod {
         Resolution::Minute15 => BarPeriod::Minute15,
         Resolution::Minute30 => BarPeriod::Minute30,
         Resolution::Minute60 => BarPeriod::Minute60,
+        // TDX 标准协议没有 120/240 分钟编号；这两个周期由 60 分钟线在
+        // 业务层按交易日聚合，不能把它们伪装成主站原生周期。
+        Resolution::Minute120 | Resolution::Minute240 => BarPeriod::Minute60,
         Resolution::Day => BarPeriod::Day,
         Resolution::Week => BarPeriod::Week,
         Resolution::Month => BarPeriod::Month,
@@ -64,19 +67,34 @@ pub(crate) fn load_history<S: Session<Standard>>(
     let is_index = query.kind == SymbolKind::Index;
     let adjusted = query.adjustment == Adjustment::Qfq && !is_index;
     // 前复权的周/月线必须由复权后的日线聚合，否则除权日所在的周/月会失真。
-    let aggregate = adjusted && matches!(query.resolution, Resolution::Week | Resolution::Month);
-    let native_resolution = if aggregate {
+    let aggregate_intraday = matches!(
+        query.resolution,
+        Resolution::Minute120 | Resolution::Minute240
+    );
+    let aggregate_period =
+        adjusted && matches!(query.resolution, Resolution::Week | Resolution::Month);
+    let native_resolution = if aggregate_period {
         Resolution::Day
+    } else if aggregate_intraday {
+        Resolution::Minute60
     } else {
         query.resolution
     };
-    let native_count = if aggregate {
+    let native_count = if aggregate_period {
         let days_per_bar = if query.resolution == Resolution::Week {
             6
         } else {
             24
         };
         MAX_AGGREGATION_SOURCE_BARS.min(query.count * days_per_bar + 60)
+    } else if aggregate_intraday {
+        let source_bars_per_bar = match query.resolution {
+            Resolution::Minute120 => 2,
+            Resolution::Minute240 => 4,
+            _ => unreachable!(),
+        };
+        // 多取一段余量，避免最近交易日只有部分 60 分钟线时，结果不足请求条数。
+        MAX_AGGREGATION_SOURCE_BARS.min(query.count.saturating_mul(source_bars_per_bar) + 16)
     } else {
         query.count
     };
@@ -102,7 +120,9 @@ pub(crate) fn load_history<S: Session<Standard>>(
             .map_err(|error| error.to_string())?;
         bars = apply_qfq(bars, &qfq_events(&entries, today));
     }
-    if aggregate {
+    if aggregate_intraday {
+        bars = aggregate_intraday_bars(bars, query.resolution);
+    } else if aggregate_period {
         bars = aggregate_bars(bars, query.resolution);
     }
     if bars.len() > query.count {
@@ -370,6 +390,51 @@ fn aggregate_bars(bars: Vec<Bar>, resolution: Resolution) -> Vec<Bar> {
     groups
 }
 
+/// 将 TDX 原生 60 分钟线合并为 2/4 小时线。
+///
+/// TDX 的 60 分钟时间点固定落在 10:30、11:30、14:00、15:00。按时间戳取
+/// 2/4 小时整除会跨过午休，甚至把相邻交易日拼到一起，因此这里按上海日期和
+/// 交易时段位置分桶：2 小时分别得到上午、下午两根，4 小时得到当天一根。
+fn aggregate_intraday_bars(bars: Vec<Bar>, resolution: Resolution) -> Vec<Bar> {
+    let width = match resolution {
+        Resolution::Minute120 => 2,
+        Resolution::Minute240 => 4,
+        _ => return bars,
+    };
+    let mut groups = Vec::new();
+    let mut index_by_key: HashMap<(i32, u32, u32, u8), usize> = HashMap::new();
+    for bar in bars {
+        let date = shanghai_date(bar.time);
+        let midnight =
+            shanghai_timestamp(date, 0, 0).expect("valid Shanghai midnight for an existing bar");
+        let minute = (bar.time - midnight).div_euclid(60);
+        // 上午和下午分别分桶，午休和相邻交易日绝不拼接。
+        let slot = match minute {
+            570..=690 => 0,
+            780..=900 => 1,
+            _ => continue,
+        };
+        let bucket = if width == 4 { 0 } else { slot };
+        let key = (date.year(), date.month(), date.day(), bucket);
+        let Some(&index) = index_by_key.get(&key) else {
+            index_by_key.insert(key, groups.len());
+            groups.push(bar);
+            continue;
+        };
+        let group = &mut groups[index];
+        group.high = group.high.max(bar.high);
+        group.low = group.low.min(bar.low);
+        group.close = bar.close;
+        group.time = bar.time;
+        group.volume += bar.volume;
+        group.amount = group
+            .amount
+            .zip(bar.amount)
+            .map(|(total, amount)| total + amount);
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -378,8 +443,8 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        HistoryQuery, QfqEvent, Repairs, aggregate_bars, apply_qfq, load_history, normalize,
-        qfq_events, repair_index_ohlc_envelopes, validate_source_bars,
+        HistoryQuery, QfqEvent, Repairs, aggregate_bars, aggregate_intraday_bars, apply_qfq,
+        load_history, normalize, qfq_events, repair_index_ohlc_envelopes, validate_source_bars,
     };
     use crate::contracts::{Adjustment, Bar, Resolution, SymbolKind};
     use crate::market_data::clock::shanghai_timestamp;
@@ -869,6 +934,99 @@ mod tests {
             (monthly[1].open, monthly[1].close, monthly[1].volume),
             (2.0, 4.0, 3.0)
         );
+    }
+
+    #[test]
+    fn intraday_aggregation_respects_a_share_sessions() {
+        let bars = [
+            Bar::new(
+                ts(2026, 9, 14, 10) + 30 * 60,
+                1.0,
+                2.0,
+                0.5,
+                1.5,
+                10.0,
+                Some(1.0),
+            ),
+            Bar::new(
+                ts(2026, 9, 14, 11) + 30 * 60,
+                1.5,
+                3.0,
+                1.0,
+                2.5,
+                20.0,
+                Some(2.0),
+            ),
+            Bar::new(ts(2026, 9, 14, 14), 2.5, 4.0, 2.0, 3.5, 30.0, Some(3.0)),
+            Bar::new(ts(2026, 9, 14, 15), 3.5, 5.0, 3.0, 4.5, 40.0, Some(4.0)),
+            Bar::new(
+                ts(2026, 9, 15, 10) + 30 * 60,
+                5.0,
+                6.0,
+                4.5,
+                5.5,
+                50.0,
+                Some(5.0),
+            ),
+        ];
+        let two_hour = aggregate_intraday_bars(bars.to_vec(), Resolution::Minute120);
+        assert_eq!(two_hour.len(), 3);
+        assert_eq!(two_hour[0].time, ts(2026, 9, 14, 11) + 30 * 60);
+        assert_eq!(two_hour[1].time, ts(2026, 9, 14, 15));
+        assert_eq!(
+            (two_hour[0].open, two_hour[0].close, two_hour[0].volume),
+            (1.0, 2.5, 30.0)
+        );
+        assert_eq!(two_hour[1].amount, Some(7.0));
+
+        let four_hour = aggregate_intraday_bars(bars.to_vec(), Resolution::Minute240);
+        assert_eq!(four_hour.len(), 2);
+        assert_eq!(four_hour[0].time, ts(2026, 9, 14, 15));
+        assert_eq!(
+            (
+                four_hour[0].open,
+                four_hour[0].high,
+                four_hour[0].low,
+                four_hour[0].close
+            ),
+            (1.0, 5.0, 0.5, 4.5)
+        );
+        assert_eq!(four_hour[0].volume, 100.0);
+    }
+
+    #[test]
+    fn two_and_four_hour_history_request_native_sixty_minute_bars() {
+        let mut session = FakeSession::default();
+        session.responses.push_back(Box::new(Vec::<RawBar>::new()));
+        let error = load_history(
+            &mut session,
+            &query(
+                SymbolKind::Stock,
+                Resolution::Minute120,
+                Adjustment::None,
+                10,
+            ),
+            today(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "empty 120 response");
+        assert_eq!(session.calls, ["security_bars 0 36"]);
+
+        let mut session = FakeSession::default();
+        session.responses.push_back(Box::new(Vec::<RawBar>::new()));
+        let error = load_history(
+            &mut session,
+            &query(
+                SymbolKind::Stock,
+                Resolution::Minute240,
+                Adjustment::None,
+                10,
+            ),
+            today(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "empty 240 response");
+        assert_eq!(session.calls, ["security_bars 0 56"]);
     }
 
     #[test]

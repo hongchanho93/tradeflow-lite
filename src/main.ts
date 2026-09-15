@@ -11,6 +11,7 @@ import {
   LineStyle,
   LineSeries,
   PriceScaleMode,
+  TickMarkType,
   createChart,
   createSeriesMarkers,
   createTextWatermark,
@@ -79,6 +80,20 @@ import {
 } from './bar-series';
 import { BollingerBandPrimitive } from './boll-band';
 import { loadChartSettings, saveChartSettings, type ChartSettings } from './chart-settings';
+import {
+  RESOLUTION_OPTIONS,
+  TRADING_TIME_ZONE_OPTIONS,
+  formatUtcOffset,
+  loadFavoriteResolutions,
+  loadTradingTimeChoice,
+  resolveTradingTimeZone,
+  saveFavoriteResolutions,
+  saveTradingTimeChoice,
+  timeZoneOffsetMinutes,
+  toggleFavoriteResolution,
+  type Resolution,
+  type TradingTimeChoice,
+} from './chart-time-controls';
 import {
   loadChartPreferences,
   movePaneOrder,
@@ -185,7 +200,6 @@ type HistoryResponse = {
 type HostBenchmarkResponse = {
   probes: Array<{ host: string; ok: boolean; latencyMs: number; error?: string }>;
 };
-type Resolution = '1' | '5' | '15' | '30' | '60' | '1D' | '1W' | '1M';
 type Adjustment = 'none' | 'qfq';
 type IndicatorName = 'ma' | 'ema' | 'boll' | 'macd' | 'rsi';
 type DrawingToolType = LineToolType | 'UpArrow';
@@ -329,10 +343,9 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'polymarket', label: 'Polymarket' },
   ],
 };
-const resolutionLabels: Record<Resolution, string> = {
-  '1': '1分', '5': '5分', '15': '15分', '30': '30分', '60': '1小时',
-  '1D': '日', '1W': '周', '1M': '月',
-};
+const resolutionLabels = Object.fromEntries(
+  RESOLUTION_OPTIONS.map((option) => [option.value, option.shortLabel]),
+) as Record<Resolution, string>;
 const realtimeTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
 });
@@ -349,6 +362,9 @@ let currentSymbol = defaultSymbol;
 let currentSeriesKind: HistoryResponse['seriesKind'] = 'ohlcv';
 let currentResolution: Resolution = '1D';
 let currentAdjustment: Adjustment = 'none';
+let favoriteResolutions = loadFavoriteResolutions(localStorage);
+let tradingTimeChoice: TradingTimeChoice = loadTradingTimeChoice(localStorage);
+const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const historyRequestGate = new LatestRequestGate();
 const historyCache = new HistoryMemoryCache<HistoryResponse>();
 const historyRequests = new Map<string, Promise<HistoryResponse>>();
@@ -469,7 +485,21 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <button id="watchlist-add" class="toolbar-button compact" aria-label="添加当前证券到自选" title="添加到自选">${icons.star}</button>
       <span class="toolbar-divider"></span>
       <div class="resolution-switcher" aria-label="K线周期">
-        ${Object.entries(resolutionLabels).map(([resolution, label]) => `<button data-resolution="${resolution}" class="toolbar-button${resolution === '1D' ? ' active' : ''}">${label}</button>`).join('')}
+        <div id="resolution-favorites" class="resolution-favorites"></div>
+        <details id="resolution-menu" class="chart-control-menu resolution-menu">
+          <summary class="toolbar-button resolution-menu-trigger" aria-label="选择K线周期" title="选择K线周期" tabindex="0"><span>⌄</span></summary>
+          <div class="resolution-menu-panel" aria-label="选择K线周期">
+            ${(['分钟', '小时', '天'] as const).map((group) => `
+              <section>
+                <h3>${group}</h3>
+                ${RESOLUTION_OPTIONS.filter((option) => option.group === group).map((option) => `
+                  <div class="resolution-menu-row" data-resolution-row="${option.value}">
+                    <button type="button" data-resolution="${option.value}">${option.label}</button>
+                    <button type="button" class="resolution-favorite-toggle" data-favorite-resolution="${option.value}" aria-label="收藏${option.label}" aria-pressed="false">${icons.star}</button>
+                  </div>`).join('')}
+              </section>`).join('')}
+          </div>
+        </details>
       </div>
       <span class="toolbar-divider"></span>
       <details id="chart-type-menu" class="chart-control-menu">
@@ -740,6 +770,13 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <label><span class="visually-hidden">定位日期</span><input id="go-to-date" type="date" aria-label="定位日期" /></label>
           <button id="go-to-date-button" type="button">转到</button><button id="go-to-latest" type="button">最新</button>
         </nav>
+        <details id="trading-time-menu" class="trading-time-menu">
+          <summary id="trading-time-trigger" aria-label="切换交易时间"><span>交易时间</span><strong>--:--:-- UTC</strong></summary>
+          <div class="trading-time-menu-panel" aria-label="交易时间">
+            ${TRADING_TIME_ZONE_OPTIONS.map((option) => `
+              <button type="button" data-trading-time="${option.value}" aria-label="${option.label}"><span>${option.label}</span><small></small><i></i></button>`).join('')}
+          </div>
+        </details>
         <div id="volume-legend" class="volume-legend" hidden>成交量 <span>--</span></div>
         <aside id="watchlist-panel" class="watchlist-panel" hidden>
           <header><strong>自选</strong><span>本地保存</span></header>
@@ -997,6 +1034,10 @@ const markerSize = document.querySelector<HTMLInputElement>('#marker-size')!;
 const markerMessage = document.querySelector<HTMLParagraphElement>('#marker-message')!;
 const deleteMarkerButton = document.querySelector<HTMLButtonElement>('#delete-marker')!;
 const priceScaleControls = document.querySelector<HTMLDetailsElement>('#price-scale-controls')!;
+const resolutionFavorites = document.querySelector<HTMLDivElement>('#resolution-favorites')!;
+const resolutionMenu = document.querySelector<HTMLDetailsElement>('#resolution-menu')!;
+const tradingTimeMenu = document.querySelector<HTMLDetailsElement>('#trading-time-menu')!;
+const tradingTimeTrigger = document.querySelector<HTMLElement>('#trading-time-trigger')!;
 const priceRangeEditor = document.querySelector<HTMLDivElement>('#price-range-editor')!;
 const priceRangeMin = document.querySelector<HTMLInputElement>('#price-range-min')!;
 const priceRangeMax = document.querySelector<HTMLInputElement>('#price-range-max')!;
@@ -1063,6 +1104,78 @@ function showChartToast(message: string) {
     chartToast.hidden = true;
     chartToastTimer = undefined;
   }, 2200);
+}
+
+function exchangeTimeZone(symbol = currentSymbol): string {
+  return symbol.kind === 'crypto' || symbol.kind === 'prediction' ? 'UTC' : 'Asia/Shanghai';
+}
+
+function activeTradingTimeZone(symbol = currentSymbol): string {
+  return resolveTradingTimeZone(tradingTimeChoice, exchangeTimeZone(symbol), systemTimeZone);
+}
+
+function renderResolutionControls() {
+  resolutionFavorites.replaceChildren();
+  for (const resolution of favoriteResolutions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'toolbar-button';
+    button.dataset.resolution = resolution;
+    button.textContent = resolutionLabels[resolution];
+    button.classList.toggle('active', resolution === currentResolution);
+    button.addEventListener('click', () => void selectResolution(resolution));
+    resolutionFavorites.append(button);
+  }
+  for (const row of document.querySelectorAll<HTMLElement>('[data-resolution-row]')) {
+    row.classList.toggle('active', row.dataset.resolutionRow === currentResolution);
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-favorite-resolution]')) {
+    const resolution = button.dataset.favoriteResolution as Resolution;
+    const selected = favoriteResolutions.includes(resolution);
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.setAttribute('aria-label', `${selected ? '取消收藏' : '收藏'}${RESOLUTION_OPTIONS.find((option) => option.value === resolution)?.label ?? resolution}`);
+  }
+  resolutionMenu.classList.toggle('active', !favoriteResolutions.includes(currentResolution));
+}
+
+async function selectResolution(resolution: Resolution) {
+  resolutionMenu.open = false;
+  await openHistory(currentSymbol, resolution, currentAdjustment);
+}
+
+function formatTimeZoneClock(date: Date, timeZone = activeTradingTimeZone()): string {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone,
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(date);
+}
+
+function renderTradingTimeControls(date = new Date()) {
+  const activeZone = activeTradingTimeZone();
+  const clock = tradingTimeTrigger.querySelector<HTMLElement>('strong')!;
+  clock.textContent = `${formatTimeZoneClock(date, activeZone)} ${formatUtcOffset(timeZoneOffsetMinutes(date, activeZone))}`;
+  for (const button of tradingTimeMenu.querySelectorAll<HTMLButtonElement>('[data-trading-time]')) {
+    const choice = button.dataset.tradingTime as TradingTimeChoice;
+    const selected = choice === tradingTimeChoice;
+    const displayZone = resolveTradingTimeZone(choice, exchangeTimeZone(), systemTimeZone);
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-checked', String(selected));
+    button.querySelector('small')!.textContent = choice === 'exchange' || choice === 'system' || choice === 'UTC'
+      ? ''
+      : formatUtcOffset(timeZoneOffsetMinutes(date, displayZone));
+  }
+}
+
+function applyTradingTimeChoice(choice: TradingTimeChoice, persist = true) {
+  tradingTimeChoice = choice;
+  chart.applyOptions({
+    timeScale: { tickMarkFormatter: formatChartTick },
+    localization: { timeFormatter: (time: Time) => formatChartTime(time) },
+  });
+  renderTradingTimeControls();
+  tradingTimeMenu.open = false;
+  if (persist && !saveTradingTimeChoice(localStorage, tradingTimeChoice)) showChartToast('交易时间设置未能保存');
 }
 
 function applyChartSettings(settings: ChartSettings) {
@@ -2446,11 +2559,33 @@ lineTools.subscribeLineToolsSingleClick(({ selectionState, selectedLineTool }) =
   }
 });
 
+function formatChartTick(time: Time, tickMarkType: TickMarkType): string | null {
+  if (typeof time !== 'number') return null;
+  const timeZone = activeTradingTimeZone();
+  const date = new Date(time * 1000);
+  if (tickMarkType === TickMarkType.Year) {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric' }).format(date);
+  }
+  if (tickMarkType === TickMarkType.Month) {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone, month: 'short' }).format(date);
+  }
+  if (tickMarkType === TickMarkType.DayOfMonth) {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone, month: '2-digit', day: '2-digit' }).format(date);
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: tickMarkType === TickMarkType.TimeWithSeconds ? '2-digit' : undefined,
+    hour12: false,
+  }).format(date);
+}
+
 function formatChartTime(time: Time): string {
   if (typeof time === 'number') {
     const showTime = resolutionShowsIntradayTime(currentResolution);
     return new Intl.DateTimeFormat('zh-CN', {
-      timeZone: currentSymbol.kind === 'crypto' || currentSymbol.kind === 'prediction' ? 'UTC' : 'Asia/Shanghai',
+      timeZone: activeTradingTimeZone(),
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -3126,6 +3261,8 @@ function showHistory(
     timeVisible: resolutionShowsIntradayTime(currentResolution),
     secondsVisible: false,
   });
+  chart.applyOptions({ timeScale: { tickMarkFormatter: formatChartTick } });
+  renderTradingTimeControls();
   if (currentSeriesKind === 'probability') activeMarketDataTab = 'rules';
   else if (activeMarketDataTab === 'rules') activeMarketDataTab = 'depth';
   const requiredChartType = currentSeriesKind === 'probability' ? 'line' : chartPreferences.chartType;
@@ -3149,6 +3286,7 @@ function showHistory(
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
     button.classList.toggle('active', button.dataset.resolution === currentResolution);
   }
+  renderResolutionControls();
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
     button.classList.toggle('active', button.dataset.adjustment === currentAdjustment);
     button.disabled = (symbol.kind === 'crypto' || symbol.kind === 'prediction') && button.dataset.adjustment === 'qfq';
@@ -3987,7 +4125,22 @@ symbolDialog.addEventListener('keydown', (event) => {
 });
 document.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, currentAdjustment));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
-  button.addEventListener('click', () => void openHistory(currentSymbol, button.dataset.resolution as Resolution, currentAdjustment));
+  button.addEventListener('click', () => void selectResolution(button.dataset.resolution as Resolution));
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-favorite-resolution]')) {
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    favoriteResolutions = toggleFavoriteResolution(
+      favoriteResolutions,
+      button.dataset.favoriteResolution as Resolution,
+    );
+    if (!saveFavoriteResolutions(localStorage, favoriteResolutions)) showChartToast('周期收藏未能保存');
+    renderResolutionControls();
+  });
+}
+for (const button of tradingTimeMenu.querySelectorAll<HTMLButtonElement>('[data-trading-time]')) {
+  button.addEventListener('click', () => applyTradingTimeChoice(button.dataset.tradingTime as TradingTimeChoice));
 }
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
   button.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, button.dataset.adjustment as Adjustment));
@@ -4103,7 +4256,7 @@ document.addEventListener('keydown', (event) => {
     closeChartSettings();
   }
 });
-const toolbarMenus = [...document.querySelectorAll<HTMLDetailsElement>('.chart-control-menu, .indicator-menu, .price-scale-controls')];
+const toolbarMenus = [...document.querySelectorAll<HTMLDetailsElement>('.chart-control-menu, .indicator-menu, .price-scale-controls, .trading-time-menu')];
 function closeToolbarMenus() {
   for (const menu of toolbarMenus) menu.open = false;
 }
@@ -4335,6 +4488,9 @@ setVolumeActive(volumeVisible, false);
 applyMainSeriesOrder();
 renderSecondaryPaneOrder();
 renderWatchlist();
+renderResolutionControls();
+applyTradingTimeChoice(tradingTimeChoice, false);
+window.setInterval(() => renderTradingTimeControls(), 1_000);
 void loadMarketCatalogs();
 const realtimeListenersReady = installRealtimeListeners();
 void openHistory(defaultSymbol, currentResolution, currentAdjustment);

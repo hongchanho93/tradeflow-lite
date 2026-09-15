@@ -743,6 +743,8 @@ pub(crate) fn interval_for(resolution: Resolution) -> Interval {
         Resolution::Minute15 => Interval::Minute15,
         Resolution::Minute30 => Interval::Minute30,
         Resolution::Minute60 => Interval::Hour1,
+        Resolution::Minute120 => Interval::Hour2,
+        Resolution::Minute240 => Interval::Hour4,
         Resolution::Day => Interval::Day1,
         Resolution::Week => Interval::Week1,
         Resolution::Month => Interval::Month1,
@@ -805,6 +807,8 @@ mod tests {
         assert_eq!(interval_for(Resolution::Minute15), Interval::Minute15);
         assert_eq!(interval_for(Resolution::Minute30), Interval::Minute30);
         assert_eq!(interval_for(Resolution::Minute60), Interval::Hour1);
+        assert_eq!(interval_for(Resolution::Minute120), Interval::Hour2);
+        assert_eq!(interval_for(Resolution::Minute240), Interval::Hour4);
         assert_eq!(interval_for(Resolution::Day), Interval::Day1);
         assert_eq!(interval_for(Resolution::Week), Interval::Week1);
         assert_eq!(interval_for(Resolution::Month), Interval::Month1);
@@ -855,6 +859,8 @@ mod tests {
     fn binance_spot_real_market() {
         for (code, resolution) in [
             ("BTCUSDT", Resolution::Minute1),
+            ("BTCUSDT", Resolution::Minute120),
+            ("BTCUSDT", Resolution::Minute240),
             ("ETHUSDT", Resolution::Day),
             ("SOLUSDT", Resolution::Month),
         ] {

@@ -413,6 +413,8 @@ fn candle_close_time(open_time_ms: i64, resolution: Resolution) -> Result<i64, A
             Resolution::Minute15 => 15 * 60,
             Resolution::Minute30 => 30 * 60,
             Resolution::Minute60 => 60 * 60,
+            Resolution::Minute120 => 2 * 60 * 60,
+            Resolution::Minute240 => 4 * 60 * 60,
             Resolution::Day => 24 * 60 * 60,
             Resolution::Week => 7 * 24 * 60 * 60,
             Resolution::Month => unreachable!(),
@@ -442,6 +444,8 @@ fn trade_bar_close_time(trade_time_ms: i64, resolution: Resolution) -> Option<i6
             Resolution::Minute15 => 15 * 60_000,
             Resolution::Minute30 => 30 * 60_000,
             Resolution::Minute60 => 60 * 60_000,
+            Resolution::Minute120 => 2 * 60 * 60_000,
+            Resolution::Minute240 => 4 * 60 * 60_000,
             Resolution::Day => 24 * 60 * 60_000,
             Resolution::Week => 7 * 24 * 60 * 60_000,
             Resolution::Month => unreachable!(),
@@ -479,6 +483,8 @@ fn interval_for(resolution: Resolution) -> &'static str {
         Resolution::Minute15 => "15m",
         Resolution::Minute30 => "30m",
         Resolution::Minute60 => "1H",
+        Resolution::Minute120 => "2H",
+        Resolution::Minute240 => "4H",
         Resolution::Day => "1Dutc",
         Resolution::Week => "1Wutc",
         Resolution::Month => "1Mutc",
@@ -1515,6 +1521,8 @@ mod tests {
         assert_eq!(interval_for(Resolution::Minute15), "15m");
         assert_eq!(interval_for(Resolution::Minute30), "30m");
         assert_eq!(interval_for(Resolution::Minute60), "1H");
+        assert_eq!(interval_for(Resolution::Minute120), "2H");
+        assert_eq!(interval_for(Resolution::Minute240), "4H");
         assert_eq!(interval_for(Resolution::Day), "1Dutc");
         assert_eq!(interval_for(Resolution::Week), "1Wutc");
         assert_eq!(interval_for(Resolution::Month), "1Mutc");
@@ -1719,25 +1727,31 @@ mod tests {
                     .any(|item| item.symbol == format!("{venue}:{code}"))
             );
             let symbol = Symbol::new(venue, code).unwrap();
-            let history = router
-                .fetch_history(HistoryRequest {
-                    provider_id: provider_id.to_string(),
-                    symbol: symbol.clone(),
-                    kind: SymbolKind::Crypto,
-                    resolution: Resolution::Minute1,
-                    adjustment: Adjustment::None,
-                    count: 300,
-                    include_quote: true,
-                })
-                .unwrap();
-            assert_eq!(history.bars.len(), 300);
-            assert!(
-                history
-                    .bars
-                    .windows(2)
-                    .all(|rows| rows[0].time < rows[1].time)
-            );
-            assert!(history.quote.is_some());
+            for resolution in [
+                Resolution::Minute1,
+                Resolution::Minute120,
+                Resolution::Minute240,
+            ] {
+                let history = router
+                    .fetch_history(HistoryRequest {
+                        provider_id: provider_id.to_string(),
+                        symbol: symbol.clone(),
+                        kind: SymbolKind::Crypto,
+                        resolution,
+                        adjustment: Adjustment::None,
+                        count: 300,
+                        include_quote: true,
+                    })
+                    .unwrap();
+                assert_eq!(history.bars.len(), 300);
+                assert!(
+                    history
+                        .bars
+                        .windows(2)
+                        .all(|rows| rows[0].time < rows[1].time)
+                );
+                assert!(history.quote.is_some());
+            }
             let quote = router
                 .fetch_quote(QuoteRequest {
                     provider_id: provider_id.to_string(),
@@ -1747,9 +1761,8 @@ mod tests {
                 .unwrap();
             assert!(quote.quote.is_valid());
             println!(
-                "okx.real provider={provider_id} catalog={} bars={} last={}",
+                "okx.real provider={provider_id} catalog={} bars_per_resolution=300 last={}",
                 catalog.len(),
-                history.bars.len(),
                 quote.quote.last
             );
         }

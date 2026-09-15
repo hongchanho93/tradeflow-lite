@@ -231,6 +231,8 @@ pub enum Interval {
     Minute15,
     Minute30,
     Hour1,
+    Hour2,
+    Hour4,
     Day1,
     Week1,
     Month1,
@@ -244,6 +246,8 @@ impl Interval {
             Self::Minute15 => "15m",
             Self::Minute30 => "30m",
             Self::Hour1 => "1h",
+            Self::Hour2 => "2h",
+            Self::Hour4 => "4h",
             Self::Day1 => "1d",
             Self::Week1 => "1w",
             Self::Month1 => "1M",
@@ -257,6 +261,8 @@ impl Interval {
             "15m" => Self::Minute15,
             "30m" => Self::Minute30,
             "1h" => Self::Hour1,
+            "2h" => Self::Hour2,
+            "4h" => Self::Hour4,
             "1d" => Self::Day1,
             "1w" => Self::Week1,
             "1M" => Self::Month1,
@@ -1896,6 +1902,8 @@ mod tests {
     fn interval_values_match_binance_spot_contract() {
         assert_eq!(Interval::Minute1.as_api_str(), "1m");
         assert_eq!(Interval::Hour1.as_api_str(), "1h");
+        assert_eq!(Interval::Hour2.as_api_str(), "2h");
+        assert_eq!(Interval::Hour4.as_api_str(), "4h");
         assert_eq!(Interval::Month1.as_api_str(), "1M");
     }
 

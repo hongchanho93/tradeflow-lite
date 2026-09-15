@@ -39,13 +39,13 @@ function isMarkerScope(scope: string): boolean {
   if (parts.length === 3) {
     return isCanonicalMarketSymbol(parts[0])
       && (adjustment === 'none' || adjustment === 'qfq')
-      && /^(1|5|15|30|60|1D|1W|1M)$/.test(resolution ?? '');
+      && /^(1|5|15|30|60|120|240|1D|1W|1M)$/.test(resolution ?? '');
   }
   return parts.length === 4
     && isProviderId(parts[0])
     && isCanonicalMarketSymbol(parts[1])
     && (adjustment === 'none' || adjustment === 'qfq')
-    && /^(1|5|15|30|60|1D|1W|1M)$/.test(resolution ?? '');
+    && /^(1|5|15|30|60|120|240|1D|1W|1M)$/.test(resolution ?? '');
 }
 
 export function normalizeMarkers(value: unknown): ChartMarker[] | null {

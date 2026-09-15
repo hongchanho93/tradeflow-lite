@@ -133,6 +133,10 @@ pub enum Resolution {
     Minute30,
     #[serde(rename = "60")]
     Minute60,
+    #[serde(rename = "120")]
+    Minute120,
+    #[serde(rename = "240")]
+    Minute240,
     #[serde(rename = "1D")]
     Day,
     #[serde(rename = "1W")]
@@ -149,6 +153,8 @@ impl Resolution {
             Self::Minute15 => "15",
             Self::Minute30 => "30",
             Self::Minute60 => "60",
+            Self::Minute120 => "120",
+            Self::Minute240 => "240",
             Self::Day => "1D",
             Self::Week => "1W",
             Self::Month => "1M",
@@ -311,6 +317,8 @@ mod tests {
         };
         assert_eq!(serde_json::to_value(info).unwrap()["symbol"], "SH:600000");
         assert_eq!(serde_json::to_value(Resolution::Day).unwrap(), "1D");
+        assert_eq!(serde_json::to_value(Resolution::Minute120).unwrap(), "120");
+        assert_eq!(serde_json::to_value(Resolution::Minute240).unwrap(), "240");
         assert_eq!(serde_json::to_value(Adjustment::None).unwrap(), "none");
         assert_eq!(
             serde_json::to_value(Symbol::new("binance", "btcusdt").unwrap()).unwrap(),

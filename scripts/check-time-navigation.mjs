@@ -13,5 +13,7 @@ assert.equal(parseShanghaiDate('2026-09-13'), 1_789_228_800);
 assert.equal(parseShanghaiDate('bad'), null);
 assert.equal(resolutionShowsIntradayTime('1'), true);
 assert.equal(resolutionShowsIntradayTime('60'), true);
+assert.equal(resolutionShowsIntradayTime('120'), true);
+assert.equal(resolutionShowsIntradayTime('240'), true);
 assert.equal(resolutionShowsIntradayTime('1D'), false);
 console.log('Time navigation OK');
