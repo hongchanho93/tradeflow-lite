@@ -213,3 +213,12 @@
 
 1. 下一个 A 股开市窗口补做 S5 股票、ETF、指数的连续报价与当前 bar 推进验收；
 2. 验收时记录当前 bar 同时间修正、新 bar 追加、切股后旧轮询丢弃及断线自动恢复，全部成立后把 S5 和总状态改为“已完成”。
+
+### 2026-09-15 · 行情适配器合同 v1
+
+- 新增公开 Rust 合同 `market_adapter::{ProviderDescriptor, ProviderCapabilities, MarketDataAdapter, HistoryRequest}`，采用静态引用和编译期注册，不引入动态插件、不安全 dylib ABI、额外 JSON 往返或行情热路径锁。
+- `AdapterRegistry`/`MarketRouter` 现在可由宿主公开构造并注入；默认 `run()` 使用内置 TDX/Binance 集合，`run_with_router` 将历史、报价、目录和实时 Tauri 命令绑定到同一份 State router。Registry 拒绝重复 provider id、重叠市场路由和 capability/facet 漂移。
+- TDX、Binance Spot、Binance USD-M 历史适配器均实现同一 trait；目录与报价也通过各自 callable facet。Binance WS 由 realtime facet 启动，保留 `requestId + providerId + symbol + resolution + sequence` envelope、aggTrade/kline 校准、depth、重连退避和 stale request 语义；事件循环不逐事件查表、不加注册表锁或 JSON 往返。TDX 静态目录标记为非动态 `catalog`，TDX 轮询标记为非 push `realtime`。
+- 应用入口现以 provider-neutral 的 `list_market_providers` / `list_market_catalog` 发现并合并目录；旧 Binance 目录命令只是兼容转换。历史、独立报价和实时命令均从同一个可注入 `MarketRouter` State 走 provider identity。历史附带报价失败时保留已验证 bars 并将 quote 置为 `None`，独立报价命令仍严格失败；关闭 Binance feature 时四个能力入口统一明确不可用且不落 TDX。
+- `MarketDataSnapshot<'a>` 预留未来只读 AI Tools 的借用边界，当前不连接 AI、不存密钥、不上传数据；`recent_bars` 指针合同证明限定快照不复制整批 K 线。
+- 新增 fake adapter、能力/feature-disabled/路由合同、TDX quote 实盘断言，以及 `npm run test:adapter` 结构回归门。代码、测试和文档尚未提交、推送、打包或发布。

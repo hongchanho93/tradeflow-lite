@@ -6,21 +6,16 @@ pub struct Symbol(String);
 
 impl Symbol {
     pub fn new(exchange: &str, code: &str) -> Result<Self, AppError> {
-        let exchange = exchange.trim().to_ascii_uppercase();
-        let code = code.trim().to_ascii_uppercase();
-        let valid = match exchange.as_str() {
-            "SH" | "SZ" | "BJ" => code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),
-            "BINANCE" | "BINANCE_USDM" => {
-                (2..=32).contains(&code.chars().count())
-                    && code.len() <= 96
-                    && code.chars().all(char::is_alphanumeric)
-            }
-            _ => false,
-        };
-        if !valid {
+        let exchange = normalize_symbol_component(exchange, 32)?;
+        let code = normalize_symbol_component(code, 96)?;
+        if exchange.is_empty() || code.is_empty() {
             return Err(AppError::new("invalid_symbol", "不支持的行情品种代码"));
         }
         Ok(Self(format!("{exchange}:{code}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn parts(&self) -> (&str, &str) {
@@ -28,6 +23,20 @@ impl Symbol {
             .split_once(':')
             .expect("validated symbol contains separator")
     }
+}
+
+fn normalize_symbol_component(value: &str, max_chars: usize) -> Result<String, AppError> {
+    if value.is_empty()
+        || value.chars().count() > max_chars
+        || value.chars().any(|character| {
+            (!character.is_ascii_alphanumeric() && !matches!(character, '.' | '_' | '-'))
+                || character.is_control()
+                || character.is_whitespace()
+        })
+    {
+        return Err(AppError::new("invalid_symbol", "不支持的行情品种代码"));
+    }
+    Ok(value.to_ascii_uppercase())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +279,16 @@ mod tests {
             "BINANCE:BTCUSDT"
         );
         assert_eq!(serde_json::to_value(SymbolKind::Crypto).unwrap(), "crypto");
-        assert!(Symbol::new("BINANCE", "BTC/USDT").is_err());
+        assert_eq!(
+            Symbol::new("EXAMPLE", "ABC-USD").unwrap().as_str(),
+            "EXAMPLE:ABC-USD"
+        );
+        assert!(Symbol::new("EXAMPLE", "A/B").is_err());
+        assert!(Symbol::new("SH", "600:000").is_err());
+        assert!(Symbol::new("SH", "600 000").is_err());
+        assert!(Symbol::new("SH", "600000\n").is_err());
+        assert!(Symbol::new("SH:OTHER", "600000").is_err());
+        assert!(Symbol::new("SH", &"X".repeat(97)).is_err());
+        assert!(Symbol::new(&"X".repeat(33), "600000").is_err());
     }
 }

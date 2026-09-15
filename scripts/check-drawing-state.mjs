@@ -20,6 +20,8 @@ assert.equal(validateDrawingSnapshot('{broken', known), null);
 assert.equal(validateDrawingSnapshot(JSON.stringify([{ id: 'x', toolType: 'Unknown', points: [], options: {} }]), known), null);
 assert.equal(validateDrawingSnapshot(JSON.stringify([{ id: 'x', toolType: 'TrendLine', points: [{ timestamp: 'bad', price: 1 }], options: {} }]), known), null);
 assert.equal(drawingScope('SH:600000', 'qfq'), 'SH:600000|qfq');
+assert.equal(drawingScope('EXAMPLE:ABC', 'none', 'custom'), 'custom|EXAMPLE:ABC|none');
+assert.equal(drawingScope('CUSTOM_VENUE:ABC_1', 'none', 'custom-feed'), 'custom-feed|CUSTOM_VENUE:ABC_1|none');
 
 const values = new Map();
 const storage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
@@ -27,6 +29,10 @@ const scopes = new Map([['SH:600000|none', valid]]);
 assert.equal(saveDrawingScopes(storage, scopes), true);
 assert.equal(JSON.parse(values.get(DRAWING_STORAGE_KEY)).version, 1);
 assert.deepEqual(loadDrawingScopes(storage, known), scopes);
+values.set(DRAWING_STORAGE_KEY, JSON.stringify({ version: 1, scopes: { 'custom|EXAMPLE:ABC|none': JSON.parse(valid) } }));
+assert.deepEqual(loadDrawingScopes(storage, known), new Map([['custom|EXAMPLE:ABC|none', valid]]));
+values.set(DRAWING_STORAGE_KEY, JSON.stringify({ version: 1, scopes: { 'custom-feed|CUSTOM_VENUE:ABC_1|none': JSON.parse(valid) } }));
+assert.deepEqual(loadDrawingScopes(storage, known), new Map([['custom-feed|CUSTOM_VENUE:ABC_1|none', valid]]));
 values.set(DRAWING_STORAGE_KEY, '{broken');
 assert.deepEqual(loadDrawingScopes(storage, known), new Map());
 

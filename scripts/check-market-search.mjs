@@ -1,10 +1,48 @@
 import { readFileSync } from 'node:fs';
-import { listMarketSymbols, marketSymbolMatchesSource, searchMarketSymbols } from '../src/market-universe.ts';
+import {
+  listMarketSymbols,
+  marketSymbolFromCatalog,
+  marketSymbolMatchesSource,
+  searchMarketSymbols,
+} from '../src/market-universe.ts';
 import { binanceSpotSymbols, buildBinanceSpotSymbols } from '../src/providers/binance/catalog.ts';
 import { binanceUsdMarginedSymbols, buildBinanceUsdMarginedSymbols } from '../src/providers/binance/usdm-catalog.ts';
 
 const marketPackage = JSON.parse(readFileSync(new URL('../src/market-universe.json', import.meta.url), 'utf8'));
 const rows = [...marketPackage.rows, ...binanceSpotSymbols, ...binanceUsdMarginedSymbols];
+
+const customProvider = {
+  id: 'custom-feed',
+  displayName: 'Custom Feed',
+  version: '1',
+  contractVersion: '1',
+  enabled: true,
+  capabilities: {
+    catalog: true,
+    history: true,
+    quote: false,
+    realtime: true,
+    venues: ['CUSTOM'],
+    kinds: ['crypto'],
+    resolutions: ['1'],
+    adjustments: ['none'],
+  },
+};
+const customSymbol = marketSymbolFromCatalog({
+  providerId: 'custom-feed',
+  symbol: 'CUSTOM:ABCUSD',
+  name: 'ABC / USD',
+  kind: 'crypto',
+  baseAsset: 'ABC',
+  quoteAsset: 'USD',
+}, customProvider, 'CUSTOM');
+if (customSymbol.providerId !== 'custom-feed' || customSymbol.venue !== 'CUSTOM'
+  || customSymbol.providerDisplayName !== 'Custom Feed' || customSymbol.realtime !== true) {
+  throw new Error('provider-neutral catalog metadata conversion failed');
+}
+if (customSymbol.exchange !== 'CUSTOM' || customSymbol.baseAsset !== 'ABC') {
+  throw new Error('catalog compatibility display metadata failed');
+}
 
 const stock = searchMarketSymbols(rows, '600000')[0];
 if (stock?.symbol !== 'SH:600000' || stock.kind !== 'stock') throw new Error('stock code search failed');

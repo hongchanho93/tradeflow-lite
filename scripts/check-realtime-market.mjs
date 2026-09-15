@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 
 import {
   canApplyRealtimeBar,
+  isRealtimeSequenceFresh,
   matchesRealtimeSelection,
   marketDataRenderDelay,
   REALTIME_FRAME_FALLBACK_MS,
+  realtimeSequenceKey,
   realtimeRequestSeed,
 } from '../src/realtime-market.ts';
 
@@ -13,12 +15,17 @@ assert.ok(
   'a reloaded page must start above request IDs from the previous page lifetime',
 );
 
-const current = { requestId: 7, symbol: 'BINANCE:BTCUSDT', resolution: '1' };
-assert.equal(matchesRealtimeSelection(current, 7, 'BINANCE:BTCUSDT', '1'), true);
+const current = { requestId: 7, providerId: 'binance_spot', symbol: 'BINANCE:BTCUSDT', resolution: '1' };
+assert.equal(matchesRealtimeSelection(current, 7, 'BINANCE:BTCUSDT', '1', 'binance_spot'), true);
 assert.equal(
   matchesRealtimeSelection({ ...current, requestId: 6 }, 7, 'BINANCE:BTCUSDT', '1'),
   false,
   'a late event from the previous subscription must be ignored',
+);
+assert.equal(
+  matchesRealtimeSelection({ ...current, providerId: 'binance_usdm' }, 7, 'BINANCE:BTCUSDT', '1', 'binance_spot'),
+  false,
+  'a different provider must never update the visible chart',
 );
 assert.equal(
   matchesRealtimeSelection({ ...current, symbol: 'BINANCE:ETHUSDT' }, 7, 'BINANCE:BTCUSDT', '1'),
@@ -35,6 +42,22 @@ assert.equal(
   false,
   'a different interval must never update the visible chart',
 );
+assert.equal(isRealtimeSequenceFresh(11, 10), true);
+assert.equal(isRealtimeSequenceFresh(10, 10), false, 'duplicate sequence must be dropped');
+assert.equal(isRealtimeSequenceFresh(9, 10), false);
+assert.equal(isRealtimeSequenceFresh(null, 10), true);
+const sequenceByChannel = new Map();
+for (const channel of ['bar', 'depth', 'trade']) {
+  const key = realtimeSequenceKey(current, channel);
+  assert.equal(sequenceByChannel.has(key), false);
+  sequenceByChannel.set(key, 10);
+  assert.equal(
+    isRealtimeSequenceFresh(10, sequenceByChannel.get(key)),
+    false,
+    `${channel} duplicate sequence must be dropped independently`,
+  );
+}
+assert.notEqual(realtimeSequenceKey(current, 'bar'), realtimeSequenceKey(current, 'depth'));
 
 assert.equal(canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 200 }), true);
 assert.equal(canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 201 }), true);

@@ -1,3 +1,5 @@
+import { isCanonicalMarketSymbol } from './market-universe.ts';
+
 export type MarkerShape = 'circle' | 'square' | 'arrowUp' | 'arrowDown';
 export type MarkerPosition = 'aboveBar' | 'belowBar' | 'inBar';
 
@@ -20,8 +22,30 @@ const markerShapes = new Set<MarkerShape>(['circle', 'square', 'arrowUp', 'arrow
 const markerPositions = new Set<MarkerPosition>(['aboveBar', 'belowBar', 'inBar']);
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
-export function markerScope(symbol: string, adjustment: string, resolution: string): string {
-  return `${symbol}|${adjustment}|${resolution}`;
+export function markerScope(symbol: string, adjustment: string, resolution: string, providerId?: string): string {
+  return providerId === undefined
+    ? `${symbol}|${adjustment}|${resolution}`
+    : `${providerId}|${symbol}|${adjustment}|${resolution}`;
+}
+
+function isProviderId(value: string): boolean {
+  return value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function isMarkerScope(scope: string): boolean {
+  const parts = scope.split('|');
+  const adjustment = parts.at(-2);
+  const resolution = parts.at(-1);
+  if (parts.length === 3) {
+    return isCanonicalMarketSymbol(parts[0])
+      && (adjustment === 'none' || adjustment === 'qfq')
+      && /^(1|5|15|30|60|1D|1W|1M)$/.test(resolution ?? '');
+  }
+  return parts.length === 4
+    && isProviderId(parts[0])
+    && isCanonicalMarketSymbol(parts[1])
+    && (adjustment === 'none' || adjustment === 'qfq')
+    && /^(1|5|15|30|60|1D|1W|1M)$/.test(resolution ?? '');
 }
 
 export function normalizeMarkers(value: unknown): ChartMarker[] | null {
@@ -50,7 +74,7 @@ export function loadMarkerScopes(storage: StorageLike): Map<string, ChartMarker[
     const parsed = JSON.parse(storage.getItem(MARKER_STORAGE_KEY) ?? 'null');
     if (parsed?.version !== 1 || !parsed.scopes || typeof parsed.scopes !== 'object') return scopes;
     for (const [scope, value] of Object.entries(parsed.scopes).slice(0, MAX_SCOPES)) {
-      if (!/^(SH|SZ|BJ):\d{6}\|(none|qfq)\|(1|5|15|30|60|1D|1W|1M)$/.test(scope)) continue;
+      if (!isMarkerScope(scope)) continue;
       const markers = normalizeMarkers(value);
       if (markers) scopes.set(scope, markers);
     }

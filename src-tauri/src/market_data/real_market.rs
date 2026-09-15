@@ -90,6 +90,7 @@ fn real_market_matrix() {
     );
 
     let routed = market_router::fetch_history(HistoryRequest {
+        provider_id: "tdx".to_string(),
         symbol: Symbol::new("SH", "600000").unwrap(),
         kind: SymbolKind::Stock,
         resolution: Resolution::Day,
@@ -100,6 +101,10 @@ fn real_market_matrix() {
     .expect("Rust router must preserve the existing TDX history path");
     assert_eq!(routed.diagnostics.source, "tradeflow-tdx");
     validate("router:stock:600000:1D:none", &routed.bars, false);
+    assert!(
+        routed.quote.as_ref().is_some_and(|quote| quote.is_valid()),
+        "router:stock:600000:1D:none: declared quote capability returned no valid quote"
+    );
 
     let composite = fetch(
         &healthy,

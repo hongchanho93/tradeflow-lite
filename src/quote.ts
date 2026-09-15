@@ -9,6 +9,28 @@ export type QuoteSnapshot = {
   receivedAt: number;
 };
 
+export type QuoteResponse = {
+  providerId: string;
+  symbol: string;
+  source: string;
+  quote: QuoteSnapshot;
+};
+
+export function shouldFetchStandaloneQuote(
+  hasHistoryQuote: boolean,
+  providerSupportsQuote: boolean,
+): boolean {
+  return providerSupportsQuote && !hasHistoryQuote;
+}
+
+export function matchesQuoteResponse(
+  response: Pick<QuoteResponse, 'providerId' | 'symbol'> | null | undefined,
+  providerId: string,
+  symbol: string,
+): boolean {
+  return response?.providerId === providerId && response.symbol === symbol;
+}
+
 export function isUsableQuote(quote: QuoteSnapshot): boolean {
   const values = [
     quote.last,

@@ -51,8 +51,17 @@ export class HistoryMemoryCache<T> {
   }
 }
 
-export function historyCacheKey(symbol: string, resolution: string, adjustment: string) {
-  return `${symbol}|${resolution}|${adjustment}`;
+export function historyCacheKey(symbol: string, resolution: string, adjustment: string): string;
+export function historyCacheKey(providerId: string, symbol: string, resolution: string, adjustment: string): string;
+export function historyCacheKey(
+  first: string,
+  second: string,
+  third: string,
+  fourth?: string,
+): string {
+  return fourth === undefined
+    ? `${first}|${second}|${third}`
+    : `${first}|${second}|${third}|${fourth}`;
 }
 
 export function deepHistoryBars(resolution: string) {

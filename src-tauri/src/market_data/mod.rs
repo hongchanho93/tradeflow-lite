@@ -18,8 +18,8 @@ mod real_market;
 use serde::Serialize;
 
 use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
-use crate::tdx::SecurityCode;
-use crate::tdx::standard::Market;
+use crate::tdx::standard::{Market, SecurityQuotes};
+use crate::tdx::{SecurityCode, Session};
 use history::HistoryQuery;
 pub use hosts::HostProbe;
 pub use quote::QuoteSnapshot;
@@ -69,7 +69,7 @@ pub fn benchmark_hosts() -> Result<HostBenchmarkResponse, AppError> {
     })
 }
 
-pub fn fetch_history_bars(
+pub(crate) fn fetch_history_bars_raw(
     symbol: Symbol,
     kind: SymbolKind,
     resolution: Resolution,
@@ -142,10 +142,6 @@ pub fn fetch_history_bars(
             repairs.non_positive_adjusted_bars
         );
     }
-    match adjustment {
-        Adjustment::None => Bar::validate_series(&bars)?,
-        Adjustment::Qfq => Bar::validate_adjusted_series(&bars)?,
-    }
     hosts::record_attempts(Some(&success.host), &success.attempts);
     let quote = quote.filter(|quote| {
         let valid = quote.is_valid();
@@ -165,6 +161,71 @@ pub fn fetch_history_bars(
         },
         quote,
     })
+}
+
+/// 保留给旧的直接 helper 调用方的可信边界。经由 `MarketRouter` 的生产路径使用
+/// `fetch_history_bars_raw`，由通用路由器统一执行一次批次校验。
+#[allow(dead_code)]
+pub fn fetch_history_bars(
+    symbol: Symbol,
+    kind: SymbolKind,
+    resolution: Resolution,
+    adjustment: Adjustment,
+    count: usize,
+    include_quote: bool,
+) -> Result<HistoryResponse, AppError> {
+    let response =
+        fetch_history_bars_raw(symbol, kind, resolution, adjustment, count, include_quote)?;
+    match adjustment {
+        Adjustment::None => Bar::validate_series(&response.bars)?,
+        Adjustment::Qfq => Bar::validate_adjusted_series(&response.bars)?,
+    }
+    Ok(response)
+}
+
+/// 通过与历史相同的 TDX 主站池读取一份报价快照。
+///
+/// 每次尝试都在同一条可复用连接上完成；失败时丢弃该次尝试并换站，不把不同主站的
+/// 字段拼成一份快照。历史适配器仍保留其“同一请求同时取报价”的旧路径，外部 quote
+/// facet 使用这个独立入口时不会改变历史批次语义。
+pub fn fetch_quote_snapshot(symbol: Symbol, kind: SymbolKind) -> Result<QuoteSnapshot, AppError> {
+    let (exchange, code) = symbol.parts();
+    let market = tdx_market(exchange)?;
+    let security_code = SecurityCode::new(code)
+        .map_err(|error| AppError::new("invalid_symbol", error.to_string()))?;
+    let hosts = hosts::ordered_hosts();
+    let success = hosts::run_with_failover(&hosts, |host| {
+        hosts::connect_and_run(host, |client| {
+            let quote = client
+                .call(&SecurityQuotes {
+                    securities: vec![(market, security_code)],
+                })
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "quote response was empty".to_string())?;
+            let quote = QuoteSnapshot::from_tdx(&quote, &kind);
+            if quote.is_valid() {
+                Ok(quote)
+            } else {
+                Err("quote response was invalid".to_string())
+            }
+        })
+    })
+    .map_err(|attempts| {
+        hosts::record_attempts(None, &attempts);
+        let detail = attempts
+            .iter()
+            .map(|attempt| format!("{} {}", attempt.host, attempt.error))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        AppError::new(
+            "market_data_unavailable",
+            format!("all Lite hosts failed for quote; {detail}"),
+        )
+    })?;
+    hosts::record_attempts(Some(&success.host), &success.attempts);
+    Ok(success.value)
 }
 
 #[cfg(test)]

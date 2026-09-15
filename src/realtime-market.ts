@@ -1,17 +1,21 @@
 export type RealtimeBarEvent<TBar> = {
   requestId: number;
+  providerId: string;
   symbol: string;
   resolution: string;
+  sequence?: number | null;
   bar: TBar;
   closed: boolean;
   eventTimeMs: number;
-  source: 'aggTrade' | 'kline';
+  source: string;
 };
 
 export type RealtimeStatusEvent = {
   requestId: number;
+  providerId: string;
   symbol: string;
   resolution: string;
+  sequence?: number | null;
   status: 'connecting' | 'connected' | 'reconnecting';
   message?: string;
 };
@@ -20,37 +24,60 @@ export type RealtimePriceLevel = { price: number; quantity: number };
 
 export type RealtimeDepthEvent = {
   requestId: number;
+  providerId: string;
   symbol: string;
   resolution: string;
-  lastUpdateId: number;
+  sequence?: number | null;
+  eventTimeMs: number;
   bids: RealtimePriceLevel[];
   asks: RealtimePriceLevel[];
 };
 
 export type RealtimeTradeEvent = {
   requestId: number;
+  providerId: string;
   symbol: string;
   resolution: string;
-  aggregateTradeId: number;
+  sequence?: number | null;
+  tradeId: number;
   tradeTimeMs: number;
   price: number;
   quantity: number;
-  buyerIsMaker: boolean;
+  side?: string | null;
+  flags?: number | null;
 };
+
+export type RealtimeSequenceChannel = 'bar' | 'depth' | 'trade';
+
+export function realtimeSequenceKey(
+  event: { requestId: number; providerId: string; symbol: string; resolution: string },
+  channel: RealtimeSequenceChannel,
+) {
+  return `${event.requestId}:${event.providerId}:${event.symbol}:${event.resolution}:${channel}`;
+}
 
 export function realtimeRequestSeed(nowMs: number) {
   return Math.trunc(nowMs) * 1_000;
 }
 
 export function matchesRealtimeSelection(
-  event: { requestId: number; symbol: string; resolution: string },
+  event: { requestId: number; providerId?: string; symbol: string; resolution: string },
   requestId: number,
   symbol: string,
   resolution: string,
+  providerId?: string,
 ) {
   return event.requestId === requestId
+    && (providerId === undefined || event.providerId === providerId)
     && event.symbol === symbol
     && event.resolution === resolution;
+}
+
+export function isRealtimeSequenceFresh(
+  sequence: number | null | undefined,
+  previousSequence: number | null | undefined,
+) {
+  return sequence == null || previousSequence == null || sequence > previousSequence;
 }
 
 export function canApplyRealtimeBar(

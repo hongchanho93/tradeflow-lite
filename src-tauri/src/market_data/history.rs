@@ -114,13 +114,24 @@ pub(crate) fn load_history<S: Session<Standard>>(
             .count();
     }
     let quote = if query.include_quote {
-        session
+        match session
             .call(&SecurityQuotes {
                 securities: vec![(query.market, query.code)],
             })
-            .map_err(|error| error.to_string())?
-            .first()
-            .map(|quote| QuoteSnapshot::from_tdx(quote, &query.kind))
+            .map_err(|error| error.to_string())
+        {
+            Ok(quotes) => quotes
+                .first()
+                .map(|quote| QuoteSnapshot::from_tdx(quote, &query.kind)),
+            Err(error) => {
+                eprintln!(
+                    "market.history.quote_degraded provider=tdx market={} code={} message={error}",
+                    query.market.code(),
+                    query.code
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -367,6 +378,7 @@ mod tests {
     pub(crate) struct FakeSession {
         pub calls: Vec<String>,
         pub responses: VecDeque<Box<dyn Any>>,
+        pub quote_error: bool,
     }
 
     impl Session<Standard> for FakeSession {
@@ -391,6 +403,10 @@ mod tests {
                 self.calls.push("xdxr".to_string());
             } else if request.downcast_ref::<SecurityQuotes>().is_some() {
                 self.calls.push("quotes".to_string());
+                if self.quote_error {
+                    self.quote_error = false;
+                    return Err(TdxError::Broken);
+                }
             }
             let response = self.responses.pop_front().expect("fake response queued");
             Ok(*response
@@ -483,6 +499,23 @@ mod tests {
         .unwrap();
         assert_eq!(session.calls, ["security_bars 0 300"]);
         assert_eq!(data.bars.len(), 2);
+    }
+
+    #[test]
+    fn quote_failure_keeps_valid_history_bars() {
+        let mut session = FakeSession::default();
+        session.quote_error = true;
+        session
+            .responses
+            .push_back(Box::new(vec![raw(11, 0.0), raw(12, 0.0)]));
+        let mut query = query(SymbolKind::Stock, Resolution::Day, Adjustment::None, 2);
+        query.include_quote = true;
+
+        let data = load_history(&mut session, &query, today()).unwrap();
+
+        assert_eq!(session.calls, ["security_bars 0 2", "quotes"]);
+        assert_eq!(data.bars.len(), 2);
+        assert!(data.quote.is_none());
     }
 
     #[test]

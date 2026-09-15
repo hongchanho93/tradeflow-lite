@@ -8,11 +8,92 @@ export type MarketSymbol = {
   symbol: string;
   code: string;
   name: string;
-  exchange: 'SH' | 'SZ' | 'BJ' | 'BINANCE' | 'BINANCE_USDM';
+  /** Legacy display/routing alias. New callers should use providerId + venue. */
+  exchange: string;
+  providerId: string;
+  providerDisplayName: string;
+  venue: string;
   kind: MarketSymbolKind;
+  realtime?: boolean;
+  /** Provider capability snapshot used when history omits a quote. */
+  quote?: boolean;
+  baseAsset?: string;
   quoteAsset?: string;
   aliases?: string[];
 };
+
+const MARKET_SYMBOL_COMPONENT = /^[A-Z0-9._-]+$/;
+
+export function isCanonicalMarketSymbol(value: string): boolean {
+  const parts = value.split(':');
+  return parts.length === 2
+    && parts[0].length >= 1
+    && parts[0].length <= 32
+    && parts[1].length >= 1
+    && parts[1].length <= 96
+    && MARKET_SYMBOL_COMPONENT.test(parts[0])
+    && MARKET_SYMBOL_COMPONENT.test(parts[1])
+    && value === `${parts[0].toUpperCase()}:${parts[1].toUpperCase()}`;
+}
+
+export function marketProviderKey(providerId: string, symbol: string): string {
+  return `${providerId}|${symbol}`;
+}
+
+export type MarketProviderCapabilities = {
+  catalog: boolean;
+  history: boolean;
+  quote: boolean;
+  realtime: boolean;
+  venues: string[];
+  kinds: MarketSymbolKind[];
+  resolutions: string[];
+  adjustments: string[];
+};
+
+export type MarketProviderDescriptor = {
+  id: string;
+  displayName: string;
+  version: string;
+  contractVersion: string;
+  enabled: boolean;
+  capabilities: MarketProviderCapabilities;
+};
+
+export type MarketCatalogSymbol = {
+  providerId: string;
+  symbol: string;
+  name: string;
+  kind: MarketSymbolKind;
+  baseAsset?: string | null;
+  quoteAsset?: string | null;
+};
+
+export function marketSymbolFromCatalog(
+  row: MarketCatalogSymbol,
+  descriptor: MarketProviderDescriptor,
+  venue: string,
+): MarketSymbol {
+  const [, rawCode = row.symbol] = row.symbol.split(':', 2);
+  const code = row.baseAsset && row.quoteAsset
+    ? `${row.baseAsset}/${row.quoteAsset}`
+    : rawCode;
+  return {
+    symbol: row.symbol,
+    code,
+    name: row.name,
+    exchange: venue,
+    providerId: row.providerId,
+    providerDisplayName: descriptor.displayName,
+    venue,
+    kind: row.kind,
+    realtime: descriptor.enabled && descriptor.capabilities.realtime,
+    quote: descriptor.enabled && descriptor.capabilities.quote,
+    baseAsset: row.baseAsset ?? undefined,
+    quoteAsset: row.quoteAsset ?? undefined,
+    aliases: [rawCode, row.name],
+  };
+}
 
 export function normalizeSearchText(value: string): string {
   return value.normalize('NFKC').trim().toLocaleLowerCase('zh-CN').replace(/[\s/:._-]+/g, '');

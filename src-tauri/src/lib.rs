@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod market_adapter;
 mod market_data;
 mod market_providers;
 pub mod market_router;
@@ -10,52 +11,124 @@ use contracts::{
     SymbolKind,
 };
 use market_data::{HistoryResponse, HostBenchmarkResponse};
-use market_router::HistoryRequest;
+use market_router::{
+    CatalogRequest, CatalogSymbol, HistoryRequest, MarketRouter, ProviderDescriptor, QuoteRequest,
+    QuoteResponse,
+};
 use realtime::RealtimeState;
 use tauri::{AppHandle, State};
 
 #[cfg(feature = "provider-binance")]
 #[tauri::command]
-async fn list_binance_spot_symbols() -> Result<Vec<BinanceSpotSymbol>, AppError> {
-    tauri::async_runtime::spawn_blocking(market_providers::binance::list_spot_symbols)
-        .await
-        .map_err(|error| {
-            AppError::new(
-                "catalog_task_failed",
-                format!("品种目录任务异常结束：{error}"),
-            )
-        })?
+async fn list_binance_spot_symbols(
+    router: State<'_, MarketRouter>,
+) -> Result<Vec<BinanceSpotSymbol>, AppError> {
+    list_catalog_for_router(
+        router.inner().clone(),
+        "binance_spot".to_string(),
+        "BINANCE".to_string(),
+    )
+    .await
+    .map(|symbols| {
+        symbols
+            .into_iter()
+            .map(|symbol| BinanceSpotSymbol {
+                symbol: symbol
+                    .symbol
+                    .split_once(':')
+                    .map(|parts| parts.1.to_string())
+                    .unwrap_or_else(|| symbol.symbol.clone()),
+                base_asset: symbol.base_asset.unwrap_or_default(),
+                quote_asset: symbol.quote_asset.unwrap_or_default(),
+            })
+            .collect()
+    })
 }
 
 #[cfg(feature = "provider-binance")]
 #[tauri::command]
-async fn list_binance_usd_margined_symbols() -> Result<Vec<BinanceUsdMarginedSymbol>, AppError> {
-    tauri::async_runtime::spawn_blocking(market_providers::binance::list_usd_margined_symbols)
-        .await
-        .map_err(|error| {
-            AppError::new(
-                "catalog_task_failed",
-                format!("品种目录任务异常结束：{error}"),
-            )
-        })?
+async fn list_binance_usd_margined_symbols(
+    router: State<'_, MarketRouter>,
+) -> Result<Vec<BinanceUsdMarginedSymbol>, AppError> {
+    list_catalog_for_router(
+        router.inner().clone(),
+        "binance_usdm".to_string(),
+        "BINANCE_USDM".to_string(),
+    )
+    .await
+    .map(|symbols| {
+        symbols
+            .into_iter()
+            .map(|symbol| BinanceUsdMarginedSymbol {
+                symbol: symbol
+                    .symbol
+                    .split_once(':')
+                    .map(|parts| parts.1.to_string())
+                    .unwrap_or_else(|| symbol.symbol.clone()),
+                base_asset: symbol.base_asset.unwrap_or_default(),
+                quote_asset: symbol.quote_asset.unwrap_or_default(),
+            })
+            .collect()
+    })
 }
 
 #[cfg(not(feature = "provider-binance"))]
 #[tauri::command]
-async fn list_binance_spot_symbols() -> Result<Vec<BinanceSpotSymbol>, AppError> {
-    Err(AppError::new(
-        "market_data_source_unavailable",
-        "Binance 行情适配器未启用",
-    ))
+async fn list_binance_spot_symbols(
+    router: State<'_, MarketRouter>,
+) -> Result<Vec<BinanceSpotSymbol>, AppError> {
+    list_catalog_for_router(
+        router.inner().clone(),
+        "binance_spot".to_string(),
+        "BINANCE".to_string(),
+    )
+    .await
+    .map(|_| Vec::new())
 }
 
 #[cfg(not(feature = "provider-binance"))]
 #[tauri::command]
-async fn list_binance_usd_margined_symbols() -> Result<Vec<BinanceUsdMarginedSymbol>, AppError> {
-    Err(AppError::new(
-        "market_data_source_unavailable",
-        "Binance U 本位行情适配器未启用",
-    ))
+async fn list_binance_usd_margined_symbols(
+    router: State<'_, MarketRouter>,
+) -> Result<Vec<BinanceUsdMarginedSymbol>, AppError> {
+    list_catalog_for_router(
+        router.inner().clone(),
+        "binance_usdm".to_string(),
+        "BINANCE_USDM".to_string(),
+    )
+    .await
+    .map(|_| Vec::new())
+}
+
+async fn list_catalog_for_router(
+    router: MarketRouter,
+    provider_id: String,
+    venue: String,
+) -> Result<Vec<CatalogSymbol>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        router.list_catalog(CatalogRequest { provider_id, venue })
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "catalog_task_failed",
+            format!("品种目录任务异常结束：{error}"),
+        )
+    })?
+}
+
+#[tauri::command]
+fn list_market_providers(router: State<'_, MarketRouter>) -> Vec<ProviderDescriptor> {
+    router.provider_descriptors()
+}
+
+#[tauri::command]
+async fn list_market_catalog(
+    router: State<'_, MarketRouter>,
+    provider_id: String,
+    venue: String,
+) -> Result<Vec<CatalogSymbol>, AppError> {
+    list_catalog_for_router(router.inner().clone(), provider_id, venue).await
 }
 
 #[tauri::command]
@@ -77,6 +150,8 @@ fn benchmark_hosts() -> Result<HostBenchmarkResponse, AppError> {
 
 #[tauri::command]
 async fn get_history_bars(
+    router: State<'_, MarketRouter>,
+    provider_id: String,
     symbol: String,
     kind: SymbolKind,
     resolution: Resolution,
@@ -86,10 +161,12 @@ async fn get_history_bars(
 ) -> Result<HistoryResponse, AppError> {
     let (exchange, code) = symbol
         .split_once(':')
-        .ok_or_else(|| AppError::new("invalid_symbol", "证券代码格式应为 SH:600000"))?;
+        .ok_or_else(|| AppError::new("invalid_symbol", "证券代码格式应为 VENUE:CODE"))?;
     let symbol = Symbol::new(exchange, code)?;
+    let router = router.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        market_router::fetch_history(HistoryRequest {
+        router.fetch_history(HistoryRequest {
+            provider_id,
             symbol,
             kind,
             resolution,
@@ -125,21 +202,53 @@ async fn get_history_bars(
 }
 
 #[tauri::command]
+async fn get_quote_snapshot(
+    router: State<'_, MarketRouter>,
+    provider_id: String,
+    symbol: String,
+    kind: SymbolKind,
+) -> Result<QuoteResponse, AppError> {
+    let (exchange, code) = symbol
+        .split_once(':')
+        .ok_or_else(|| AppError::new("invalid_symbol", "品种代码格式应为 VENUE:CODE"))?;
+    let symbol = Symbol::new(exchange, code)?;
+    let router = router.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        router.fetch_quote(QuoteRequest {
+            provider_id,
+            symbol,
+            kind,
+        })
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "quote_task_failed",
+            format!("行情快照任务异常结束：{error}"),
+        )
+    })?
+}
+
+#[tauri::command]
 fn start_realtime_market(
     app: AppHandle,
     state: State<'_, RealtimeState>,
+    router: State<'_, MarketRouter>,
     request_id: u64,
+    provider_id: String,
     symbol: String,
     kind: SymbolKind,
     resolution: Resolution,
 ) -> Result<(), AppError> {
     let (exchange, code) = symbol
         .split_once(':')
-        .ok_or_else(|| AppError::new("invalid_symbol", "品种代码格式应为 BINANCE:BTCUSDT"))?;
+        .ok_or_else(|| AppError::new("invalid_symbol", "品种代码格式应为 VENUE:CODE"))?;
     realtime::start(
         app,
         &state,
+        router.inner(),
         request_id,
+        provider_id,
         Symbol::new(exchange, code)?,
         kind,
         resolution,
@@ -176,11 +285,17 @@ fn report_realtime_render_health(
     );
 }
 
-pub fn run() {
+/// 使用调用方提供的公开路由器启动 Tauri。外部宿主可构造自己的静态 Registry，
+/// 通过 `MarketRouter::new` 注入后复用同一组命令入口。
+pub fn run_with_router(router: MarketRouter) {
     tauri::Builder::default()
+        .manage(router)
         .manage(RealtimeState::default())
         .invoke_handler(tauri::generate_handler![
             get_history_bars,
+            get_quote_snapshot,
+            list_market_providers,
+            list_market_catalog,
             benchmark_hosts,
             list_binance_spot_symbols,
             list_binance_usd_margined_symbols,
@@ -190,4 +305,9 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TradeFlow Lite");
+}
+
+pub fn run() {
+    let router = MarketRouter::builtin().expect("built-in provider registry must be valid");
+    run_with_router(router);
 }

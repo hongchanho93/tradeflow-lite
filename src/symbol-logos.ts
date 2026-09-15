@@ -6,9 +6,8 @@ const LOGO_CDN = 'https://s3-symbol-logo.tradingview.com';
 // Keeping this crop local avoids the ambiguous TradingView `source/BSE` asset.
 const BJSE_LOGO = new URL('./assets/bjse-logo.svg', import.meta.url).href;
 const CRYPTO_MARKET_LOGO = new URL('./assets/crypto-market.svg', import.meta.url).href;
-type ExchangeProvider = Exclude<MarketSymbol['exchange'], 'BINANCE' | 'BINANCE_USDM'>;
 const manifest = logoManifest as {
-  providers: Record<ExchangeProvider, string>;
+  providers: Record<string, string>;
   logos: Record<string, string>;
 };
 
@@ -20,9 +19,9 @@ export type SymbolLogoUrls = {
 
 export function exchangeLogoUrl(exchange: MarketSymbol['exchange']): string {
   if (exchange === 'BINANCE' || exchange === 'BINANCE_USDM') return CRYPTO_MARKET_LOGO;
-  return exchange === 'BJ'
-    ? BJSE_LOGO
-    : `${LOGO_CDN}/${manifest.providers[exchange]}.svg`;
+  if (exchange === 'BJ') return BJSE_LOGO;
+  const provider = manifest.providers[exchange];
+  return provider ? `${LOGO_CDN}/${provider}.svg` : CRYPTO_MARKET_LOGO;
 }
 
 export function symbolLogoUrls(item: MarketSymbol): SymbolLogoUrls {

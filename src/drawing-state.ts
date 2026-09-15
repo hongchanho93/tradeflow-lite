@@ -1,3 +1,5 @@
+import { isCanonicalMarketSymbol } from './market-universe.ts';
+
 export const DRAWING_STORAGE_KEY = 'tradeflow-lite.drawings.v1';
 const MAX_SCOPES = 200;
 const MAX_DRAWINGS_PER_SCOPE = 500;
@@ -12,8 +14,25 @@ export type DrawingExport = {
   options: Record<string, unknown>;
 };
 
-export function drawingScope(symbol: string, adjustment: string): string {
-  return `${symbol}|${adjustment}`;
+export function drawingScope(symbol: string, adjustment: string, providerId?: string): string {
+  return providerId === undefined
+    ? `${symbol}|${adjustment}`
+    : `${providerId}|${symbol}|${adjustment}`;
+}
+
+function isProviderId(value: string): boolean {
+  return value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function isDrawingScope(scope: string): boolean {
+  const parts = scope.split('|');
+  if (parts.length === 2) {
+    return isCanonicalMarketSymbol(parts[0]) && (parts[1] === 'none' || parts[1] === 'qfq');
+  }
+  return parts.length === 3
+    && isProviderId(parts[0])
+    && isCanonicalMarketSymbol(parts[1])
+    && (parts[2] === 'none' || parts[2] === 'qfq');
 }
 
 function normalizeSnapshot(value: unknown, knownTypes: Set<string>): DrawingExport[] | null {
@@ -52,7 +71,7 @@ export function loadDrawingScopes(storage: StorageLike, knownTypes: Set<string>)
     const parsed = JSON.parse(storage.getItem(DRAWING_STORAGE_KEY) ?? 'null');
     if (parsed?.version !== 1 || !parsed.scopes || typeof parsed.scopes !== 'object') return scopes;
     for (const [scope, value] of Object.entries(parsed.scopes).slice(0, MAX_SCOPES)) {
-      if (!/^(SH|SZ|BJ):\d{6}\|(none|qfq)$/.test(scope)) continue;
+      if (!isDrawingScope(scope)) continue;
       const snapshot = validateDrawingSnapshot(JSON.stringify(value), knownTypes);
       if (snapshot) scopes.set(scope, snapshot);
     }

@@ -110,29 +110,33 @@ import { LatestRequestGate } from './latest-request';
 import { boll, bollBreakouts, ema, macd, rsi, sma, type BollBreakout, type OptionalValue } from './indicators';
 import { marketPollPlan } from './market-session';
 import marketUniversePackage from './market-universe.json';
-import {
-  binanceSpotSymbols,
-  buildBinanceSpotSymbols,
-  type BinanceSpotCatalogSymbol,
-} from './providers/binance/catalog';
-import {
-  binanceUsdMarginedSymbols,
-  buildBinanceUsdMarginedSymbols,
-  type BinanceUsdMarginedCatalogSymbol,
-} from './providers/binance/usdm-catalog';
+import { binanceSpotSymbols } from './providers/binance/catalog';
+import { binanceUsdMarginedSymbols } from './providers/binance/usdm-catalog';
 import {
   listMarketSymbols,
+  marketProviderKey,
+  marketSymbolFromCatalog,
+  type MarketCatalogSymbol,
+  type MarketProviderDescriptor,
   type MarketSearchCategory,
   type MarketSearchSource,
   type MarketSymbol,
 } from './market-universe';
 import { exchangeLogoUrl, symbolLogoUrls } from './symbol-logos';
-import { isUsableQuote, type QuoteSnapshot } from './quote';
+import {
+  isUsableQuote,
+  matchesQuoteResponse,
+  shouldFetchStandaloneQuote,
+  type QuoteResponse,
+  type QuoteSnapshot,
+} from './quote';
 import {
   canApplyRealtimeBar,
+  isRealtimeSequenceFresh,
   marketDataRenderDelay,
   matchesRealtimeSelection,
   REALTIME_FRAME_FALLBACK_MS,
+  realtimeSequenceKey,
   realtimeRequestSeed,
   type RealtimeBarEvent,
   type RealtimeDepthEvent,
@@ -155,7 +159,12 @@ import {
   visibleRangeForPreset,
   type TimeRangePreset,
 } from './time-navigation';
-import { loadWatchlist, moveWatchlistSymbol, saveWatchlist } from './watchlist';
+import {
+  loadWatchlist,
+  moveWatchlistSymbol,
+  saveWatchlist,
+  watchlistSymbolKey,
+} from './watchlist';
 import './style.css';
 
 type Bar = { time: number; open: number; high: number; low: number; close: number; volume: number; amount?: number };
@@ -186,12 +195,73 @@ const drawingToolTypes: DrawingToolType[] = [
 ];
 const knownDrawingTypes = new Set<string>(drawingToolTypes);
 
-let marketSymbols = [
-  ...(marketUniversePackage as { rows: MarketSymbol[] }).rows,
+type LegacyMarketSymbol = Omit<MarketSymbol, 'providerId' | 'providerDisplayName' | 'venue'> & {
+  providerId?: string;
+  providerDisplayName?: string;
+  venue?: string;
+};
+
+const tdxDisplayName = '通达信主站';
+const staticTdxSymbols: MarketSymbol[] = (marketUniversePackage as { rows: LegacyMarketSymbol[] }).rows.map((item) => ({
+  ...item,
+  providerId: item.providerId ?? 'tdx',
+  providerDisplayName: item.providerDisplayName ?? tdxDisplayName,
+  venue: item.venue ?? item.exchange,
+  realtime: item.realtime ?? false,
+  quote: true,
+  baseAsset: item.baseAsset,
+}));
+
+let marketSymbols: MarketSymbol[] = [
+  ...staticTdxSymbols,
   ...binanceSpotSymbols,
   ...binanceUsdMarginedSymbols,
 ];
-const marketSymbolById = new Map(marketSymbols.map((item) => [item.symbol, item]));
+const marketProviderById = new Map<string, MarketProviderDescriptor>();
+const marketSymbolById = new Map<string, MarketSymbol>();
+
+function rebuildMarketSymbolIndex() {
+  marketSymbolById.clear();
+  for (const item of marketSymbols) {
+    // Keep the legacy symbol key for existing local state; provider-qualified keys
+    // are the canonical identity when more than one provider can serve a venue.
+    if (!marketSymbolById.has(item.symbol)) marketSymbolById.set(item.symbol, item);
+    marketSymbolById.set(marketProviderKey(item.providerId, item.symbol), item);
+  }
+}
+
+rebuildMarketSymbolIndex();
+
+function marketSymbolKey(symbol: MarketSymbol): string {
+  return marketProviderKey(symbol.providerId, symbol.symbol);
+}
+
+function legacyMarketSymbolKey(symbol: MarketSymbol): string {
+  return symbol.symbol;
+}
+
+function providerSupportsQuote(symbol: MarketSymbol): boolean {
+  const descriptor = marketProviderById.get(symbol.providerId);
+  return descriptor === undefined
+    ? symbol.quote === true
+    : descriptor.enabled && descriptor.capabilities.quote;
+}
+
+function legacyStateBelongsToProvider(symbol: MarketSymbol): boolean {
+  return marketSymbolById.get(symbol.symbol)?.providerId === symbol.providerId;
+}
+
+function isCurrentMarketSelection(
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+): boolean {
+  return currentSymbol.providerId === symbol.providerId
+    && currentSymbol.symbol === symbol.symbol
+    && currentResolution === resolution
+    && currentAdjustment === adjustment;
+}
+
 const defaultSymbol = marketSymbols.find((item) => item.symbol === 'SH:600000' && item.kind === 'stock')!;
 const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数', crypto: '数字货币' };
 const kindMetaLabels: Record<Exclude<MarketSymbol['kind'], 'crypto'>, string> = { stock: 'stock', etf: 'fund', index: 'index' };
@@ -269,6 +339,9 @@ let latestPollInFlight = false;
 let latestPollTimer: number | undefined;
 let realtimeRequestSequence = realtimeRequestSeed(Date.now());
 let activeRealtimeRequestId = 0;
+let activeRealtimeProviderId = '';
+let activeRealtimeProviderDisplayName = '';
+const lastRealtimeSequenceByChannel = new Map<string, number>();
 let realtimeConnected = false;
 let realtimeBarRequestId = 0;
 let latestDepth: RealtimeDepthEvent | null = null;
@@ -1010,10 +1083,18 @@ function confirmChartSettings() {
 applyChartSettings(chartSettings);
 
 function currentPriceLineSettings(): PriceLineSettings {
-  const existing = chartPreferences.priceLines[currentSymbol.symbol];
-  if (existing) return existing;
+  const key = marketSymbolKey(currentSymbol);
+  const legacyKey = legacyMarketSymbolKey(currentSymbol);
+  const existing = chartPreferences.priceLines[key]
+    ?? (legacyStateBelongsToProvider(currentSymbol) ? chartPreferences.priceLines[legacyKey] : undefined);
+  if (existing) {
+    if (key !== legacyKey && chartPreferences.priceLines[key] === undefined) {
+      chartPreferences.priceLines[key] = existing;
+    }
+    return existing;
+  }
   const created: PriceLineSettings = { previousClose: true, cost: null, custom: [] };
-  chartPreferences.priceLines[currentSymbol.symbol] = created;
+  chartPreferences.priceLines[key] = created;
   return created;
 }
 
@@ -1249,7 +1330,11 @@ function createExchangeBadge(exchange: MarketSymbol['exchange']) {
 }
 
 function persistWatchlist() {
-  if (!saveWatchlist(localStorage, watchlistSymbols)) {
+  const persisted = watchlistSymbols.map((symbolId) => {
+    const item = marketSymbolById.get(symbolId);
+    return item ? watchlistSymbolKey(item.providerId, item.symbol) : symbolId;
+  });
+  if (!saveWatchlist(localStorage, persisted)) {
     errorLayer.hidden = false;
     errorLayer.textContent = '自选保存失败：本地存储当前不可用';
   }
@@ -1258,7 +1343,9 @@ function persistWatchlist() {
 function renderWatchlist() {
   watchlistItems.replaceChildren();
   watchlistEmpty.hidden = watchlistSymbols.length > 0;
-  const containsCurrent = watchlistSymbols.includes(currentSymbol.symbol);
+  const currentWatchlistKey = watchlistSymbolKey(currentSymbol.providerId, currentSymbol.symbol);
+  const containsCurrent = watchlistSymbols.includes(currentWatchlistKey)
+    || (legacyStateBelongsToProvider(currentSymbol) && watchlistSymbols.includes(currentSymbol.symbol));
   watchlistAdd.classList.toggle('active', containsCurrent);
   watchlistAdd.title = containsCurrent ? '从自选移除' : '添加到自选';
   watchlistAdd.setAttribute('aria-label', containsCurrent ? '从自选移除当前证券' : '添加当前证券到自选');
@@ -1267,7 +1354,8 @@ function renderWatchlist() {
     const item = marketSymbolById.get(symbolId);
     if (!item) continue;
     const row = document.createElement('div');
-    row.className = `watchlist-row${symbolId === currentSymbol.symbol ? ' current' : ''}`;
+    row.className = `watchlist-row${symbolId === currentWatchlistKey
+      || (legacyStateBelongsToProvider(currentSymbol) && symbolId === currentSymbol.symbol) ? ' current' : ''}`;
     const openButton = document.createElement('button');
     openButton.className = 'watchlist-open';
     openButton.innerHTML = '<strong></strong><span></span>';
@@ -1314,9 +1402,26 @@ function formatMarketQuantity(value: number): string {
 
 const marketQuantityFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 8 });
 
-function isBinanceMarketDataSupported() {
-  return currentSymbol.kind === 'crypto'
-    && (currentSymbol.exchange === 'BINANCE' || currentSymbol.exchange === 'BINANCE_USDM');
+function isRealtimeMarketDataSupported() {
+  return currentSymbol.realtime === true;
+}
+
+function realtimeProviderId(symbol: MarketSymbol): string {
+  return symbol.providerId;
+}
+
+function acceptsRealtimeSequence(
+  event: { requestId: number; providerId: string; symbol: string; resolution: string; sequence?: number | null },
+  channel: 'bar' | 'depth' | 'trade',
+) {
+  if (event.sequence == null) return true;
+  const key = realtimeSequenceKey(event, channel);
+  const previous = lastRealtimeSequenceByChannel.get(key);
+  if (!isRealtimeSequenceFresh(event.sequence, previous)) return false;
+  if (previous === undefined || event.sequence > previous) {
+    lastRealtimeSequenceByChannel.set(key, event.sequence);
+  }
+  return true;
 }
 
 function ensureMarketRows(container: HTMLElement, count: number, baseClass: string) {
@@ -1377,7 +1482,7 @@ function renderMarketTrades() {
   const rows = ensureMarketRows(marketTrades, recentTrades.length, 'market-trade-row');
   for (const [index, trade] of recentTrades.entries()) {
     const row = rows[index];
-    row.className = `market-trade-row ${trade.buyerIsMaker ? 'sell' : 'buy'}`;
+    row.className = `market-trade-row ${trade.side === 'sell' ? 'sell' : trade.side === 'buy' ? 'buy' : ''}`;
     row.children[0].textContent = realtimeTimeFormatter.format(new Date(trade.tradeTimeMs));
     row.children[1].textContent = formatMarketPrice(trade.price);
     row.children[2].textContent = formatMarketQuantity(trade.quantity);
@@ -1385,7 +1490,7 @@ function renderMarketTrades() {
 }
 
 function renderMarketDataPanel() {
-  const supported = isBinanceMarketDataSupported();
+  const supported = isRealtimeMarketDataSupported();
   marketDataSymbol.textContent = currentSymbol.code;
   marketDataTitle.textContent = activeMarketDataTab === 'depth' ? '盘口' : '成交';
   marketDataUnavailable.hidden = supported;
@@ -1449,6 +1554,10 @@ const drawingToolNames: Record<string, string> = {
 };
 
 function currentDrawingScope() {
+  return drawingScope(currentSymbol.symbol, currentAdjustment, currentSymbol.providerId);
+}
+
+function legacyDrawingScope() {
   return drawingScope(currentSymbol.symbol, currentAdjustment);
 }
 
@@ -1467,11 +1576,17 @@ function currentDrawingExports(): DrawingExport[] {
 }
 
 function currentMarkerScope() {
+  return markerScope(currentSymbol.symbol, currentAdjustment, currentResolution, currentSymbol.providerId);
+}
+
+function legacyMarkerScope() {
   return markerScope(currentSymbol.symbol, currentAdjustment, currentResolution);
 }
 
 function currentMarkers() {
-  return markerScopes.get(currentMarkerScope()) ?? [];
+  return markerScopes.get(currentMarkerScope())
+    ?? (legacyStateBelongsToProvider(currentSymbol) ? markerScopes.get(legacyMarkerScope()) : undefined)
+    ?? [];
 }
 
 function persistMarkers(markers: ChartMarker[]) {
@@ -1935,9 +2050,15 @@ function applyDrawingSnapshot(snapshot: string): boolean {
 }
 
 function restoreDrawingScope() {
-  let snapshot = drawingScopes.get(currentDrawingScope()) ?? '[]';
+  const scope = currentDrawingScope();
+  const legacyScope = legacyDrawingScope();
+  const legacySnapshot = legacyStateBelongsToProvider(currentSymbol)
+    ? drawingScopes.get(legacyScope)
+    : undefined;
+  let snapshot = drawingScopes.get(scope) ?? legacySnapshot ?? '[]';
+  if (!drawingScopes.has(scope) && legacySnapshot !== undefined) drawingScopes.set(scope, snapshot);
   if (!applyDrawingSnapshot(snapshot)) {
-    drawingScopes.delete(currentDrawingScope());
+    drawingScopes.delete(scope);
     snapshot = '[]';
     persistDrawingSnapshot(snapshot);
     errorLayer.hidden = false;
@@ -2436,48 +2557,54 @@ function closeSymbolResults() {
   activeSymbolResult = -1;
 }
 
-async function loadBinanceSpotCatalog() {
+async function loadMarketCatalogs() {
   try {
-    const rows = await invoke<BinanceSpotCatalogSymbol[]>('list_binance_spot_symbols');
-    const dynamicSymbols = buildBinanceSpotSymbols(rows);
-    if (!dynamicSymbols.length) throw new Error('币安返回的现货目录为空');
-    marketSymbols = [
-      ...marketSymbols.filter((item) => item.exchange !== 'BINANCE'),
-      ...dynamicSymbols,
-    ];
-    marketSymbolById.clear();
-    for (const item of marketSymbols) marketSymbolById.set(item.symbol, item);
-    renderWatchlist();
-    if (!symbolDialogLayer.hidden) renderSymbolResults();
-    console.info('market.catalog.ready', { source: 'binance', symbols: dynamicSymbols.length });
+    const descriptors = await invoke<MarketProviderDescriptor[]>('list_market_providers');
+    marketProviderById.clear();
+    for (const descriptor of descriptors) marketProviderById.set(descriptor.id, descriptor);
+    let loaded = 0;
+    for (const descriptor of descriptors) {
+      if (!descriptor.enabled || !descriptor.capabilities.catalog) continue;
+      for (const venue of descriptor.capabilities.venues) {
+        try {
+          const rows = await invoke<MarketCatalogSymbol[]>('list_market_catalog', {
+            providerId: descriptor.id,
+            venue,
+          });
+          const dynamicSymbols = rows
+            .filter((row) => row.providerId === descriptor.id)
+            .map((row) => marketSymbolFromCatalog(row, descriptor, venue));
+          if (!dynamicSymbols.length) continue;
+          marketSymbols = [
+            ...marketSymbols.filter((item) => !(item.providerId === descriptor.id && item.venue === venue)),
+            ...dynamicSymbols,
+          ];
+          loaded += dynamicSymbols.length;
+          console.info('market.catalog.ready', {
+            providerId: descriptor.id,
+            provider: descriptor.displayName,
+            venue,
+            symbols: dynamicSymbols.length,
+          });
+        } catch (error) {
+          console.warn('market.catalog.fallback', {
+            providerId: descriptor.id,
+            provider: descriptor.displayName,
+            venue,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    if (loaded > 0) {
+      rebuildMarketSymbolIndex();
+      renderWatchlist();
+      if (!symbolDialogLayer.hidden) renderSymbolResults();
+    }
   } catch (error) {
-    console.warn('market.catalog.fallback', {
-      source: 'binance',
-      symbols: binanceSpotSymbols.length,
+    console.warn('market.catalog.descriptors_unavailable', {
       error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-async function loadBinanceUsdMarginedCatalog() {
-  try {
-    const rows = await invoke<BinanceUsdMarginedCatalogSymbol[]>('list_binance_usd_margined_symbols');
-    const dynamicSymbols = buildBinanceUsdMarginedSymbols(rows);
-    if (!dynamicSymbols.length) throw new Error('币安返回的 U 本位永续目录为空');
-    marketSymbols = [
-      ...marketSymbols.filter((item) => item.exchange !== 'BINANCE_USDM'),
-      ...dynamicSymbols,
-    ];
-    marketSymbolById.clear();
-    for (const item of marketSymbols) marketSymbolById.set(item.symbol, item);
-    renderWatchlist();
-    if (!symbolDialogLayer.hidden) renderSymbolResults();
-    console.info('market.catalog.ready', { source: 'binance_usdm', symbols: dynamicSymbols.length });
-  } catch (error) {
-    console.warn('market.catalog.fallback', {
-      source: 'binance_usdm',
-      symbols: binanceUsdMarginedSymbols.length,
-      error: error instanceof Error ? error.message : String(error),
+      curated: binanceSpotSymbols.length + binanceUsdMarginedSymbols.length,
     });
   }
 }
@@ -2546,7 +2673,7 @@ function appendNextSymbolResults() {
     button.querySelector('strong')!.textContent = item.name;
     const kind = button.querySelector('.symbol-result-kind')!;
     const marketType = item.kind === 'crypto'
-      ? item.exchange === 'BINANCE_USDM' ? 'perpetual' : 'spot'
+      ? item.providerDisplayName
       : kindMetaLabels[item.kind];
     kind.append(document.createTextNode(marketType), createExchangeBadge(item.exchange));
     button.title = `${item.code} ${item.name} ${kindLabels[item.kind]} ${item.exchange}`;
@@ -2593,10 +2720,109 @@ function resolveInputSymbol(): MarketSymbol | undefined {
   return listMarketSymbols(marketSymbols, query, activeSymbolCategory, activeSymbolSource, 1)[0];
 }
 
+function isCurrentQuoteRequest(symbol: MarketSymbol, generation: number): boolean {
+  return historyRequestGate.isCurrent(generation)
+    && currentSymbol.providerId === symbol.providerId
+    && currentSymbol.symbol === symbol.symbol;
+}
+
+async function requestStandaloneQuote(
+  symbol: MarketSymbol,
+  generation: number,
+): Promise<QuoteSnapshot | null> {
+  if (!isCurrentQuoteRequest(symbol, generation)) return null;
+  const response = await invoke<QuoteResponse>('get_quote_snapshot', {
+    providerId: symbol.providerId,
+    symbol: symbol.symbol,
+    kind: symbol.kind,
+  });
+  if (!isCurrentQuoteRequest(symbol, generation)) {
+    console.info('market.quote.stale', {
+      providerId: response.providerId,
+      symbol: response.symbol,
+      expectedProviderId: symbol.providerId,
+      expectedSymbol: symbol.symbol,
+      generation,
+    });
+    return null;
+  }
+  if (!matchesQuoteResponse(response, symbol.providerId, symbol.symbol)) {
+    console.warn('market.quote.identity_mismatch', {
+      providerId: response.providerId,
+      symbol: response.symbol,
+      expectedProviderId: symbol.providerId,
+      expectedSymbol: symbol.symbol,
+      generation,
+    });
+    return null;
+  }
+  if (!isUsableQuote(response.quote)) {
+    console.warn('market.quote.invalid', {
+      providerId: symbol.providerId,
+      symbol: symbol.symbol,
+      generation,
+    });
+    return null;
+  }
+  return response.quote;
+}
+
+async function refreshMissingHistoryQuote(
+  response: HistoryResponse,
+  symbol: MarketSymbol,
+  resolution: Resolution,
+  adjustment: Adjustment,
+  generation: number,
+) {
+  if (!shouldFetchStandaloneQuote(response.quote != null, providerSupportsQuote(symbol))) return;
+  let quote: QuoteSnapshot | null = null;
+  try {
+    quote = await requestStandaloneQuote(symbol, generation);
+  } catch (error) {
+    if (!isCurrentQuoteRequest(symbol, generation)) return;
+    console.warn('market.quote.fallback_failed', {
+      providerId: symbol.providerId,
+      symbol: symbol.symbol,
+      generation,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (!isCurrentQuoteRequest(symbol, generation)) return;
+  if (!quote) {
+    status.className = 'connection-status ready';
+    status.querySelector('span')!.textContent = `${symbol.providerDisplayName} · 报价降级，保留 K 线`;
+    return;
+  }
+  currentQuote = quote;
+  renderPriceLines();
+  showCurrentSnapshot();
+  const cacheKey = historyCacheKey(symbol.providerId, symbol.symbol, resolution, adjustment);
+  const cached = historyCache.get(cacheKey);
+  if (cached) historyCache.set(cacheKey, { ...cached.value, quote }, cached.deep);
+}
+
 async function selectSymbol(symbol: MarketSymbol) {
   input.value = symbol.code;
   closeSymbolResults();
   await openHistory(symbol, currentResolution, symbol.kind === 'crypto' ? 'none' : currentAdjustment);
+}
+
+function marketHistoryCacheKey(symbol: MarketSymbol, resolution: Resolution, adjustment: Adjustment): string {
+  return historyCacheKey(symbol.providerId, symbol.symbol, resolution, adjustment);
+}
+
+function legacyHistoryCacheKey(symbol: MarketSymbol, resolution: Resolution, adjustment: Adjustment): string {
+  return historyCacheKey(symbol.symbol, resolution, adjustment);
+}
+
+function getHistoryCache(symbol: MarketSymbol, resolution: Resolution, adjustment: Adjustment) {
+  const key = marketHistoryCacheKey(symbol, resolution, adjustment);
+  const current = historyCache.get(key);
+  if (current) return current;
+  if (!legacyStateBelongsToProvider(symbol)) return undefined;
+  const legacy = historyCache.get(legacyHistoryCacheKey(symbol, resolution, adjustment));
+  if (legacy) historyCache.set(key, legacy.value, legacy.deep);
+  return legacy;
 }
 
 function requestHistory(
@@ -2605,11 +2831,12 @@ function requestHistory(
   adjustment: Adjustment,
   count: number,
 ) {
-  const requestKey = `${historyCacheKey(symbol.symbol, resolution, adjustment)}|${count}`;
+  const requestKey = `${marketHistoryCacheKey(symbol, resolution, adjustment)}|${count}`;
   const existing = historyRequests.get(requestKey);
   if (existing) return existing;
   const request = invoke<HistoryResponse>('get_history_bars', {
     symbol: symbol.symbol,
+    providerId: symbol.providerId,
     kind: symbol.kind,
     resolution,
     adjustment,
@@ -2650,15 +2877,16 @@ function showHistory(
   source: 'network' | 'memory',
 ) {
   const previousDrawingScope = currentDrawingScope();
-  const nextDrawingScope = drawingScope(symbol.symbol, adjustment);
-  const priceScopeChanged = currentSymbol.symbol !== symbol.symbol
+  const nextDrawingScope = drawingScope(symbol.symbol, adjustment, symbol.providerId);
+  const priceScopeChanged = currentSymbol.providerId !== symbol.providerId
+    || currentSymbol.symbol !== symbol.symbol
     || currentResolution !== resolution
     || currentAdjustment !== adjustment;
   if (previousDrawingScope !== nextDrawingScope) commitDrawingState();
   currentSymbol = symbol;
   currentResolution = resolution;
   currentAdjustment = adjustment;
-  currentQuote = null;
+  currentQuote = response.quote && isUsableQuote(response.quote) ? response.quote : null;
   resetMarketData();
   if (priceScopeChanged && !priceScaleAuto) {
     priceScaleAuto = true;
@@ -2694,8 +2922,8 @@ function showHistory(
   showLatest(response.bars);
   status.className = 'connection-status ready';
   status.querySelector('span')!.textContent = source === 'memory'
-    ? `缓存 · ${response.diagnostics.host}`
-    : `${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+    ? `${symbol.providerDisplayName} · 缓存 · ${response.diagnostics.host}`
+    : `${symbol.providerDisplayName} · ${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
 }
 
 function clearDeepHistoryTimer() {
@@ -2709,12 +2937,12 @@ async function loadDeepHistory(
   resolution: Resolution,
   adjustment: Adjustment,
 ) {
-  const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
-  if (historyCache.get(cacheKey)?.deep || deepHistoryLoading.has(cacheKey)) return;
+  const cacheKey = marketHistoryCacheKey(symbol, resolution, adjustment);
+  if (getHistoryCache(symbol, resolution, adjustment)?.deep || deepHistoryLoading.has(cacheKey)) return;
   deepHistoryLoading.add(cacheKey);
   try {
     const response = await requestHistory(symbol, resolution, adjustment, deepHistoryBars(resolution));
-    const cached = historyCache.get(cacheKey);
+    const cached = getHistoryCache(symbol, resolution, adjustment);
     const cachedLastTime = cached?.value.bars.at(-1)?.time ?? 0;
     const responseLastTime = response.bars.at(-1)?.time ?? 0;
     if (responseLastTime < cachedLastTime) {
@@ -2727,9 +2955,7 @@ async function loadDeepHistory(
       });
       return;
     }
-    const isCurrentRequest = currentSymbol.symbol === symbol.symbol
-      && currentResolution === resolution
-      && currentAdjustment === adjustment;
+    const isCurrentRequest = isCurrentMarketSelection(symbol, resolution, adjustment);
     const displayResponse = isCurrentRequest
       ? {
           ...response,
@@ -2746,6 +2972,7 @@ async function loadDeepHistory(
     showLatest(displayResponse.bars);
     console.info('market.history.deep_ready', {
       symbol: symbol.symbol,
+      providerId: symbol.providerId,
       resolution,
       adjustment,
       bars: response.bars.length,
@@ -2760,9 +2987,7 @@ async function loadDeepHistory(
     });
   } finally {
     deepHistoryLoading.delete(cacheKey);
-    if (currentSymbol.symbol === symbol.symbol
-      && currentResolution === resolution
-      && currentAdjustment === adjustment) scheduleLatestPoll(0);
+    if (isCurrentMarketSelection(symbol, resolution, adjustment)) scheduleLatestPoll(0);
   }
 }
 
@@ -2772,8 +2997,8 @@ function scheduleDeepHistory(
   adjustment: Adjustment,
   delayMs = DEEP_HISTORY_DELAY_MS,
 ) {
-  const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
-  if (historyCache.get(cacheKey)?.deep || deepHistoryLoading.has(cacheKey)) return;
+  const cacheKey = marketHistoryCacheKey(symbol, resolution, adjustment);
+  if (getHistoryCache(symbol, resolution, adjustment)?.deep || deepHistoryLoading.has(cacheKey)) return;
   if (deepHistoryTimer !== undefined && deepHistoryTimerKey === cacheKey) return;
   clearDeepHistoryTimer();
   deepHistoryTimerKey = cacheKey;
@@ -2802,11 +3027,18 @@ async function openHistory(
   if (latestPollTimer !== undefined) window.clearTimeout(latestPollTimer);
   latestPollTimer = undefined;
   errorLayer.hidden = true;
-  const cacheKey = historyCacheKey(match.symbol, requestedResolution, requestedAdjustment);
-  const cached = historyCache.get(cacheKey);
+  const cacheKey = marketHistoryCacheKey(match, requestedResolution, requestedAdjustment);
+  const cached = getHistoryCache(match, requestedResolution, requestedAdjustment);
   if (cached) {
     loadingLayer.hidden = true;
     showHistory(cached.value, match, requestedResolution, requestedAdjustment, 'memory');
+    void refreshMissingHistoryQuote(
+      cached.value,
+      match,
+      requestedResolution,
+      requestedAdjustment,
+      generation,
+    );
     void startRealtimeMarket(match, requestedResolution, generation);
     console.info('market.history.display', {
       symbol: match.symbol,
@@ -2820,13 +3052,20 @@ async function openHistory(
   }
   loadingLayer.hidden = false;
   status.className = 'connection-status loading';
-  status.querySelector('span')!.textContent = `正在打开 ${match.code}`;
+  status.querySelector('span')!.textContent = `正在打开 ${match.providerDisplayName} · ${match.code}`;
   const startedAt = performance.now();
   try {
     const response = await requestHistory(match, requestedResolution, requestedAdjustment, INITIAL_HISTORY_BARS);
     historyCache.set(cacheKey, response, false);
     if (!historyRequestGate.isCurrent(generation)) return;
     showHistory(response, match, requestedResolution, requestedAdjustment, 'network');
+    void refreshMissingHistoryQuote(
+      response,
+      match,
+      requestedResolution,
+      requestedAdjustment,
+      generation,
+    );
     void startRealtimeMarket(match, requestedResolution, generation);
     console.info('market.history.display', {
       symbol: match.symbol,
@@ -2842,7 +3081,7 @@ async function openHistory(
     errorLayer.hidden = false;
     errorLayer.textContent = `${match.name} 加载失败，图表保留上一份有效数据 · ${message}`;
     status.className = 'connection-status error';
-    status.querySelector('span')!.textContent = '连接异常';
+    status.querySelector('span')!.textContent = `${match.providerDisplayName} 连接异常`;
   } finally {
     if (historyRequestGate.isCurrent(generation)) loadingLayer.hidden = true;
   }
@@ -2857,6 +3096,7 @@ async function pollLatestBars() {
   latestPollInFlight = true;
   try {
     const response = await invoke<HistoryResponse>('get_history_bars', {
+      providerId: symbol.providerId,
       symbol: symbol.symbol,
       kind: symbol.kind,
       resolution,
@@ -2865,14 +3105,39 @@ async function pollLatestBars() {
       includeQuote: true,
     });
     if (!historyRequestGate.isCurrent(generation)
-      || currentSymbol.symbol !== symbol.symbol
-      || currentResolution !== resolution
-      || currentAdjustment !== adjustment) return;
+      || !isCurrentMarketSelection(symbol, resolution, adjustment)) return;
+    const historyQuote = response.quote && isUsableQuote(response.quote) ? response.quote : null;
+    let latestQuote = historyQuote;
+    let quoteDegraded = false;
+    if (shouldFetchStandaloneQuote(response.quote != null, providerSupportsQuote(symbol))) {
+      try {
+        latestQuote = await requestStandaloneQuote(symbol, generation);
+      } catch (error) {
+        if (!historyRequestGate.isCurrent(generation)
+          || !isCurrentMarketSelection(symbol, resolution, adjustment)) return;
+        quoteDegraded = true;
+        console.warn('market.latest.quote_fallback_failed', {
+          providerId: symbol.providerId,
+          symbol: symbol.symbol,
+          generation,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (!historyRequestGate.isCurrent(generation)
+        || !isCurrentMarketSelection(symbol, resolution, adjustment)) return;
+      if (!latestQuote) quoteDegraded = true;
+    } else if (response.quote != null && !historyQuote) {
+      console.warn('market.latest.quote_invalid', {
+        providerId: symbol.providerId,
+        symbol: symbol.symbol,
+        generation,
+      });
+    }
     const seriesUpdates = barsForSeriesUpdate(currentBars, response.bars);
     currentBars = mergeLatestBars(currentBars, response.bars);
-    const cacheKey = historyCacheKey(symbol.symbol, resolution, adjustment);
-    const cached = historyCache.get(cacheKey);
-    historyCache.set(cacheKey, { ...response, bars: currentBars, quote: undefined }, cached?.deep ?? false);
+    const cacheKey = marketHistoryCacheKey(symbol, resolution, adjustment);
+    const cached = getHistoryCache(symbol, resolution, adjustment);
+    historyCache.set(cacheKey, { ...response, bars: currentBars, quote: latestQuote ?? undefined }, cached?.deep ?? false);
     for (const bar of seriesUpdates) {
       updatePrimarySeries(bar);
       volumeSeries.update({
@@ -2882,15 +3147,18 @@ async function pollLatestBars() {
       });
     }
     refreshIndicators(response.bars.map((bar) => bar.time));
-    if (response.quote && isUsableQuote(response.quote)) {
-      currentQuote = response.quote;
+    if (latestQuote) {
+      currentQuote = latestQuote;
       renderPriceLines();
     }
     showCurrentSnapshot();
     status.className = 'connection-status ready';
-    status.querySelector('span')!.textContent = `${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+    status.querySelector('span')!.textContent = quoteDegraded
+      ? `${symbol.providerDisplayName} · ${response.diagnostics.host} · 报价降级，保留 K 线`
+      : `${symbol.providerDisplayName} · ${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
   } catch (error) {
-    if (historyRequestGate.isCurrent(generation)) {
+    if (historyRequestGate.isCurrent(generation)
+      && isCurrentMarketSelection(symbol, resolution, adjustment)) {
       console.error('market.latest.error', {
         symbol: symbol.symbol,
         resolution,
@@ -2898,7 +3166,7 @@ async function pollLatestBars() {
         error: error instanceof Error ? error.message : String(error),
       });
       status.className = 'connection-status error';
-      status.querySelector('span')!.textContent = '实时更新暂停，保留最后数据';
+      status.querySelector('span')!.textContent = `${symbol.providerDisplayName} 实时更新暂停，保留最后数据`;
     }
   } finally {
     latestPollInFlight = false;
@@ -2908,6 +3176,9 @@ async function pollLatestBars() {
 function stopRealtimeMarket() {
   const requestId = ++realtimeRequestSequence;
   activeRealtimeRequestId = requestId;
+  activeRealtimeProviderId = '';
+  activeRealtimeProviderDisplayName = '';
+  lastRealtimeSequenceByChannel.clear();
   realtimeConnected = false;
   void invoke('stop_realtime_market', { requestId }).catch((error) => {
     console.error('market.realtime.stop_error', { requestId, error: String(error) });
@@ -2919,17 +3190,22 @@ async function startRealtimeMarket(
   resolution: Resolution,
   historyGeneration: number,
 ) {
-  if (symbol.kind !== 'crypto') return;
+  if (!symbol.realtime) return;
   const requestId = ++realtimeRequestSequence;
   activeRealtimeRequestId = requestId;
+  activeRealtimeProviderId = realtimeProviderId(symbol);
+  activeRealtimeProviderDisplayName = symbol.providerDisplayName;
+  lastRealtimeSequenceByChannel.clear();
   realtimeConnected = false;
   await realtimeListenersReady;
   if (!historyRequestGate.isCurrent(historyGeneration)
+    || currentSymbol.providerId !== symbol.providerId
     || currentSymbol.symbol !== symbol.symbol
     || currentResolution !== resolution) return;
   try {
     await invoke('start_realtime_market', {
       requestId,
+      providerId: symbol.providerId,
       symbol: symbol.symbol,
       kind: symbol.kind,
       resolution,
@@ -2943,7 +3219,7 @@ async function startRealtimeMarket(
       error: String(error),
     });
     status.className = 'connection-status error';
-    status.querySelector('span')!.textContent = '实时连接失败，已使用轮询';
+    status.querySelector('span')!.textContent = `${symbol.providerDisplayName} 实时连接失败，已使用轮询`;
     scheduleLatestPoll(0);
   }
 }
@@ -2954,7 +3230,9 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
     activeRealtimeRequestId,
     currentSymbol.symbol,
     currentResolution,
+    activeRealtimeProviderId,
   )) return;
+  if (!acceptsRealtimeSequence(event, 'bar')) return;
   if (!canApplyRealtimeBar(currentBars, event.bar)) {
     console.warn('market.realtime.stale_bar', {
       symbol: event.symbol,
@@ -2981,13 +3259,11 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
   if (now - lastRealtimeStatusRenderAt >= 1_000) {
     lastRealtimeStatusRenderAt = now;
     status.className = 'connection-status ready';
-    const streamLabel = event.source === 'aggTrade' ? 'aggTrade' : 'Kline 校准';
-    const statusText = `实时 · Binance ${streamLabel} · ${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
+    const providerName = activeRealtimeProviderDisplayName || event.providerId;
+    const statusText = `实时 · ${providerName} · ${event.source} · ${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
     status.querySelector('span')!.textContent = statusText;
     status.setAttribute('aria-label', statusText);
-    status.title = event.source === 'aggTrade'
-      ? `最后一条币安聚合成交：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`
-      : `最后一次币安 K 线校准：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
+    status.title = `最后一次 ${providerName} ${event.source} 更新：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
   }
 }
 
@@ -3065,10 +3341,10 @@ function reportRealtimeRenderHealth(now: number) {
 function flushMarketDataEvents(now: number) {
   const depth = pendingRealtimeDepth;
   pendingRealtimeDepth = null;
-  if (depth && (!latestDepth || depth.lastUpdateId > latestDepth.lastUpdateId)) latestDepth = depth;
+  if (depth) latestDepth = depth;
   if (pendingRealtimeTrades.length) {
-    const newestKnownId = recentTrades[0]?.aggregateTradeId ?? -1;
-    const fresh = pendingRealtimeTrades.filter((trade) => trade.aggregateTradeId > newestKnownId);
+    const newestKnownId = recentTrades[0]?.tradeId ?? -1;
+    const fresh = pendingRealtimeTrades.filter((trade) => trade.tradeId > newestKnownId);
     recentTrades = [...fresh.reverse(), ...recentTrades].slice(0, 100);
     pendingRealtimeTrades = [];
   }
@@ -3134,7 +3410,9 @@ function queueRealtimeBar(event: RealtimeBarEvent<Bar>) {
     activeRealtimeRequestId,
     currentSymbol.symbol,
     currentResolution,
+    activeRealtimeProviderId,
   )) return;
+  if (!acceptsRealtimeSequence(event, 'bar')) return;
   const receivedAt = performance.now();
   if (realtimeHealthRequestId !== event.requestId) {
     realtimeHealthRequestId = event.requestId;
@@ -3160,23 +3438,27 @@ function applyRealtimeStatus(event: RealtimeStatusEvent) {
     activeRealtimeRequestId,
     currentSymbol.symbol,
     currentResolution,
+    activeRealtimeProviderId,
   )) return;
   if (event.status === 'connected') {
     realtimeConnected = true;
     status.className = 'connection-status ready';
-    status.querySelector('span')!.textContent = '实时 · Binance WS';
-    status.setAttribute('aria-label', '实时 · Binance WS');
-    status.title = '币安 WebSocket 已连接，等待实时 K 线推送';
+    const providerName = activeRealtimeProviderDisplayName || event.providerId;
+    const statusText = `实时 · ${providerName} WS`;
+    status.querySelector('span')!.textContent = statusText;
+    status.setAttribute('aria-label', statusText);
+    status.title = `${providerName} WebSocket 已连接，等待实时推送`;
     scheduleLatestPoll(60_000);
     return;
   }
   realtimeConnected = false;
   status.className = 'connection-status loading';
+  const providerName = activeRealtimeProviderDisplayName || event.providerId;
   status.querySelector('span')!.textContent = event.status === 'connecting'
-    ? '正在连接 Binance WS'
-    : '实时重连中 · 轮询保护';
-  status.setAttribute('aria-label', status.querySelector('span')!.textContent ?? '币安实时行情');
-  status.title = event.message ?? '正在建立币安 WebSocket 连接';
+    ? `正在连接 ${providerName} WS`
+    : `实时重连中 · ${providerName} · 轮询保护`;
+  status.setAttribute('aria-label', status.querySelector('span')!.textContent ?? `${providerName} 实时行情`);
+  status.title = event.message ?? `正在建立 ${providerName} WebSocket 连接`;
   if (event.status === 'reconnecting') scheduleLatestPoll(0);
 }
 
@@ -3184,8 +3466,14 @@ let pendingRealtimeDepth: RealtimeDepthEvent | null = null;
 let pendingRealtimeTrades: RealtimeTradeEvent[] = [];
 
 function queueRealtimeDepth(event: RealtimeDepthEvent) {
-  if (!matchesRealtimeSelection(event, activeRealtimeRequestId, currentSymbol.symbol, currentResolution)) return;
-  if (latestDepth && event.lastUpdateId <= latestDepth.lastUpdateId) return;
+  if (!matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+    activeRealtimeProviderId,
+  )) return;
+  if (!acceptsRealtimeSequence(event, 'depth')) return;
   realtimeHealthDepthReceived += 1;
   pendingRealtimeDepth = event;
   const delay = marketDataRenderDelay(performance.now(), lastMarketDataRenderAt);
@@ -3194,7 +3482,14 @@ function queueRealtimeDepth(event: RealtimeDepthEvent) {
 }
 
 function queueRealtimeTrade(event: RealtimeTradeEvent) {
-  if (!matchesRealtimeSelection(event, activeRealtimeRequestId, currentSymbol.symbol, currentResolution)) return;
+  if (!matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+    activeRealtimeProviderId,
+  )) return;
+  if (!acceptsRealtimeSequence(event, 'trade')) return;
   realtimeHealthTradesReceived += 1;
   pendingRealtimeTrades.push(event);
   if (pendingRealtimeTrades.length > 100) pendingRealtimeTrades.splice(0, pendingRealtimeTrades.length - 100);
@@ -3268,15 +3563,19 @@ chart.subscribeClick((param) => {
 
 document.querySelector<HTMLButtonElement>('#open')!.addEventListener('click', openSymbolDialog);
 watchlistAdd.addEventListener('click', () => {
-  if (watchlistSymbols.includes(currentSymbol.symbol)) {
-    watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== currentSymbol.symbol);
+  const currentKey = watchlistSymbolKey(currentSymbol.providerId, currentSymbol.symbol);
+  const hasCurrent = watchlistSymbols.includes(currentKey)
+    || (legacyStateBelongsToProvider(currentSymbol) && watchlistSymbols.includes(currentSymbol.symbol));
+  if (hasCurrent) {
+    watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== currentKey
+      && (!legacyStateBelongsToProvider(currentSymbol) || symbol !== currentSymbol.symbol));
   } else {
     if (watchlistSymbols.length >= 100) {
       errorLayer.hidden = false;
       errorLayer.textContent = '自选最多保存 100 个证券';
       return;
     }
-    watchlistSymbols = [...watchlistSymbols, currentSymbol.symbol];
+    watchlistSymbols = [...watchlistSymbols, currentKey];
   }
   persistWatchlist();
   renderWatchlist();
@@ -3689,8 +3988,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-indicat
 chart.timeScale().subscribeVisibleLogicalRangeChange(positionDrawingProperties);
 chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
   if (!range || !deepHistoryNavigationReady) return;
-  const cacheKey = historyCacheKey(currentSymbol.symbol, currentResolution, currentAdjustment);
-  const cached = historyCache.get(cacheKey);
+  const cached = getHistoryCache(currentSymbol, currentResolution, currentAdjustment);
   if (shouldLoadDeepHistory(range.from, currentBars.length, cached?.deep ?? false)) {
     scheduleDeepHistory(
       currentSymbol,
@@ -3721,8 +4019,7 @@ setVolumeActive(volumeVisible, false);
 applyMainSeriesOrder();
 renderSecondaryPaneOrder();
 renderWatchlist();
-void loadBinanceSpotCatalog();
-void loadBinanceUsdMarginedCatalog();
+void loadMarketCatalogs();
 const realtimeListenersReady = installRealtimeListeners();
 void openHistory(defaultSymbol, currentResolution, currentAdjustment);
 

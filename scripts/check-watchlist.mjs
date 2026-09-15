@@ -1,11 +1,24 @@
 import assert from 'node:assert/strict';
 
-import { loadWatchlist, moveWatchlistSymbol, normalizeWatchlist, saveWatchlist, WATCHLIST_STORAGE_KEY } from '../src/watchlist.ts';
+import {
+  loadWatchlist,
+  moveWatchlistSymbol,
+  normalizeWatchlist,
+  saveWatchlist,
+  watchlistSymbolKey,
+  WATCHLIST_STORAGE_KEY,
+} from '../src/watchlist.ts';
 
 const known = new Set(['SH:600000', 'SH:510050', 'SH:000001']);
 assert.deepEqual(
   normalizeWatchlist(['SH:600000', 'bad', 'SH:600000', 'SH:510050', 'BINANCE:NEWUSDT', 'BINANCE_USDM:NEWUSDT'], known),
   ['SH:600000', 'SH:510050', 'BINANCE:NEWUSDT', 'BINANCE_USDM:NEWUSDT'],
+);
+assert.equal(watchlistSymbolKey('custom-feed', 'EXAMPLE:ABC'), 'custom-feed|EXAMPLE:ABC');
+assert.deepEqual(
+  normalizeWatchlist(['custom-feed|EXAMPLE:ABC', 'other-feed|EXAMPLE:ABC', 'custom|bad symbol'], known),
+  ['custom-feed|EXAMPLE:ABC', 'other-feed|EXAMPLE:ABC'],
+  'provider-qualified watchlist entries must preserve provider identity',
 );
 assert.deepEqual(moveWatchlistSymbol(['a', 'b', 'c'], 1, -1), ['b', 'a', 'c']);
 assert.deepEqual(moveWatchlistSymbol(['a', 'b'], 0, -1), ['a', 'b']);

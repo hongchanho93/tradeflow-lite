@@ -16,6 +16,12 @@ assert.equal(DEEP_DAILY_HISTORY_BARS, 12_000);
 assert.equal(deepHistoryBars('1D'), 12_000);
 assert.equal(deepHistoryBars('1W'), 8_000);
 assert.equal(historyCacheKey('SH:600000', '1D', 'none'), 'SH:600000|1D|none');
+assert.equal(historyCacheKey('tdx', 'SH:600000', '1D', 'none'), 'tdx|SH:600000|1D|none');
+assert.notEqual(
+  historyCacheKey('tdx', 'EXAMPLE:ABC', '1D', 'none'),
+  historyCacheKey('custom', 'EXAMPLE:ABC', '1D', 'none'),
+  'provider-qualified history keys must isolate providers',
+);
 assert.equal(shouldLoadDeepHistory(40, 300, false), true);
 assert.equal(shouldLoadDeepHistory(41, 300, false), false);
 assert.equal(shouldLoadDeepHistory(0, 8_000, false), false);
