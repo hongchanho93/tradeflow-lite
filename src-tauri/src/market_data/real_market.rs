@@ -6,7 +6,7 @@ use super::clock::{shanghai_timestamp, shanghai_today};
 use super::history::{HistoryData, HistoryQuery, load_history};
 use super::hosts::{self, DEFAULT_HOSTS, HostSuccess};
 use crate::contracts::{Adjustment, Bar, Resolution, Symbol, SymbolKind};
-use crate::market_router::{self, HistoryRequest};
+use crate::market_router::{self, HistoryRequest, QuoteRequest};
 use crate::tdx::SecurityCode;
 use crate::tdx::standard::Market;
 
@@ -101,10 +101,51 @@ fn real_market_matrix() {
     .expect("Rust router must preserve the existing TDX history path");
     assert_eq!(routed.diagnostics.source, "tradeflow-tdx");
     validate("router:stock:600000:1D:none", &routed.bars, false);
-    assert!(
-        routed.quote.as_ref().is_some_and(|quote| quote.is_valid()),
-        "router:stock:600000:1D:none: declared quote capability returned no valid quote"
-    );
+    if let Some(quote) = routed.quote.as_ref() {
+        assert!(
+            quote.is_valid(),
+            "router:stock:600000:1D:none: attached quote must be valid when present"
+        );
+        println!(
+            "adapter.history.quote provider=tdx symbol=SH:600000 state=valid last={:.3}",
+            quote.last
+        );
+    } else {
+        println!(
+            "adapter.history.quote provider=tdx symbol=SH:600000 state=unavailable bars_retained={}",
+            routed.bars.len()
+        );
+    }
+    match market_router::fetch_quote(QuoteRequest {
+        provider_id: "tdx".to_string(),
+        symbol: Symbol::new("SH", "600000").unwrap(),
+        kind: SymbolKind::Stock,
+    }) {
+        Ok(response) => {
+            assert_eq!(response.provider_id, "tdx");
+            assert_eq!(response.source, "tradeflow-tdx");
+            assert_eq!(response.symbol.as_str(), "SH:600000");
+            assert!(
+                response.quote.is_valid(),
+                "independent TDX quote must pass strict QuoteSnapshot validation"
+            );
+            println!(
+                "adapter.quote provider=tdx symbol=SH:600000 state=valid last={:.3}",
+                response.quote.last
+            );
+        }
+        Err(error) => {
+            assert_eq!(
+                error.code, "market_data_unavailable",
+                "independent quote may be unavailable before open, but never invalid: {}",
+                error.message
+            );
+            println!(
+                "adapter.quote provider=tdx symbol=SH:600000 state=unavailable code={}",
+                error.code
+            );
+        }
+    }
 
     let composite = fetch(
         &healthy,
@@ -222,15 +263,14 @@ fn real_market_matrix() {
                 );
                 validate(&label, &response.value.bars, false);
                 if resolution == Resolution::Day && adjustment == Adjustment::None {
-                    let quote = response
-                        .value
-                        .quote
-                        .as_ref()
-                        .unwrap_or_else(|| panic!("{label}: missing quote"));
-                    assert!(
-                        quote.last > 0.0 && quote.received_at > 0,
-                        "{label}: missing usable quote"
-                    );
+                    if let Some(quote) = response.value.quote.as_ref() {
+                        assert!(quote.is_valid(), "{label}: attached quote must be valid");
+                    } else {
+                        println!(
+                            "adapter.history.quote provider=tdx symbol={code} state=unavailable bars_retained={}",
+                            response.value.bars.len()
+                        );
+                    }
                 }
                 println!(
                     "ok {label} bars={} host={} latency={:.1}ms",

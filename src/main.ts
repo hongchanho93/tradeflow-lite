@@ -123,6 +123,7 @@ import {
   type MarketSymbol,
 } from './market-universe';
 import { exchangeLogoUrl, symbolLogoUrls } from './symbol-logos';
+import { setStatusLabel } from './status-label';
 import {
   isUsableQuote,
   matchesQuoteResponse,
@@ -475,7 +476,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
       </details>
       <div class="toolbar-spacer"></div>
-      <button id="status" class="connection-status" aria-label="主站测速" title="点击重新测速"><i></i><span>正在连接</span></button>
+      <button id="status" class="connection-status" aria-label="正在连接" title="点击重新测速"><i></i><span>正在连接</span></button>
       <button id="watchlist-toggle" class="toolbar-button" aria-label="打开自选列表">自选</button>
       <button id="market-data-toggle" class="toolbar-button" aria-label="打开盘口和成交">盘口</button>
       <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
@@ -2790,7 +2791,7 @@ async function refreshMissingHistoryQuote(
   if (!isCurrentQuoteRequest(symbol, generation)) return;
   if (!quote) {
     status.className = 'connection-status ready';
-    status.querySelector('span')!.textContent = `${symbol.providerDisplayName} · 报价降级，保留 K 线`;
+    setStatusLabel(status, `${symbol.providerDisplayName} · 报价降级，保留 K 线`);
     return;
   }
   currentQuote = quote;
@@ -2921,9 +2922,10 @@ function showHistory(
   document.querySelector<HTMLDivElement>('#chart')!.setAttribute('aria-label', `${symbol.name}${resolutionLabels[currentResolution]}K线图`);
   showLatest(response.bars);
   status.className = 'connection-status ready';
-  status.querySelector('span')!.textContent = source === 'memory'
+  const statusText = source === 'memory'
     ? `${symbol.providerDisplayName} · 缓存 · ${response.diagnostics.host}`
     : `${symbol.providerDisplayName} · ${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+  setStatusLabel(status, statusText);
 }
 
 function clearDeepHistoryTimer() {
@@ -3052,7 +3054,7 @@ async function openHistory(
   }
   loadingLayer.hidden = false;
   status.className = 'connection-status loading';
-  status.querySelector('span')!.textContent = `正在打开 ${match.providerDisplayName} · ${match.code}`;
+  setStatusLabel(status, `正在打开 ${match.providerDisplayName} · ${match.code}`);
   const startedAt = performance.now();
   try {
     const response = await requestHistory(match, requestedResolution, requestedAdjustment, INITIAL_HISTORY_BARS);
@@ -3081,7 +3083,7 @@ async function openHistory(
     errorLayer.hidden = false;
     errorLayer.textContent = `${match.name} 加载失败，图表保留上一份有效数据 · ${message}`;
     status.className = 'connection-status error';
-    status.querySelector('span')!.textContent = `${match.providerDisplayName} 连接异常`;
+    setStatusLabel(status, `${match.providerDisplayName} 连接异常`);
   } finally {
     if (historyRequestGate.isCurrent(generation)) loadingLayer.hidden = true;
   }
@@ -3153,9 +3155,10 @@ async function pollLatestBars() {
     }
     showCurrentSnapshot();
     status.className = 'connection-status ready';
-    status.querySelector('span')!.textContent = quoteDegraded
+    const statusText = quoteDegraded
       ? `${symbol.providerDisplayName} · ${response.diagnostics.host} · 报价降级，保留 K 线`
       : `${symbol.providerDisplayName} · ${response.diagnostics.host} · ${response.diagnostics.latencyMs}ms`;
+    setStatusLabel(status, statusText);
   } catch (error) {
     if (historyRequestGate.isCurrent(generation)
       && isCurrentMarketSelection(symbol, resolution, adjustment)) {
@@ -3166,7 +3169,7 @@ async function pollLatestBars() {
         error: error instanceof Error ? error.message : String(error),
       });
       status.className = 'connection-status error';
-      status.querySelector('span')!.textContent = `${symbol.providerDisplayName} 实时更新暂停，保留最后数据`;
+      setStatusLabel(status, `${symbol.providerDisplayName} 实时更新暂停，保留最后数据`);
     }
   } finally {
     latestPollInFlight = false;
@@ -3219,7 +3222,7 @@ async function startRealtimeMarket(
       error: String(error),
     });
     status.className = 'connection-status error';
-    status.querySelector('span')!.textContent = `${symbol.providerDisplayName} 实时连接失败，已使用轮询`;
+    setStatusLabel(status, `${symbol.providerDisplayName} 实时连接失败，已使用轮询`);
     scheduleLatestPoll(0);
   }
 }
@@ -3261,8 +3264,7 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
     status.className = 'connection-status ready';
     const providerName = activeRealtimeProviderDisplayName || event.providerId;
     const statusText = `实时 · ${providerName} · ${event.source} · ${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
-    status.querySelector('span')!.textContent = statusText;
-    status.setAttribute('aria-label', statusText);
+    setStatusLabel(status, statusText);
     status.title = `最后一次 ${providerName} ${event.source} 更新：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
   }
 }
@@ -3445,8 +3447,7 @@ function applyRealtimeStatus(event: RealtimeStatusEvent) {
     status.className = 'connection-status ready';
     const providerName = activeRealtimeProviderDisplayName || event.providerId;
     const statusText = `实时 · ${providerName} WS`;
-    status.querySelector('span')!.textContent = statusText;
-    status.setAttribute('aria-label', statusText);
+    setStatusLabel(status, statusText);
     status.title = `${providerName} WebSocket 已连接，等待实时推送`;
     scheduleLatestPoll(60_000);
     return;
@@ -3454,10 +3455,10 @@ function applyRealtimeStatus(event: RealtimeStatusEvent) {
   realtimeConnected = false;
   status.className = 'connection-status loading';
   const providerName = activeRealtimeProviderDisplayName || event.providerId;
-  status.querySelector('span')!.textContent = event.status === 'connecting'
+  const statusText = event.status === 'connecting'
     ? `正在连接 ${providerName} WS`
     : `实时重连中 · ${providerName} · 轮询保护`;
-  status.setAttribute('aria-label', status.querySelector('span')!.textContent ?? `${providerName} 实时行情`);
+  setStatusLabel(status, statusText);
   status.title = event.message ?? `正在建立 ${providerName} WebSocket 连接`;
   if (event.status === 'reconnecting') scheduleLatestPoll(0);
 }
@@ -3801,23 +3802,24 @@ status.addEventListener('click', async () => {
   const historyGeneration = historyRequestGate.current();
   status.disabled = true;
   status.className = 'connection-status loading';
-  status.querySelector('span')!.textContent = '正在测试 19 台主站';
+  setStatusLabel(status, '正在测试 19 台主站');
   try {
     const response = await invoke<HostBenchmarkResponse>('benchmark_hosts');
     if (!historyRequestGate.isCurrent(historyGeneration)) return;
     const healthy = response.probes.filter((probe) => probe.ok);
     const fastest = healthy[0];
     status.className = fastest ? 'connection-status ready' : 'connection-status error';
-    status.querySelector('span')!.textContent = fastest
+    const statusText = fastest
       ? `${fastest.host} · ${fastest.latencyMs}ms · ${healthy.length}/${response.probes.length}`
       : '主站均不可用';
+    setStatusLabel(status, statusText);
     status.title = response.probes
       .map((probe) => `${probe.host} · ${probe.ok ? `${probe.latencyMs}ms` : probe.error ?? '失败'}`)
       .join('\n');
   } catch (error) {
     if (!historyRequestGate.isCurrent(historyGeneration)) return;
     status.className = 'connection-status error';
-    status.querySelector('span')!.textContent = '主站测速失败';
+    setStatusLabel(status, '主站测速失败');
     status.title = String(error);
   } finally {
     status.disabled = false;

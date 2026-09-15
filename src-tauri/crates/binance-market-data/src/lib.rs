@@ -1,20 +1,199 @@
 use std::fmt;
-use std::io::Read;
-use std::net::TcpStream;
-use std::time::Duration;
+use std::future::Future;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use hickory_resolver::TokioResolver;
 use serde_json::Value;
-use tungstenite::client::connect_with_config;
+use tungstenite::client::{IntoClientRequest, uri_mode};
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
+use tungstenite::stream::{MaybeTlsStream, Mode, NoDelay};
+use tungstenite::{Message, WebSocket, client_tls_with_config};
+
+#[cfg(test)]
+use std::net::ToSocketAddrs;
 
 const MAX_PAGE_SIZE: usize = 1_000;
 const MAX_HISTORY_COUNT: usize = 12_000;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_EXCHANGE_INFO_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STREAM_MESSAGE_BYTES: usize = 256 * 1024;
-const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_STREAM_CONNECT_ADDRESSES: usize = 8;
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const STREAM_CONNECT_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+const STREAM_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(2);
+const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(10);
+const STREAM_RESOLVER_POLL_TIMEOUT: Duration = Duration::from_millis(20);
+
+type CancellationCheck = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+const STREAM_RESOLVER_RUNTIME_THREADS: usize = 2;
+const STREAM_RESOLVER_MAX_CONCURRENCY: usize = 8;
+
+struct ResolverService {
+    runtime: tokio::runtime::Runtime,
+    resolver: TokioResolver,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl ResolverService {
+    fn new() -> io::Result<Self> {
+        let resolver = TokioResolver::builder_tokio()
+            .map_err(|error| {
+                io::Error::other(format!("failed to read system DNS configuration: {error}"))
+            })?
+            .build()
+            .map_err(|error| {
+                io::Error::other(format!("failed to build system DNS resolver: {error}"))
+            })?;
+        Self::with_resolver(resolver)
+    }
+
+    fn with_resolver(resolver: TokioResolver) -> io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(STREAM_RESOLVER_RUNTIME_THREADS)
+            .max_blocking_threads(STREAM_RESOLVER_RUNTIME_THREADS)
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| {
+                io::Error::other(format!("failed to start Binance DNS runtime: {error}"))
+            })?;
+        Ok(Self {
+            runtime,
+            resolver,
+            permits: Arc::new(tokio::sync::Semaphore::new(STREAM_RESOLVER_MAX_CONCURRENCY)),
+        })
+    }
+
+    fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+        is_cancelled: &CancellationCheck,
+    ) -> io::Result<Vec<SocketAddr>> {
+        let resolver = self.resolver.clone();
+        let host = host.to_owned();
+        self.resolve_with_future(timeout, is_cancelled, async move {
+            let lookup = resolver.lookup_ip(host).await.map_err(|error| {
+                io::Error::other(format!("Binance WebSocket DNS lookup failed: {error}"))
+            })?;
+            let addresses = lookup
+                .into_iter()
+                .take(MAX_STREAM_CONNECT_ADDRESSES)
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Binance WebSocket DNS lookup returned no addresses",
+                ));
+            }
+            Ok(addresses)
+        })
+    }
+
+    fn resolve_with_future<F>(
+        &self,
+        timeout: Duration,
+        is_cancelled: &CancellationCheck,
+        future: F,
+    ) -> io::Result<Vec<SocketAddr>>
+    where
+        F: Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'static,
+    {
+        if is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Binance WebSocket DNS lookup cancelled",
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Binance WebSocket DNS lookup deadline exceeded",
+            ));
+        }
+        let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Binance WebSocket DNS resolver concurrency limit reached",
+            )
+        })?;
+        let (response, result) = mpsc::sync_channel(1);
+        let task = self.runtime.spawn(async move {
+            let _permit = permit;
+            let result = tokio::time::timeout(timeout, future)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Binance WebSocket DNS lookup deadline exceeded",
+                    ))
+                });
+            let _ = response.send(result);
+        });
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
+        loop {
+            if is_cancelled() {
+                task.abort();
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Binance WebSocket DNS lookup cancelled",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Binance WebSocket DNS lookup deadline exceeded",
+                ));
+            }
+            match result.recv_timeout(remaining.min(STREAM_RESOLVER_POLL_TIMEOUT)) {
+                Ok(result) => {
+                    if is_cancelled() {
+                        task.abort();
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "Binance WebSocket DNS lookup cancelled",
+                        ));
+                    }
+                    if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                        task.abort();
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Binance WebSocket DNS lookup deadline exceeded",
+                        ));
+                    }
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "Binance WebSocket DNS resolver task stopped",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+static SYSTEM_RESOLVER: OnceLock<Result<ResolverService, String>> = OnceLock::new();
+
+fn system_resolver() -> io::Result<&'static ResolverService> {
+    match SYSTEM_RESOLVER.get_or_init(|| ResolverService::new().map_err(|error| error.to_string()))
+    {
+        Ok(service) => Ok(service),
+        Err(error) => Err(io::Error::other(error.clone())),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Market {
@@ -267,8 +446,7 @@ impl RealtimeKlineState {
             let next_close_time_ms = next_open_time_ms
                 .saturating_add(interval_ms)
                 .saturating_sub(1);
-            if interval_ms <= 7 * 24 * 60 * 60 * 1_000
-                && event.trade_time_ms <= next_close_time_ms
+            if interval_ms <= 7 * 24 * 60 * 60 * 1_000 && event.trade_time_ms <= next_close_time_ms
             {
                 let provisional = Kline {
                     open_time_ms: next_open_time_ms,
@@ -335,38 +513,224 @@ pub struct Client {
 }
 
 pub struct RealtimeStream {
-    socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    socket: WebSocket<MaybeTlsStream<CancellableTcpStream>>,
     symbol: String,
     interval: Interval,
 }
 
+#[derive(Clone)]
+struct ConnectControl {
+    deadline: Instant,
+    cancelled: CancellationCheck,
+}
+
+impl ConnectControl {
+    fn new(timeout: Duration, cancelled: CancellationCheck) -> Self {
+        Self {
+            deadline: Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(Instant::now),
+            cancelled,
+        }
+    }
+
+    fn remaining(&self) -> io::Result<Duration> {
+        if (self.cancelled)() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Binance WebSocket connection cancelled",
+            ));
+        }
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Binance WebSocket connection deadline exceeded",
+            ));
+        }
+        Ok(remaining)
+    }
+
+    fn poll_timeout(&self) -> io::Result<Duration> {
+        self.remaining()
+            .map(|remaining| remaining.min(STREAM_CONNECT_POLL_TIMEOUT))
+    }
+}
+
+struct CancellableTcpStream {
+    stream: TcpStream,
+    control: ConnectControl,
+    handshake: bool,
+    io_timeout: Duration,
+}
+
+impl CancellableTcpStream {
+    fn new(stream: TcpStream, control: ConnectControl) -> Self {
+        Self {
+            stream,
+            control,
+            handshake: true,
+            io_timeout: STREAM_IO_TIMEOUT,
+        }
+    }
+
+    fn set_established_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.handshake = false;
+        self.io_timeout = timeout;
+        set_tcp_stream_timeout(&self.stream, timeout)
+    }
+}
+
+impl fmt::Debug for CancellableTcpStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancellableTcpStream")
+            .field("stream", &self.stream)
+            .field("handshake", &self.handshake)
+            .finish()
+    }
+}
+
+impl Read for CancellableTcpStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if !self.handshake {
+            self.stream.set_read_timeout(Some(self.io_timeout))?;
+            return self.stream.read(buffer);
+        }
+        loop {
+            self.stream
+                .set_read_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.read(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for CancellableTcpStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if !self.handshake {
+            self.stream.set_write_timeout(Some(self.io_timeout))?;
+            return self.stream.write(buffer);
+        }
+        loop {
+            self.stream
+                .set_write_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.write(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.handshake {
+            self.stream.set_write_timeout(Some(self.io_timeout))?;
+            return self.stream.flush();
+        }
+        loop {
+            self.stream
+                .set_write_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.flush() {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl NoDelay for CancellableTcpStream {
+    fn set_nodelay(&mut self, nodelay: bool) -> io::Result<()> {
+        self.stream.set_nodelay(nodelay)
+    }
+}
+
+fn wait_before_retry(control: &ConnectControl) -> io::Result<()> {
+    let delay = control.remaining()?.min(STREAM_CONNECT_RETRY_DELAY);
+    if !delay.is_zero() {
+        thread::sleep(delay);
+    }
+    control.remaining().map(|_| ())
+}
+
 impl RealtimeStream {
     pub fn connect(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_with_cancellation<F>(
+        symbol: &str,
+        interval: Interval,
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
         let symbol = normalize_symbol(symbol)?;
         let url = spot_stream_url(&symbol, interval);
-        Self::connect_url(symbol, interval, url)
+        Self::connect_url(symbol, interval, url, Arc::new(is_cancelled))
     }
 
-    pub fn connect_usd_margined_market(
+    pub fn connect_usd_margined_market(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_usd_margined_market_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_usd_margined_market_with_cancellation<F>(
         symbol: &str,
         interval: Interval,
-    ) -> Result<Self, Error> {
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
         let symbol = normalize_symbol(symbol)?;
         let url = usd_margined_market_stream_url(&symbol, interval);
-        Self::connect_url(symbol, interval, url)
+        Self::connect_url(symbol, interval, url, Arc::new(is_cancelled))
     }
 
-    pub fn connect_usd_margined_depth(
+    pub fn connect_usd_margined_depth(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_usd_margined_depth_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_usd_margined_depth_with_cancellation<F>(
         symbol: &str,
         interval: Interval,
-    ) -> Result<Self, Error> {
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
         let symbol = normalize_symbol(symbol)?;
         let url = usd_margined_depth_stream_url(&symbol);
-        Self::connect_url(symbol, interval, url)
+        Self::connect_url(symbol, interval, url, Arc::new(is_cancelled))
     }
 
-    fn connect_url(symbol: String, interval: Interval, url: String) -> Result<Self, Error> {
-        let socket = connect_stream_socket(url, STREAM_READ_TIMEOUT)?;
+    fn connect_url(
+        symbol: String,
+        interval: Interval,
+        url: String,
+        is_cancelled: CancellationCheck,
+    ) -> Result<Self, Error> {
+        let resolver_cancelled = Arc::clone(&is_cancelled);
+        let socket = connect_stream_socket_with_resolver(
+            url,
+            STREAM_CONNECT_TIMEOUT,
+            STREAM_IO_TIMEOUT,
+            is_cancelled,
+            move |host, port, timeout| {
+                system_resolver()?.resolve(host, port, timeout, &resolver_cancelled)
+            },
+        )?;
         Ok(Self {
             socket,
             symbol,
@@ -431,43 +795,188 @@ fn usd_margined_depth_stream_url(symbol: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn connect_stream_socket(
     url: String,
-    timeout: Duration,
-) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, Error> {
-        let config = WebSocketConfig::default()
-            .read_buffer_size(16 * 1024)
-            .write_buffer_size(0)
-            .max_write_buffer_size(MAX_STREAM_MESSAGE_BYTES)
-            .max_message_size(Some(MAX_STREAM_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_STREAM_MESSAGE_BYTES));
-        let (mut socket, response) = connect_with_config(url, Some(config), 0)
-            .map_err(|error| Error::new(format!("Binance WebSocket connect failed: {error}")))?;
-        if response.status().as_u16() != 101 {
+    connect_timeout: Duration,
+    io_timeout: Duration,
+) -> Result<WebSocket<MaybeTlsStream<CancellableTcpStream>>, Error> {
+    connect_stream_socket_with_resolver(
+        url,
+        connect_timeout,
+        io_timeout,
+        Arc::new(|| false),
+        |host, port, _timeout| {
+            (host, port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect())
+        },
+    )
+}
+
+fn connect_stream_socket_with_resolver<F>(
+    url: String,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+    is_cancelled: CancellationCheck,
+    mut resolve: F,
+) -> Result<WebSocket<MaybeTlsStream<CancellableTcpStream>>, Error>
+where
+    F: FnMut(&str, u16, Duration) -> io::Result<Vec<SocketAddr>>,
+{
+    let control = ConnectControl::new(connect_timeout, is_cancelled);
+    let request = url
+        .into_client_request()
+        .map_err(|error| Error::new(format!("Binance WebSocket URL is invalid: {error}")))?;
+    let uri = request.uri();
+    let mode = uri_mode(uri)
+        .map_err(|error| Error::new(format!("Binance WebSocket URL is invalid: {error}")))?;
+    let host = uri
+        .host()
+        .ok_or_else(|| Error::new("Binance WebSocket URL is missing a host"))?;
+    let host = if host.starts_with('[') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    };
+    let port = uri.port_u16().unwrap_or(match mode {
+        Mode::Plain => 80,
+        Mode::Tls => 443,
+    });
+    let addresses = resolve_socket_addresses(host, port, &control, &mut resolve)?;
+    let stream = connect_tcp_stream_with_control(&addresses, &control, |address, timeout| {
+        TcpStream::connect_timeout(address, timeout)
+    })?;
+    let mut stream = CancellableTcpStream::new(stream, control.clone());
+    NoDelay::set_nodelay(&mut stream, true)
+        .map_err(|error| Error::new(format!("failed to configure Binance WebSocket: {error}")))?;
+
+    let config = WebSocketConfig::default()
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(0)
+        .max_write_buffer_size(MAX_STREAM_MESSAGE_BYTES)
+        .max_message_size(Some(MAX_STREAM_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_STREAM_MESSAGE_BYTES));
+    let (mut socket, response) = match client_tls_with_config(request, stream, Some(config), None) {
+        Ok(result) => result,
+        Err(error) => {
+            if let Err(control_error) = control.remaining() {
+                return Err(Error::new(format!(
+                    "Binance WebSocket handshake stopped: {control_error}"
+                )));
+            }
             return Err(Error::new(format!(
-                "Binance WebSocket handshake returned HTTP {}",
-                response.status().as_u16()
+                "Binance WebSocket handshake failed: {error}"
             )));
         }
-        set_stream_timeout(socket.get_mut(), timeout)?;
-        Ok(socket)
+    };
+    control.remaining().map_err(|error| {
+        Error::new(format!(
+            "Binance WebSocket handshake exceeded deadline: {error}"
+        ))
+    })?;
+    if response.status().as_u16() != 101 {
+        return Err(Error::new(format!(
+            "Binance WebSocket handshake returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    set_stream_timeout(socket.get_mut(), io_timeout)?;
+    Ok(socket)
+}
+
+fn resolve_socket_addresses<F>(
+    host: &str,
+    port: u16,
+    control: &ConnectControl,
+    resolve: &mut F,
+) -> Result<Vec<SocketAddr>, Error>
+where
+    F: FnMut(&str, u16, Duration) -> io::Result<Vec<SocketAddr>>,
+{
+    let timeout = control.remaining().map_err(|error| {
+        Error::new(format!("Binance WebSocket DNS lookup unavailable: {error}"))
+    })?;
+    let addresses = resolve(host, port, timeout)
+        .map_err(|error| Error::new(format!("Binance WebSocket DNS lookup failed: {error}")))?;
+    control.remaining().map_err(|error| {
+        Error::new(format!(
+            "Binance WebSocket DNS lookup exceeded deadline: {error}"
+        ))
+    })?;
+    let addresses = addresses
+        .into_iter()
+        .take(MAX_STREAM_CONNECT_ADDRESSES)
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(Error::new(
+            "Binance WebSocket DNS lookup returned no addresses",
+        ));
+    }
+    Ok(addresses)
+}
+
+fn connect_tcp_stream_with_control<F>(
+    addresses: &[SocketAddr],
+    control: &ConnectControl,
+    mut connect: F,
+) -> Result<TcpStream, Error>
+where
+    F: FnMut(&SocketAddr, Duration) -> io::Result<TcpStream>,
+{
+    let mut attempts = 0;
+    let mut last_error = None;
+    for address in addresses.iter().take(MAX_STREAM_CONNECT_ADDRESSES) {
+        loop {
+            let timeout = control.remaining().map_err(|error| {
+                Error::new(format!("Binance WebSocket TCP connect stopped: {error}"))
+            })?;
+            attempts += 1;
+            match connect(address, timeout.min(STREAM_CONNECT_POLL_TIMEOUT)) {
+                Ok(stream) => return Ok(stream),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(control).map_err(|error| {
+                        Error::new(format!("Binance WebSocket TCP connect stopped: {error}"))
+                    })?;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    Err(Error::new(format!(
+        "Binance WebSocket TCP connect failed attempts={attempts}: {}",
+        last_error.unwrap_or_else(|| "connection timeout or no addresses".to_string())
+    )))
 }
 
 fn set_stream_timeout(
-    stream: &mut MaybeTlsStream<TcpStream>,
+    stream: &mut MaybeTlsStream<CancellableTcpStream>,
     timeout: Duration,
 ) -> Result<(), Error> {
     let result = match stream {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(timeout)),
-        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(Some(timeout)),
+        MaybeTlsStream::Plain(stream) => stream.set_established_timeout(timeout),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_established_timeout(timeout),
         _ => return Err(Error::new("unsupported Binance WebSocket TLS transport")),
     };
     result.map_err(|error| Error::new(format!("failed to configure Binance WebSocket: {error}")))
 }
 
+fn set_tcp_stream_timeout(stream: &TcpStream, timeout: Duration) -> io::Result<()> {
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))
+}
+
 impl Client {
     pub fn public_market_data() -> Result<Self, Error> {
-        Self::new_for_market(Market::Spot, Market::Spot.rest_base_url(), Duration::from_secs(8))
+        Self::new_for_market(
+            Market::Spot,
+            Market::Spot.rest_base_url(),
+            Duration::from_secs(8),
+        )
     }
 
     pub fn public_usd_margined_market_data() -> Result<Self, Error> {
@@ -493,7 +1002,11 @@ impl Client {
             .user_agent("TradeFlow-Lite/0.1")
             .build()
             .map_err(|error| Error::new(format!("failed to build Binance HTTP client: {error}")))?;
-        Ok(Self { base_url, http, market })
+        Ok(Self {
+            base_url,
+            http,
+            market,
+        })
     }
 
     pub fn fetch_klines(
@@ -518,7 +1031,10 @@ impl Client {
             if let Some(end_time_ms) = end_time_ms {
                 query.push(("endTime", end_time_ms.to_string()));
             }
-            let payload = self.get_json(self.market.api_path("/api/v3/klines", "/fapi/v1/klines"), &query)?;
+            let payload = self.get_json(
+                self.market.api_path("/api/v3/klines", "/fapi/v1/klines"),
+                &query,
+            )?;
             let rows = payload
                 .as_array()
                 .ok_or_else(|| Error::new("Binance klines response must be an array"))?;
@@ -560,7 +1076,8 @@ impl Client {
             query.push(("type", "FULL".to_string()));
         }
         let payload = self.get_json(
-            self.market.api_path("/api/v3/ticker/24hr", "/fapi/v1/ticker/24hr"),
+            self.market
+                .api_path("/api/v3/ticker/24hr", "/fapi/v1/ticker/24hr"),
             &query,
         )?;
         let ticker = Ticker24h {
@@ -609,9 +1126,7 @@ impl Client {
         Ok(symbols)
     }
 
-    pub fn fetch_usd_margined_perpetual_symbols(
-        &self,
-    ) -> Result<Vec<UsdMarginedSymbol>, Error> {
+    pub fn fetch_usd_margined_perpetual_symbols(&self) -> Result<Vec<UsdMarginedSymbol>, Error> {
         if self.market != Market::UsdMarginedFutures {
             return Err(Error::new(
                 "client is not configured for Binance USD-M Futures",
@@ -693,7 +1208,9 @@ fn normalize_symbol(symbol: &str) -> Result<String, Error> {
     let char_count = symbol.chars().count();
     if !(2..=32).contains(&char_count)
         || symbol.len() > 96
-        || !symbol.chars().all(char::is_alphanumeric)
+        || !symbol
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
     {
         return Err(Error::new("invalid Binance Spot symbol"));
     }
@@ -783,9 +1300,18 @@ fn parse_spot_symbol(payload: &Value) -> Result<Option<SpotSymbol>, Error> {
         .get("quoteAsset")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new("Binance Spot symbol is missing quote asset"))?;
-    let symbol = normalize_symbol(symbol)?;
-    let base_asset = normalize_asset(base_asset)?;
-    let quote_asset = normalize_asset(quote_asset)?;
+    // Binance may publish active symbols whose asset names contain Unicode. They are
+    // valid upstream entries but cannot become Lite's ASCII-stable `VENUE:CODE` identity;
+    // omit those rows from the provider-neutral catalog instead of failing the whole list.
+    let Ok(symbol) = normalize_symbol(symbol) else {
+        return Ok(None);
+    };
+    let Ok(base_asset) = normalize_asset(base_asset) else {
+        return Ok(None);
+    };
+    let Ok(quote_asset) = normalize_asset(quote_asset) else {
+        return Ok(None);
+    };
     Ok(Some(SpotSymbol {
         symbol,
         base_asset,
@@ -811,10 +1337,19 @@ fn parse_usd_margined_symbol(payload: &Value) -> Result<Option<UsdMarginedSymbol
         .get("quoteAsset")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::new("Binance USD-M symbol is missing quote asset"))?;
+    let Ok(symbol) = normalize_symbol(symbol) else {
+        return Ok(None);
+    };
+    let Ok(base_asset) = normalize_asset(base_asset) else {
+        return Ok(None);
+    };
+    let Ok(quote_asset) = normalize_asset(quote_asset) else {
+        return Ok(None);
+    };
     Ok(Some(UsdMarginedSymbol {
-        symbol: normalize_symbol(symbol)?,
-        base_asset: normalize_asset(base_asset)?,
-        quote_asset: normalize_asset(quote_asset)?,
+        symbol,
+        base_asset,
+        quote_asset,
     }))
 }
 
@@ -823,7 +1358,9 @@ fn normalize_asset(asset: &str) -> Result<String, Error> {
     if asset.is_empty()
         || asset.chars().count() > 24
         || asset.len() > 72
-        || !asset.chars().all(char::is_alphanumeric)
+        || !asset
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
     {
         return Err(Error::new("invalid Binance asset code"));
     }
@@ -1064,13 +1601,296 @@ fn merge_pages(mut pages: Vec<Vec<Kline>>, requested: usize) -> Result<Vec<Kline
 #[cfg(test)]
 mod tests {
     use super::{
-        AggregateTradeEvent, Client, Interval, Market, RealtimeEvent, RealtimeKlineState,
-        RealtimeStream, RealtimeUpdateSource, merge_pages, parse_kline, parse_kline_event,
-        parse_realtime_event, parse_spot_symbol, parse_usd_margined_symbol, spot_stream_url,
-        usd_margined_depth_stream_url, usd_margined_market_stream_url,
+        AggregateTradeEvent, Client, Interval, MAX_STREAM_CONNECT_ADDRESSES, Market, RealtimeEvent,
+        RealtimeKlineState, RealtimeStream, RealtimeUpdateSource, ResolverService,
+        STREAM_CONNECT_RETRY_DELAY, STREAM_CONNECT_TIMEOUT, STREAM_RESOLVER_MAX_CONCURRENCY,
+        connect_stream_socket, connect_stream_socket_with_resolver,
+        connect_tcp_stream_with_control, merge_pages, normalize_asset, normalize_symbol,
+        parse_kline, parse_kline_event, parse_realtime_event, parse_spot_symbol,
+        parse_usd_margined_symbol, spot_stream_url, usd_margined_depth_stream_url,
+        usd_margined_market_stream_url,
     };
     use serde_json::json;
-    use std::time::Duration;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn tcp_connect_seam_bounds_attempts_and_timeout_budget() {
+        let addresses = (0..(MAX_STREAM_CONNECT_ADDRESSES + 3))
+            .map(|index| SocketAddr::from(([192, 0, 2, index as u8 + 1], 443)))
+            .collect::<Vec<_>>();
+        let mut attempts = Vec::new();
+        let started = Instant::now();
+        let control = super::ConnectControl::new(Duration::from_millis(50), Arc::new(|| false));
+        let error = connect_tcp_stream_with_control(&addresses, &control, |address, timeout| {
+            attempts.push((*address, timeout));
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "deterministic test refusal",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(attempts.len(), MAX_STREAM_CONNECT_ADDRESSES);
+        assert!(
+            attempts
+                .iter()
+                .all(|(_, timeout)| *timeout <= Duration::from_millis(50))
+        );
+        assert!(error.to_string().contains("attempts=8"));
+        assert_eq!(STREAM_CONNECT_TIMEOUT, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn websocket_handshake_returns_when_local_peer_stays_silent() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = Instant::now();
+        let error = connect_stream_socket(
+            format!("ws://{address}/stream"),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "handshake exceeded bound: {elapsed:?}"
+        );
+        assert!(error.to_string().contains("handshake"));
+    }
+
+    #[test]
+    fn tls_handshake_returns_when_local_peer_stays_silent() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = Instant::now();
+        let error = connect_stream_socket(
+            format!("wss://{address}/stream"),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "TLS handshake exceeded bound: {elapsed:?}"
+        );
+        assert!(error.to_string().contains("handshake"));
+    }
+
+    #[test]
+    fn slow_dns_resolution_is_rejected_by_the_shared_deadline() {
+        let started = Instant::now();
+        let error = connect_stream_socket_with_resolver(
+            "ws://127.0.0.1:1/stream".to_string(),
+            Duration::from_millis(25),
+            Duration::from_millis(20),
+            Arc::new(|| false),
+            |_host, _port, timeout| {
+                thread::sleep(timeout + Duration::from_millis(5));
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 1))])
+            },
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("DNS lookup exceeded deadline"));
+    }
+
+    #[test]
+    fn async_resolver_returns_on_deadline_when_lookup_never_returns() {
+        let resolver = ResolverService::new().unwrap();
+        let cancelled: super::CancellationCheck = Arc::new(|| false);
+        let started = Instant::now();
+        let error = resolver
+            .resolve_with_future(
+                Duration::from_millis(40),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "resolver caller exceeded deadline bound: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn async_resolver_cancellation_releases_and_allows_follow_up_lookup() {
+        let resolver = Arc::new(ResolverService::new().unwrap());
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        let caller_flag = Arc::clone(&cancelled_flag);
+        let cancelled: super::CancellationCheck =
+            Arc::new(move || caller_flag.load(Ordering::Acquire));
+        let resolver_for_caller = Arc::clone(&resolver);
+        let caller = thread::spawn(move || {
+            resolver_for_caller.resolve_with_future(
+                Duration::from_secs(5),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        cancelled_flag.store(true, Ordering::Release);
+        let error = caller.join().unwrap().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let not_cancelled: super::CancellationCheck = Arc::new(|| false);
+        let addresses = resolver
+            .resolve("localhost", 443, Duration::from_secs(1), &not_cancelled)
+            .unwrap();
+        assert!(addresses.iter().any(|address| address.ip().is_loopback()));
+    }
+
+    #[test]
+    fn async_resolver_limits_concurrent_requests_without_single_slot_busy_failures() {
+        let resolver = Arc::new(ResolverService::new().unwrap());
+        let release = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Barrier::new(STREAM_RESOLVER_MAX_CONCURRENCY + 1));
+        let mut callers = Vec::new();
+        for _ in 0..STREAM_RESOLVER_MAX_CONCURRENCY {
+            let resolver = Arc::clone(&resolver);
+            let release = Arc::clone(&release);
+            let entered = Arc::clone(&entered);
+            callers.push(thread::spawn(move || {
+                let cancelled: super::CancellationCheck =
+                    Arc::new(move || release.load(Ordering::Acquire));
+                entered.wait();
+                resolver.resolve_with_future(
+                    Duration::from_secs(5),
+                    &cancelled,
+                    std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+                )
+            }));
+        }
+        entered.wait();
+        let wait_started = Instant::now();
+        while resolver.permits.available_permits() != 0
+            && wait_started.elapsed() < Duration::from_secs(1)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(resolver.permits.available_permits(), 0);
+        let cancelled: super::CancellationCheck = Arc::new(|| false);
+        let error = resolver
+            .resolve_with_future(
+                Duration::from_secs(1),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        release.store(true, Ordering::Release);
+        for caller in callers {
+            assert_eq!(
+                caller.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_connect_would_block_retries_with_a_cancellable_delay() {
+        let addresses = [SocketAddr::from(([192, 0, 2, 1], 443))];
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        let canceller_flag = Arc::clone(&cancelled_flag);
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            canceller_flag.store(true, Ordering::Release);
+        });
+        let cancelled_flag_for_check = Arc::clone(&cancelled_flag);
+        let control = super::ConnectControl::new(
+            Duration::from_secs(1),
+            Arc::new(move || cancelled_flag_for_check.load(Ordering::Acquire)),
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_connect = Arc::clone(&attempts);
+        let started = Instant::now();
+        let error = connect_tcp_stream_with_control(&addresses, &control, |_address, _timeout| {
+            attempts_for_connect.fetch_add(1, Ordering::AcqRel);
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "try again"))
+        })
+        .unwrap_err();
+        canceller.join().unwrap();
+
+        assert!(error.to_string().contains("stopped"));
+        assert!(started.elapsed() >= STREAM_CONNECT_RETRY_DELAY);
+        assert!(attempts.load(Ordering::Acquire) < 100);
+    }
+
+    #[test]
+    fn websocket_handshake_cancellation_releases_without_a_background_worker() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok((_stream, _)) => {
+                        thread::sleep(Duration::from_millis(250));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if started.elapsed() >= Duration::from_secs(1) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            connect_stream_socket_with_resolver(
+                format!("ws://{address}/stream"),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Arc::new(move || worker_cancelled.load(Ordering::Acquire)),
+                |host, port, _timeout| {
+                    (host, port)
+                        .to_socket_addrs()
+                        .map(|addresses| addresses.collect())
+                },
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        cancelled.store(true, Ordering::Release);
+        let error = worker.join().unwrap().unwrap_err();
+        server.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            error.to_string().contains("cancelled"),
+            "unexpected cancellation error: {error}"
+        );
+    }
 
     #[test]
     fn interval_values_match_binance_spot_contract() {
@@ -1081,7 +1901,10 @@ mod tests {
 
     #[test]
     fn market_endpoints_keep_spot_and_usd_margined_futures_separate() {
-        assert_eq!(Market::Spot.rest_base_url(), "https://data-api.binance.vision");
+        assert_eq!(
+            Market::Spot.rest_base_url(),
+            "https://data-api.binance.vision"
+        );
         assert_eq!(
             Market::UsdMarginedFutures.rest_base_url(),
             "https://fapi.binance.com"
@@ -1113,6 +1936,14 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn catalog_identity_accepts_ascii_codes_only() {
+        assert_eq!(normalize_symbol("btcusdt").unwrap(), "BTCUSDT");
+        assert_eq!(normalize_asset("usdt").unwrap(), "USDT");
+        assert!(normalize_symbol("币安人生USDT").is_err());
+        assert!(normalize_asset("币安人生").is_err());
     }
 
     #[test]
@@ -1207,6 +2038,17 @@ mod tests {
                 "symbol": "OLDUSDT",
                 "status": "BREAK",
                 "baseAsset": "OLD",
+                "quoteAsset": "USDT",
+                "isSpotTradingAllowed": true
+            }))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            parse_spot_symbol(&json!({
+                "symbol": "币安人生USDT",
+                "status": "TRADING",
+                "baseAsset": "币安人生",
                 "quoteAsset": "USDT",
                 "isSpotTradingAllowed": true
             }))
@@ -1368,7 +2210,12 @@ mod tests {
         assert_eq!(update.kline.volume, 5.0);
         assert!(!state.awaiting_calibration());
 
-        assert!(state.apply(&RealtimeEvent::Kline(baseline)).unwrap().is_some());
+        assert!(
+            state
+                .apply(&RealtimeEvent::Kline(baseline))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1453,15 +2300,15 @@ mod tests {
             if let Some(update) = state.apply(&event).unwrap() {
                 let now = std::time::Instant::now();
                 if let Some(previous) = last_update_at {
-                    max_update_gap_ms = max_update_gap_ms
-                        .max(now.duration_since(previous).as_millis());
+                    max_update_gap_ms =
+                        max_update_gap_ms.max(now.duration_since(previous).as_millis());
                 }
                 last_update_at = Some(now);
                 updates += 1;
                 if last_close.is_some_and(|close| close != update.kline.close) {
                     if let Some(previous) = last_price_change_at {
-                        max_price_change_gap_ms = max_price_change_gap_ms
-                            .max(now.duration_since(previous).as_millis());
+                        max_price_change_gap_ms =
+                            max_price_change_gap_ms.max(now.duration_since(previous).as_millis());
                     }
                     last_price_change_at = Some(now);
                     price_changes += 1;
@@ -1555,8 +2402,8 @@ mod tests {
             if state.apply(&event).unwrap().is_some() {
                 let now = std::time::Instant::now();
                 if let Some(previous) = last_update_at {
-                    max_update_gap_ms = max_update_gap_ms
-                        .max(now.duration_since(previous).as_millis());
+                    max_update_gap_ms =
+                        max_update_gap_ms.max(now.duration_since(previous).as_millis());
                 }
                 last_update_at = Some(now);
                 updates += 1;

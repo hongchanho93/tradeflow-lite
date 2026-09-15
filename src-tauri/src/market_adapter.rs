@@ -594,7 +594,7 @@ mod tests {
         HistoryResponse, MarketDataAdapter, ProviderCapabilities, ProviderDescriptor,
         is_valid_provider_id,
     };
-    use crate::contracts::{AppError, Adjustment, Resolution, SymbolKind};
+    use crate::contracts::{Adjustment, AppError, Resolution, SymbolKind};
 
     static INVALID_ID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         id: "bad|provider",
@@ -622,10 +622,7 @@ mod tests {
             &INVALID_ID_DESCRIPTOR
         }
 
-        fn fetch_history(
-            &self,
-            _request: HistoryRequest,
-        ) -> Result<HistoryResponse, AppError> {
+        fn fetch_history(&self, _request: HistoryRequest) -> Result<HistoryResponse, AppError> {
             unreachable!("invalid provider descriptor must be rejected before invocation")
         }
     }

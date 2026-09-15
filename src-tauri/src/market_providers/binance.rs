@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -224,9 +225,17 @@ fn start_realtime(request: RealtimeRequest, sink: Arc<dyn RealtimeSink>, usd_mar
         emit_status(&request, &sink, "connecting", None);
         while request.is_active() {
             let connection = if usd_margined {
-                RealtimeStream::connect_usd_margined_market(&code, interval)
+                RealtimeStream::connect_usd_margined_market_with_cancellation(
+                    &code,
+                    interval,
+                    request_cancellation_check(&request),
+                )
             } else {
-                RealtimeStream::connect(&code, interval)
+                RealtimeStream::connect_with_cancellation(
+                    &code,
+                    interval,
+                    request_cancellation_check(&request),
+                )
             };
             match connection {
                 Ok(mut stream) => {
@@ -414,7 +423,13 @@ fn start_realtime(request: RealtimeRequest, sink: Arc<dyn RealtimeSink>, usd_mar
                         }
                     }
                 }
-                Err(error) => emit_reconnecting(&request, &sink, error.to_string()),
+                Err(error) => {
+                    if request.is_active() {
+                        emit_reconnecting(&request, &sink, error.to_string());
+                    } else {
+                        break;
+                    }
+                }
             }
             if !wait_while_active(&request, retry_delay) {
                 break;
@@ -443,7 +458,11 @@ fn spawn_usd_margined_depth(
         let symbol_id = request.symbol.as_str().to_string();
         let code = request.symbol.parts().1.to_string();
         while request.is_active() {
-            match RealtimeStream::connect_usd_margined_depth(&code, interval) {
+            match RealtimeStream::connect_usd_margined_depth_with_cancellation(
+                &code,
+                interval,
+                request_cancellation_check(&request),
+            ) {
                 Ok(mut stream) => {
                     retry_delay = Duration::from_secs(1);
                     let mut first_depth_emitted = false;
@@ -494,10 +513,16 @@ fn spawn_usd_margined_depth(
                         }
                     }
                 }
-                Err(error) => eprintln!(
-                    "market.realtime.depth_reconnecting request_id={} provider={} symbol={} error={error}",
-                    request.request_id, request.provider_id, symbol_id
-                ),
+                Err(error) => {
+                    if request.is_active() {
+                        eprintln!(
+                            "market.realtime.depth_reconnecting request_id={} provider={} symbol={} error={error}",
+                            request.request_id, request.provider_id, symbol_id
+                        );
+                    } else {
+                        break;
+                    }
+                }
             }
             if !wait_while_active(&request, retry_delay) {
                 break;
@@ -570,6 +595,14 @@ fn wait_while_active(request: &RealtimeRequest, duration: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     request.is_active()
+}
+
+fn request_cancellation_check(
+    request: &RealtimeRequest,
+) -> impl Fn() -> bool + Send + Sync + 'static {
+    let active_request_id = Arc::clone(&request.active_request_id);
+    let request_id = request.request_id;
+    move || active_request_id.load(Ordering::Acquire) != request_id
 }
 
 fn emit_status(
@@ -741,9 +774,14 @@ fn map_error(error: tradeflow_binance_market_data::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinanceSpotAdapter, BinanceUsdMarginedAdapter, interval_for};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{BinanceSpotAdapter, BinanceUsdMarginedAdapter, interval_for, wait_while_active};
     use crate::contracts::{Adjustment, Resolution, Symbol, SymbolKind};
-    use crate::market_adapter::MarketDataAdapter;
+    use crate::market_adapter::{MarketDataAdapter, RealtimeRequest};
     use crate::market_router::{HistoryRequest, fetch_history};
     use tradeflow_binance_market_data::Interval;
 
@@ -774,6 +812,29 @@ mod tests {
         assert!(usdm.capabilities.quote);
         assert!(usdm.capabilities.catalog);
         assert!(usdm.capabilities.realtime);
+    }
+
+    #[test]
+    fn realtime_backoff_wait_releases_after_request_cancellation() {
+        let active_request_id = Arc::new(AtomicU64::new(7));
+        let request = RealtimeRequest {
+            request_id: 7,
+            provider_id: "binance_spot",
+            symbol: Symbol::new("BINANCE", "BTCUSDT").unwrap(),
+            kind: SymbolKind::Crypto,
+            resolution: Resolution::Minute1,
+            active_request_id: Arc::clone(&active_request_id),
+        };
+        let started = Instant::now();
+        let worker = thread::spawn(move || wait_while_active(&request, Duration::from_secs(15)));
+        thread::sleep(Duration::from_millis(20));
+        active_request_id.store(8, Ordering::Release);
+
+        assert!(!worker.join().unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancelled realtime backoff worker did not release promptly"
+        );
     }
 
     #[test]

@@ -13,12 +13,14 @@ mod history;
 mod hosts;
 mod quote;
 #[cfg(test)]
+mod real_adapters;
+#[cfg(test)]
 mod real_market;
 
 use serde::Serialize;
 
 use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
-use crate::tdx::standard::{Market, SecurityQuotes};
+use crate::tdx::standard::{Market, SecurityQuote, SecurityQuotes};
 use crate::tdx::{SecurityCode, Session};
 use history::HistoryQuery;
 pub use hosts::HostProbe;
@@ -204,9 +206,24 @@ pub fn fetch_quote_snapshot(symbol: Symbol, kind: SymbolKind) -> Result<QuoteSna
                 .into_iter()
                 .next()
                 .ok_or_else(|| "quote response was empty".to_string())?;
+            let identity = match validate_tdx_quote_identity(&quote, market, security_code) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    eprintln!(
+                        "market.quote.identity_mismatch exchange={} code={} expected_market={} raw_market={} raw_code={} error={}",
+                        exchange,
+                        code,
+                        market.code(),
+                        quote.market,
+                        quote.code,
+                        error
+                    );
+                    return Err(error);
+                }
+            };
             let quote = QuoteSnapshot::from_tdx(&quote, &kind);
             if quote.is_valid() {
-                Ok(quote)
+                Ok((quote, identity))
             } else {
                 Err("quote response was invalid".to_string())
             }
@@ -225,13 +242,81 @@ pub fn fetch_quote_snapshot(symbol: Symbol, kind: SymbolKind) -> Result<QuoteSna
         )
     })?;
     hosts::record_attempts(Some(&success.host), &success.attempts);
-    Ok(success.value)
+    let (quote, identity) = success.value;
+    eprintln!(
+        "market.quote.identity exchange={} code={} host={} expected_market={} raw_market={} raw_code={}",
+        exchange,
+        code,
+        success.host,
+        market.code(),
+        identity.market,
+        identity.code
+    );
+    Ok(quote)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TdxQuoteIdentity {
+    pub market: u8,
+    pub code: SecurityCode,
+}
+
+pub(crate) fn validate_tdx_quote_identity(
+    quote: &SecurityQuote,
+    expected_market: Market,
+    expected_code: SecurityCode,
+) -> Result<TdxQuoteIdentity, String> {
+    if quote.market != expected_market.code() || quote.code != expected_code {
+        return Err(format!(
+            "quote response identity mismatch: expected market={} code={}, got market={} code={}",
+            expected_market.code(),
+            expected_code,
+            quote.market,
+            quote.code
+        ));
+    }
+    Ok(TdxQuoteIdentity {
+        market: quote.market,
+        code: quote.code,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{normalize_history_count, tdx_market};
-    use crate::tdx::standard::Market;
+    use crate::tdx::SecurityCode;
+    use crate::tdx::standard::{BookLevel, Market, SecurityQuote};
+
+    fn raw_quote(market: u8, code: &str) -> SecurityQuote {
+        SecurityQuote {
+            market,
+            code: SecurityCode::new(code).unwrap(),
+            active1: 0,
+            price: 1_000,
+            previous_close: 1_000,
+            open: 1_000,
+            high: 1_000,
+            low: 1_000,
+            server_time: 0,
+            unknown_1: 0,
+            volume: 0,
+            current_volume: 0,
+            amount: 0.0,
+            sell_volume: 0,
+            buy_volume: 0,
+            unknown_2: 0,
+            unknown_3: 0,
+            bids: [BookLevel::default(); 5],
+            asks: [BookLevel::default(); 5],
+            unknown_4: 0,
+            unknown_5: 0,
+            unknown_6: 0,
+            unknown_7: 0,
+            unknown_8: 0,
+            speed: 0,
+            active2: 0,
+        }
+    }
 
     #[test]
     fn deep_history_requests_are_not_truncated_to_one_protocol_page() {
@@ -251,5 +336,35 @@ mod tests {
             [0, 1, 2]
         );
         assert!(tdx_market("HK").is_err());
+    }
+
+    #[test]
+    fn tdx_quote_identity_accepts_matching_market_and_code() {
+        let expected_code = SecurityCode::new("600000").unwrap();
+        let identity = super::validate_tdx_quote_identity(
+            &raw_quote(Market::Shanghai.code(), "600000"),
+            Market::Shanghai,
+            expected_code,
+        )
+        .unwrap();
+
+        assert_eq!(identity.market, Market::Shanghai.code());
+        assert_eq!(identity.code, expected_code);
+    }
+
+    #[test]
+    fn tdx_quote_identity_rejects_wrong_market_or_code() {
+        let expected_code = SecurityCode::new("600000").unwrap();
+        for (label, quote) in [
+            ("market", raw_quote(Market::Shenzhen.code(), "600000")),
+            ("code", raw_quote(Market::Shanghai.code(), "600001")),
+        ] {
+            let error = super::validate_tdx_quote_identity(&quote, Market::Shanghai, expected_code)
+                .unwrap_err();
+            assert!(
+                error.contains("quote response identity mismatch"),
+                "{label}: {error}"
+            );
+        }
     }
 }

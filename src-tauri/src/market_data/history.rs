@@ -7,6 +7,7 @@ use chrono::{Datelike, NaiveDate};
 
 use super::clock::{shanghai_date, shanghai_timestamp};
 use super::quote::QuoteSnapshot;
+use super::validate_tdx_quote_identity;
 use crate::contracts::{Adjustment, Bar, Resolution, SymbolKind};
 use crate::tdx::standard::{
     BarPeriod, IndexBars, MAX_BARS_PER_REQUEST, Market, RawBar, SecurityBars, SecurityQuotes,
@@ -120,9 +121,24 @@ pub(crate) fn load_history<S: Session<Standard>>(
             })
             .map_err(|error| error.to_string())
         {
-            Ok(quotes) => quotes
-                .first()
-                .map(|quote| QuoteSnapshot::from_tdx(quote, &query.kind)),
+            Ok(quotes) => match quotes.first() {
+                Some(quote) => match validate_tdx_quote_identity(quote, query.market, query.code) {
+                    Ok(_) => Some(QuoteSnapshot::from_tdx(quote, &query.kind)),
+                    Err(error) => {
+                        eprintln!(
+                            "market.history.quote.identity_mismatch provider=tdx market={} code={} expected_market={} expected_code={} raw_market={} raw_code={} message={error}",
+                            query.market.code(),
+                            query.code,
+                            query.market.code(),
+                            query.code,
+                            quote.market,
+                            quote.code
+                        );
+                        None
+                    }
+                },
+                None => None,
+            },
             Err(error) => {
                 eprintln!(
                     "market.history.quote_degraded provider=tdx market={} code={} message={error}",
@@ -368,8 +384,8 @@ mod tests {
     use crate::contracts::{Adjustment, Bar, Resolution, SymbolKind};
     use crate::market_data::clock::shanghai_timestamp;
     use crate::tdx::standard::{
-        IndexBars, Market, RawBar, SecurityBars, SecurityQuotes, Standard, XdxrDetail, XdxrEntry,
-        XdxrInfo,
+        BookLevel, IndexBars, Market, RawBar, SecurityBars, SecurityQuote, SecurityQuotes,
+        Standard, XdxrDetail, XdxrEntry, XdxrInfo,
     };
     use crate::tdx::{Request, SecurityCode, Session, TdxDate, TdxDateTime, TdxError};
 
@@ -432,6 +448,68 @@ mod tests {
             close: 10.5 + open,
             volume: 1.0,
             amount: 10.0,
+        }
+    }
+
+    fn pre_open_zero_quote() -> SecurityQuote {
+        SecurityQuote {
+            market: Market::Shanghai.code(),
+            code: SecurityCode::new("600000").unwrap(),
+            active1: 0,
+            price: 0,
+            previous_close: 1_000,
+            open: 0,
+            high: 0,
+            low: 0,
+            server_time: 0,
+            unknown_1: 0,
+            volume: 0,
+            current_volume: 0,
+            amount: 0.0,
+            sell_volume: 0,
+            buy_volume: 0,
+            unknown_2: 0,
+            unknown_3: 0,
+            bids: [BookLevel::default(); 5],
+            asks: [BookLevel::default(); 5],
+            unknown_4: 0,
+            unknown_5: 0,
+            unknown_6: 0,
+            unknown_7: 0,
+            unknown_8: 0,
+            speed: 0,
+            active2: 0,
+        }
+    }
+
+    fn quote_with_identity(market: Market, code: &str) -> SecurityQuote {
+        SecurityQuote {
+            market: market.code(),
+            code: SecurityCode::new(code).unwrap(),
+            active1: 0,
+            price: 1_050,
+            previous_close: 1_000,
+            open: 1_020,
+            high: 1_060,
+            low: 1_010,
+            server_time: 0,
+            unknown_1: 0,
+            volume: 100,
+            current_volume: 10,
+            amount: 1_000.0,
+            sell_volume: 0,
+            buy_volume: 0,
+            unknown_2: 0,
+            unknown_3: 0,
+            bids: [BookLevel::default(); 5],
+            asks: [BookLevel::default(); 5],
+            unknown_4: 0,
+            unknown_5: 0,
+            unknown_6: 0,
+            unknown_7: 0,
+            unknown_8: 0,
+            speed: 0,
+            active2: 0,
         }
     }
 
@@ -516,6 +594,110 @@ mod tests {
         assert_eq!(session.calls, ["security_bars 0 2", "quotes"]);
         assert_eq!(data.bars.len(), 2);
         assert!(data.quote.is_none());
+    }
+
+    #[test]
+    fn matching_tdx_quote_identity_is_attached_after_raw_validation() {
+        let mut session = FakeSession::default();
+        session
+            .responses
+            .push_back(Box::new(vec![raw(11, 0.0), raw(12, 0.0)]));
+        session
+            .responses
+            .push_back(Box::new(vec![quote_with_identity(
+                Market::Shanghai,
+                "600000",
+            )]));
+        let mut query = query(SymbolKind::Stock, Resolution::Day, Adjustment::None, 2);
+        query.include_quote = true;
+
+        let data = load_history(&mut session, &query, today()).unwrap();
+
+        assert_eq!(session.calls, ["security_bars 0 2", "quotes"]);
+        assert_eq!(data.bars.len(), 2);
+        let quote = data
+            .quote
+            .expect("matching raw identity must be attachable");
+        assert_eq!((quote.last, quote.previous_close), (10.5, 10.0));
+        assert!(quote.is_valid());
+    }
+
+    #[test]
+    fn mismatched_tdx_quote_identity_is_dropped_without_discarding_history() {
+        for (label, quote) in [
+            ("market", quote_with_identity(Market::Shenzhen, "600000")),
+            ("code", quote_with_identity(Market::Shanghai, "600001")),
+        ] {
+            let mut session = FakeSession::default();
+            session
+                .responses
+                .push_back(Box::new(vec![raw(11, 0.0), raw(12, 0.0)]));
+            session.responses.push_back(Box::new(vec![quote]));
+            let mut query = query(SymbolKind::Stock, Resolution::Day, Adjustment::None, 2);
+            query.include_quote = true;
+
+            let data = load_history(&mut session, &query, today()).unwrap();
+
+            assert_eq!(session.calls, ["security_bars 0 2", "quotes"], "{label}");
+            assert_eq!(data.bars.len(), 2, "{label}: history must remain usable");
+            assert!(
+                data.quote.is_none(),
+                "{label}: wrong raw identity must not reach the UI as a quote"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_open_zero_quote_keeps_history_and_is_unavailable_as_independent_quote() {
+        let mut session = FakeSession::default();
+        session
+            .responses
+            .push_back(Box::new(vec![raw(11, 0.0), raw(12, 0.0)]));
+        session
+            .responses
+            .push_back(Box::new(vec![pre_open_zero_quote()]));
+        let mut query = query(SymbolKind::Stock, Resolution::Day, Adjustment::None, 2);
+        query.include_quote = true;
+
+        let data = load_history(&mut session, &query, today()).unwrap();
+
+        assert_eq!(session.calls, ["security_bars 0 2", "quotes"]);
+        assert_eq!(data.bars.len(), 2, "invalid quote must not discard history");
+        assert!(
+            data.bars.windows(2).all(|bars| bars[0].time < bars[1].time),
+            "history bars must remain ascending"
+        );
+
+        let source_quote = data.quote.expect("fake TDX session returned a quote");
+        assert_eq!(
+            (
+                source_quote.last,
+                source_quote.previous_close,
+                source_quote.open,
+                source_quote.high,
+                source_quote.low,
+                source_quote.volume,
+                source_quote.amount,
+            ),
+            (0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            "fixture must represent a pre-open zero quote with a valid previous close"
+        );
+        assert!(!source_quote.is_valid());
+
+        let history_quote = Some(source_quote.clone()).filter(|quote| quote.is_valid());
+        assert!(
+            history_quote.is_none(),
+            "pre-open zero quote must degrade attached history quote to None"
+        );
+
+        let independent_quote = source_quote.is_valid().then_some(()).ok_or_else(|| {
+            crate::contracts::AppError::new("market_data_unavailable", "quote response was invalid")
+        });
+        assert_eq!(
+            independent_quote.unwrap_err().code,
+            "market_data_unavailable",
+            "independent quote must remain strict when pre-open data is unavailable"
+        );
     }
 
     #[test]

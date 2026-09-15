@@ -506,7 +506,7 @@ pub fn fetch_quote(request: QuoteRequest) -> Result<QuoteResponse, AppError> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
         AdapterRegistration, Adjustment, CatalogRequest, CatalogSymbol, HistoryRequest,
@@ -600,7 +600,7 @@ mod tests {
 
     #[cfg(not(feature = "provider-binance"))]
     #[test]
-    fn disabled_binance_provider_does_not_fall_through_to_tdx() {
+    fn disabled_binance_spot_provider_does_not_fall_through_to_tdx() {
         let symbol = Symbol::new("BINANCE", "BTCUSDT").unwrap();
         let error = super::fetch_history(HistoryRequest {
             provider_id: "binance_spot".to_string(),
@@ -646,10 +646,62 @@ mod tests {
         assert_eq!(realtime_error.code, "market_data_source_unavailable");
     }
 
+    #[cfg(not(feature = "provider-binance"))]
+    #[test]
+    fn disabled_binance_usdm_provider_does_not_fall_through_to_tdx() {
+        let router = MarketRouter::builtin().unwrap();
+        let symbol = Symbol::new("BINANCE_USDM", "BTCUSDT").unwrap();
+        let history_error = router
+            .fetch_history(HistoryRequest {
+                provider_id: "binance_usdm".to_string(),
+                symbol: symbol.clone(),
+                kind: SymbolKind::Crypto,
+                resolution: Resolution::Minute1,
+                adjustment: Adjustment::None,
+                count: 2,
+                include_quote: false,
+            })
+            .unwrap_err();
+        assert_eq!(history_error.code, "market_data_source_unavailable");
+
+        let quote_error = router
+            .fetch_quote(QuoteRequest {
+                provider_id: "binance_usdm".to_string(),
+                symbol: symbol.clone(),
+                kind: SymbolKind::Crypto,
+            })
+            .unwrap_err();
+        assert_eq!(quote_error.code, "market_data_source_unavailable");
+
+        let catalog_error = router
+            .list_catalog(CatalogRequest {
+                provider_id: "binance_usdm".to_string(),
+                venue: "BINANCE_USDM".to_string(),
+            })
+            .unwrap_err();
+        assert_eq!(catalog_error.code, "market_data_source_unavailable");
+
+        let realtime_error = router
+            .start_realtime(
+                RealtimeRequest {
+                    request_id: 2,
+                    provider_id: "binance_usdm",
+                    symbol,
+                    kind: SymbolKind::Crypto,
+                    resolution: Resolution::Minute1,
+                    active_request_id: Arc::new(AtomicU64::new(2)),
+                },
+                Arc::new(CollectSink::default()),
+            )
+            .unwrap_err();
+        assert_eq!(realtime_error.code, "market_data_source_unavailable");
+    }
+
     #[test]
     fn fake_provider_calls_history_quote_catalog_and_realtime_facets() {
         let router = MarketRouter::new([AdapterRegistration::new(&FAKE_ADAPTER)]).unwrap();
         let symbol = Symbol::new("EXAMPLE", "ABC").unwrap();
+        reset_fake_facet_calls();
         let response = router
             .fetch_history(HistoryRequest {
                 provider_id: "fake".to_string(),
@@ -663,6 +715,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.symbol, symbol);
         assert!(response.quote.is_some());
+        assert_eq!(FAKE_HISTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_QUOTE_CALLS.load(Ordering::Acquire), 0);
+        assert_eq!(FAKE_CATALOG_CALLS.load(Ordering::Acquire), 0);
+        assert_eq!(FAKE_REALTIME_STARTS.load(Ordering::Acquire), 0);
         assert!(
             router
                 .fetch_quote(QuoteRequest {
@@ -672,6 +728,10 @@ mod tests {
                 })
                 .is_ok()
         );
+        assert_eq!(FAKE_HISTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_QUOTE_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_CATALOG_CALLS.load(Ordering::Acquire), 0);
+        assert_eq!(FAKE_REALTIME_STARTS.load(Ordering::Acquire), 0);
         let rows = router
             .list_catalog(CatalogRequest {
                 provider_id: "fake".to_string(),
@@ -679,6 +739,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows[0].symbol, "EXAMPLE:ABC");
+        assert_eq!(FAKE_HISTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_QUOTE_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_CATALOG_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_REALTIME_STARTS.load(Ordering::Acquire), 0);
 
         let sink = Arc::new(CollectSink::default());
         let active = Arc::new(AtomicU64::new(7));
@@ -697,10 +761,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sink.events.lock().unwrap().len(), 1);
-        assert_eq!(
-            FAKE_REALTIME_STARTS.load(std::sync::atomic::Ordering::Acquire),
-            1
-        );
+        assert_eq!(FAKE_HISTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_QUOTE_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_CATALOG_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_REALTIME_STARTS.load(Ordering::Acquire), 1);
         active.store(8, std::sync::atomic::Ordering::Release);
         let stale_sink = Arc::new(CollectSink::default());
         router
@@ -717,8 +781,11 @@ mod tests {
             )
             .unwrap();
         assert!(stale_sink.events.lock().unwrap().is_empty());
+        assert_eq!(FAKE_HISTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_QUOTE_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(FAKE_CATALOG_CALLS.load(Ordering::Acquire), 1);
         assert_eq!(
-            FAKE_REALTIME_STARTS.load(std::sync::atomic::Ordering::Acquire),
+            FAKE_REALTIME_STARTS.load(Ordering::Acquire),
             1,
             "stale subscription must not start the provider again"
         );
@@ -805,8 +872,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "provider_contract_violation");
 
-        let empty_error = super::validate_catalog_symbols(&FAKE_DESCRIPTOR, "EXAMPLE", &[])
-            .unwrap_err();
+        let empty_error =
+            super::validate_catalog_symbols(&FAKE_DESCRIPTOR, "EXAMPLE", &[]).unwrap_err();
         assert_eq!(empty_error.code, "provider_contract_violation");
     }
 
@@ -871,7 +938,8 @@ mod tests {
             count: 2,
             include_quote: false,
         };
-        let mut quote_without_capability = fake_response(no_quote_capability_request.symbol.clone());
+        let mut quote_without_capability =
+            fake_response(no_quote_capability_request.symbol.clone());
         quote_without_capability.diagnostics.source = "malformed";
         let no_quote_capability_error = super::validate_history_response(
             AdapterRegistration::new(&MALFORMED_ADAPTER),
@@ -879,7 +947,10 @@ mod tests {
             &quote_without_capability,
         )
         .unwrap_err();
-        assert_eq!(no_quote_capability_error.code, "provider_capability_mismatch");
+        assert_eq!(
+            no_quote_capability_error.code,
+            "provider_capability_mismatch"
+        );
 
         let count_router =
             MarketRouter::new([AdapterRegistration::new(&TOO_MANY_BARS_ADAPTER)]).unwrap();
@@ -1046,6 +1117,9 @@ mod tests {
         response: BadResponse,
     }
     static FAKE_ADAPTER: FakeAdapter = FakeAdapter;
+    static FAKE_HISTORY_CALLS: AtomicU64 = AtomicU64::new(0);
+    static FAKE_QUOTE_CALLS: AtomicU64 = AtomicU64::new(0);
+    static FAKE_CATALOG_CALLS: AtomicU64 = AtomicU64::new(0);
     static FAKE_REALTIME_STARTS: AtomicU64 = AtomicU64::new(0);
     static OVERLAP_ADAPTER: OverlapAdapter = OverlapAdapter;
     static MALFORMED_ADAPTER: MalformedAdapter = MalformedAdapter;
@@ -1084,8 +1158,16 @@ mod tests {
         }
     }
 
+    fn reset_fake_facet_calls() {
+        FAKE_HISTORY_CALLS.store(0, Ordering::Release);
+        FAKE_QUOTE_CALLS.store(0, Ordering::Release);
+        FAKE_CATALOG_CALLS.store(0, Ordering::Release);
+        FAKE_REALTIME_STARTS.store(0, Ordering::Release);
+    }
+
     impl QuoteAdapter for FakeAdapter {
         fn fetch_quote(&self, _request: QuoteRequest) -> Result<QuoteResponse, AppError> {
+            FAKE_QUOTE_CALLS.fetch_add(1, Ordering::AcqRel);
             Ok(QuoteResponse {
                 provider_id: "fake".to_string(),
                 symbol: Symbol::new("EXAMPLE", "ABC").unwrap(),
@@ -1099,6 +1181,7 @@ mod tests {
 
     impl super::CatalogAdapter for FakeAdapter {
         fn list_symbols(&self, _request: CatalogRequest) -> Result<Vec<CatalogSymbol>, AppError> {
+            FAKE_CATALOG_CALLS.fetch_add(1, Ordering::AcqRel);
             Ok(vec![CatalogSymbol {
                 provider_id: "fake".to_string(),
                 symbol: "EXAMPLE:ABC".to_string(),
@@ -1136,6 +1219,7 @@ mod tests {
         }
 
         fn fetch_history(&self, request: HistoryRequest) -> Result<HistoryResponse, AppError> {
+            FAKE_HISTORY_CALLS.fetch_add(1, Ordering::AcqRel);
             Ok(fake_response(request.symbol))
         }
 
