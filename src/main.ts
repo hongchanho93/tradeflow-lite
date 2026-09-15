@@ -70,6 +70,14 @@ import trashToolbarIcon from './assets/drawing-toolbar/trash.svg?raw';
 import undoToolbarIcon from './assets/drawing-toolbar/undo.svg?raw';
 import zoomToolbarIcon from './assets/drawing-toolbar/zoom.svg?raw';
 import priceScaleGearIcon from './assets/price-scale-gear.svg?raw';
+import addSymbolWidgetIcon from './assets/widget-bar/add-symbol.svg?raw';
+import dataWindowWidgetIcon from './assets/widget-bar/data-window.svg?raw';
+import marketDepthWidgetIcon from './assets/widget-bar/market-depth.svg?raw';
+import moveDownWidgetIcon from './assets/widget-bar/move-down.svg?raw';
+import moveUpWidgetIcon from './assets/widget-bar/move-up.svg?raw';
+import refreshWidgetIcon from './assets/widget-bar/refresh.svg?raw';
+import removeSymbolWidgetIcon from './assets/widget-bar/remove-symbol.svg?raw';
+import watchlistWidgetIcon from './assets/widget-bar/watchlist.svg?raw';
 import { LineToolUpArrow } from './drawing-tools/up-arrow';
 import {
   barsForSeriesUpdate,
@@ -405,6 +413,8 @@ let priceScaleInverted = chartPreferences.priceScaleInverted;
 let secondaryPaneOrder: SecondaryPane[] = chartPreferences.paneOrder;
 let mainSeriesOrder: MainOverlaySeries[] = chartPreferences.mainSeriesOrder;
 let watchlistSymbols = loadWatchlist(localStorage, new Set(marketSymbolById.keys()));
+const watchlistQuotes = new Map<string, QuoteSnapshot>();
+let watchlistQuoteRefreshId = 0;
 const drawingScopes = loadDrawingScopes(localStorage, knownDrawingTypes);
 const markerScopes = loadMarkerScopes(localStorage);
 let drawingHistory = new DrawingHistory('[]');
@@ -530,8 +540,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       </details>
       <div class="toolbar-spacer"></div>
       <button id="status" class="connection-status" aria-label="正在连接" title="点击重新测速"><i></i><span>正在连接</span></button>
-      <button id="watchlist-toggle" class="toolbar-button" aria-label="打开自选列表">自选</button>
-      <button id="market-data-toggle" class="toolbar-button" aria-label="打开盘口和成交">盘口</button>
       <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
       <button id="fit-chart" class="toolbar-button" aria-label="适应全部数据">${icons.fullscreen}</button>
       <button id="open-chart-settings" class="toolbar-button icon-only" aria-label="设置" title="设置">${priceScaleGearIcon}</button>
@@ -564,7 +572,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <label class="chart-settings-row"><span>边框</span><input data-chart-setting="borderVisible" type="checkbox" /></label>
             <label class="chart-settings-row"><span>影线</span><input data-chart-setting="wickVisible" type="checkbox" /></label>
             <div class="chart-settings-section-title">数据修改</div>
-            <label class="chart-settings-row"><span>时区</span><select aria-label="时区"><option>(UTC+8) 上海</option></select></label>
+            <label class="chart-settings-row"><span>时区</span><select id="chart-settings-time-zone" aria-label="时区">${TRADING_TIME_ZONE_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}</select></label>
           </div>
           <div class="chart-settings-panel" data-settings-panel="status" hidden>
             <h3>状态行</h3>
@@ -616,7 +624,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <span id="symbol-result-count"></span>
         </div>
         <div id="symbol-results" class="symbol-results" role="listbox"></div>
-        <footer class="symbol-dialog-footer">输入代码、名称或拼音查找品种，点击结果即可切换图表</footer>
+        <footer id="symbol-dialog-footer" class="symbol-dialog-footer">输入代码、名称或拼音查找品种，点击结果即可切换图表</footer>
       </section>
     </div>
 
@@ -677,7 +685,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <button id="lock-drawings" class="rail-button" aria-label="锁定绘图" title="锁定绘图"><span data-icon-state="unlocked">${icons.lock}</span><span data-icon-state="locked">${icons.lockActive}</span></button>
         <button id="undo-drawing" class="rail-button" aria-label="撤销绘图操作" title="撤销" disabled>${icons.undo}</button>
         <button id="redo-drawing" class="rail-button" aria-label="重做绘图操作" title="重做" disabled>${icons.redo}</button>
-        <button id="drawing-manager-toggle" class="rail-button" aria-label="绘图对象管理" title="对象管理">${icons.layers}</button>
         <div class="rail-spacer"></div>
         <button id="clear-drawings" class="rail-button" aria-label="移除全部绘图" title="移除全部绘图">${icons.trash}</button>
       </aside>
@@ -778,59 +785,92 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
         </details>
         <div id="volume-legend" class="volume-legend" hidden>成交量 <span>--</span></div>
-        <aside id="watchlist-panel" class="watchlist-panel" hidden>
-          <header><strong>自选</strong><span>本地保存</span></header>
-          <div id="watchlist-items" class="watchlist-items"></div>
-          <p id="watchlist-empty">点击顶部星标添加当前证券</p>
-        </aside>
-        <aside id="market-data-panel" class="market-data-panel" hidden>
-          <header>
-            <div><strong id="market-data-title">盘口</strong><span id="market-data-symbol">--</span></div>
-            <button id="close-market-data" type="button" aria-label="关闭盘口">${icons.close}</button>
-          </header>
-          <nav class="market-data-tabs" aria-label="公开市场数据">
-            <button type="button" data-market-data-tab="depth" aria-selected="true">盘口</button>
-            <button type="button" data-market-data-tab="trades" aria-selected="false">成交</button>
-            <button id="prediction-rules-tab" type="button" data-market-data-tab="rules" aria-selected="false" hidden>规则</button>
-          </nav>
-          <div id="market-data-unavailable" class="market-data-unavailable">当前品种暂未接入盘口和逐笔成交</div>
-          <section id="market-depth-view" class="market-depth-view">
-            <div class="market-best-prices"><span>卖一 <strong id="best-ask">--</strong></span><span>买一 <strong id="best-bid">--</strong></span></div>
-            <div class="market-table-head"><span>档位</span><span>价格</span><span>数量</span></div>
-            <div id="market-depth-asks" class="market-depth-levels asks"></div>
-            <div class="market-depth-spread"><span>价差</span><strong id="market-depth-spread">--</strong></div>
-            <div id="market-depth-bids" class="market-depth-levels bids"></div>
-          </section>
-          <section id="market-trades-view" class="market-trades-view" hidden>
-            <div class="market-table-head"><span>时间</span><span>价格</span><span>数量</span></div>
-            <div id="market-trades" class="market-trades"></div>
-          </section>
-          <section id="prediction-rules-view" class="prediction-rules-view" hidden>
-            <div class="prediction-outcomes" aria-label="预测结果">
-              <button id="prediction-yes" type="button">YES</button>
-              <button id="prediction-no" type="button">NO</button>
-            </div>
-            <dl class="prediction-stats">
-              <div><dt>当前概率</dt><dd id="prediction-current">--</dd></div>
-              <div><dt>24 小时</dt><dd id="prediction-change">--</dd></div>
-              <div><dt>截止时间</dt><dd id="prediction-end-date">--</dd></div>
-              <div><dt>成交量</dt><dd id="prediction-volume">--</dd></div>
-              <div><dt>流动性</dt><dd id="prediction-liquidity">--</dd></div>
-            </dl>
-            <h3>结算说明</h3>
-            <p id="prediction-description">--</p>
-            <a id="prediction-resolution-source" href="#" target="_blank" rel="noreferrer" hidden>查看官方结算来源</a>
-          </section>
-        </aside>
-        <aside id="drawing-manager" class="drawing-manager" hidden>
-          <header><strong>对象树</strong><button id="close-drawing-manager" aria-label="关闭对象树">${icons.close}</button></header>
-          <div id="drawing-manager-items" class="drawing-manager-items"></div>
-          <p id="drawing-manager-empty">当前证券还没有绘图</p>
-        </aside>
         <div id="loading-layer" class="loading-layer"><span></span><span></span><span></span></div>
         <div id="chart-error" class="chart-error" hidden></div>
         <div id="chart-toast" class="chart-toast" role="status" hidden></div>
       </main>
+      <aside id="widget-bar" class="widget-bar" aria-label="右侧栏">
+        <div id="widget-bar-resizer" class="widget-bar-resizer" role="separator" aria-label="调整右侧栏宽度" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="520" tabindex="0"></div>
+        <div class="widget-bar-pages" hidden>
+          <section id="watchlist-panel" class="watchlist-panel" role="tabpanel" aria-labelledby="watchlist-toggle" hidden>
+            <header class="watchlist-toolbar">
+              <strong>自选</strong>
+              <span class="watchlist-toolbar-spacer"></span>
+              <button id="watchlist-refresh" type="button" aria-label="刷新自选行情" title="刷新自选行情">${refreshWidgetIcon}</button>
+              <button id="watchlist-panel-add" type="button" aria-label="搜索并添加证券" aria-controls="symbol-search-dialog" aria-expanded="false" title="添加商品代码">${addSymbolWidgetIcon}</button>
+            </header>
+            <div class="watchlist-columns" role="row">
+              <span role="columnheader">名称</span><span role="columnheader">最新价</span><span role="columnheader">涨跌</span><span role="columnheader">涨跌%</span>
+            </div>
+            <div id="watchlist-items" class="watchlist-items" role="table" aria-label="自选行情"></div>
+            <p id="watchlist-empty">点击右上角 + 添加当前证券</p>
+          </section>
+          <section id="market-data-panel" class="market-data-panel" role="tabpanel" aria-labelledby="market-data-toggle" hidden>
+            <header>
+              <div><strong id="market-data-title">盘口</strong><span id="market-data-symbol">--</span></div>
+              <button id="close-market-data" type="button" aria-label="关闭盘口">${icons.close}</button>
+            </header>
+            <nav class="market-data-tabs" aria-label="公开市场数据">
+              <button type="button" data-market-data-tab="depth" aria-selected="true">盘口</button>
+              <button type="button" data-market-data-tab="trades" aria-selected="false">成交</button>
+              <button id="prediction-rules-tab" type="button" data-market-data-tab="rules" aria-selected="false" hidden>规则</button>
+            </nav>
+            <div id="market-data-unavailable" class="market-data-unavailable">当前品种暂未接入盘口和逐笔成交</div>
+            <section id="market-depth-view" class="market-depth-view">
+              <div class="market-best-prices"><span>卖一 <strong id="best-ask">--</strong></span><span>买一 <strong id="best-bid">--</strong></span></div>
+              <div class="market-table-head"><span>档位</span><span>价格</span><span>数量</span></div>
+              <div id="market-depth-asks" class="market-depth-levels asks"></div>
+              <div class="market-depth-spread"><span>价差</span><strong id="market-depth-spread">--</strong></div>
+              <div id="market-depth-bids" class="market-depth-levels bids"></div>
+            </section>
+            <section id="market-trades-view" class="market-trades-view" hidden>
+              <div class="market-table-head"><span>时间</span><span>价格</span><span>数量</span></div>
+              <div id="market-trades" class="market-trades"></div>
+            </section>
+            <section id="prediction-rules-view" class="prediction-rules-view" hidden>
+              <div class="prediction-outcomes" aria-label="预测结果">
+                <button id="prediction-yes" type="button">YES</button>
+                <button id="prediction-no" type="button">NO</button>
+              </div>
+              <dl class="prediction-stats">
+                <div><dt>当前概率</dt><dd id="prediction-current">--</dd></div>
+                <div><dt>24 小时</dt><dd id="prediction-change">--</dd></div>
+                <div><dt>截止时间</dt><dd id="prediction-end-date">--</dd></div>
+                <div><dt>成交量</dt><dd id="prediction-volume">--</dd></div>
+                <div><dt>流动性</dt><dd id="prediction-liquidity">--</dd></div>
+              </dl>
+              <h3>结算说明</h3>
+              <p id="prediction-description">--</p>
+              <a id="prediction-resolution-source" href="#" target="_blank" rel="noreferrer" hidden>查看官方结算来源</a>
+            </section>
+          </section>
+          <section id="drawing-manager" class="drawing-manager" role="tabpanel" aria-labelledby="drawing-manager-toggle" hidden>
+            <header><strong>对象树</strong><button id="close-drawing-manager" aria-label="关闭对象树">${icons.close}</button></header>
+            <div id="drawing-manager-items" class="drawing-manager-items"></div>
+            <p id="drawing-manager-empty">当前证券还没有绘图</p>
+          </section>
+          <section id="data-window-panel" class="data-window-panel" role="tabpanel" aria-labelledby="data-window-toggle" hidden>
+            <header><strong>数据窗口</strong><span id="data-window-symbol">--</span></header>
+            <dl class="data-window-values">
+              <div><dt>时间</dt><dd id="data-window-time">--</dd></div>
+              <div><dt>开盘</dt><dd id="data-window-open">--</dd></div>
+              <div><dt>最高</dt><dd id="data-window-high">--</dd></div>
+              <div><dt>最低</dt><dd id="data-window-low">--</dd></div>
+              <div><dt>收盘</dt><dd id="data-window-close">--</dd></div>
+              <div><dt>涨跌</dt><dd id="data-window-change">--</dd></div>
+              <div><dt>涨跌幅</dt><dd id="data-window-change-percent">--</dd></div>
+              <div><dt>成交量</dt><dd id="data-window-volume">--</dd></div>
+            </dl>
+          </section>
+        </div>
+        <nav class="widget-bar-tabs" role="tablist" aria-label="右侧栏">
+          <button id="watchlist-toggle" class="widget-bar-tab" type="button" role="tab" aria-label="自选" aria-selected="false" aria-controls="watchlist-panel" title="自选">${watchlistWidgetIcon}</button>
+          <button id="market-data-toggle" class="widget-bar-tab" type="button" role="tab" aria-label="盘口" aria-selected="false" aria-controls="market-data-panel" title="盘口">${marketDepthWidgetIcon}</button>
+          <button id="drawing-manager-toggle" class="widget-bar-tab" type="button" role="tab" aria-label="对象树" aria-selected="false" aria-controls="drawing-manager" title="对象树">${objectTreeToolbarIcon}</button>
+          <button id="data-window-toggle" class="widget-bar-tab" type="button" role="tab" aria-label="数据窗口" aria-selected="false" aria-controls="data-window-panel" title="数据窗口">${dataWindowWidgetIcon}</button>
+          <span class="widget-bar-spacer"></span>
+        </nav>
+      </aside>
     </div>
   </div>
 `;
@@ -957,6 +997,8 @@ const chartWatermark = createTextWatermark(chart.panes()[0], {
 const input = document.querySelector<HTMLInputElement>('#search')!;
 const symbolDialogLayer = document.querySelector<HTMLDivElement>('#symbol-dialog-layer')!;
 const symbolDialog = document.querySelector<HTMLElement>('#symbol-search-dialog')!;
+const symbolDialogTitle = document.querySelector<HTMLElement>('#symbol-dialog-title')!;
+const symbolDialogFooter = document.querySelector<HTMLElement>('#symbol-dialog-footer')!;
 const symbolDialogInput = document.querySelector<HTMLInputElement>('#symbol-dialog-input')!;
 const symbolResults = document.querySelector<HTMLDivElement>('#symbol-results')!;
 const symbolSourceTrigger = document.querySelector<HTMLButtonElement>('#symbol-source-trigger')!;
@@ -983,7 +1025,16 @@ const instrumentLogo = document.querySelector<HTMLSpanElement>('#instrument-logo
 const legendSymbol = document.querySelector<HTMLElement>('#legend-symbol')!;
 const chartStage = document.querySelector<HTMLElement>('.chart-stage')!;
 const watchlistAdd = document.querySelector<HTMLButtonElement>('#watchlist-add')!;
+const widgetBar = document.querySelector<HTMLElement>('#widget-bar')!;
+const widgetBarResizer = document.querySelector<HTMLElement>('#widget-bar-resizer')!;
+const widgetBarPages = widgetBar.querySelector<HTMLElement>('.widget-bar-pages')!;
+const watchlistToggle = document.querySelector<HTMLButtonElement>('#watchlist-toggle')!;
+const marketDataToggle = document.querySelector<HTMLButtonElement>('#market-data-toggle')!;
+const drawingManagerToggle = document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!;
+const dataWindowToggle = document.querySelector<HTMLButtonElement>('#data-window-toggle')!;
 const watchlistPanel = document.querySelector<HTMLElement>('#watchlist-panel')!;
+const watchlistRefresh = document.querySelector<HTMLButtonElement>('#watchlist-refresh')!;
+const watchlistPanelAdd = document.querySelector<HTMLButtonElement>('#watchlist-panel-add')!;
 const watchlistItems = document.querySelector<HTMLDivElement>('#watchlist-items')!;
 const watchlistEmpty = document.querySelector<HTMLParagraphElement>('#watchlist-empty')!;
 const marketDataPanel = document.querySelector<HTMLElement>('#market-data-panel')!;
@@ -1014,6 +1065,16 @@ const redoDrawing = document.querySelector<HTMLButtonElement>('#redo-drawing')!;
 const drawingManager = document.querySelector<HTMLElement>('#drawing-manager')!;
 const drawingManagerItems = document.querySelector<HTMLDivElement>('#drawing-manager-items')!;
 const drawingManagerEmpty = document.querySelector<HTMLParagraphElement>('#drawing-manager-empty')!;
+const dataWindowPanel = document.querySelector<HTMLElement>('#data-window-panel')!;
+const dataWindowSymbol = document.querySelector<HTMLElement>('#data-window-symbol')!;
+const dataWindowTime = document.querySelector<HTMLElement>('#data-window-time')!;
+const dataWindowOpen = document.querySelector<HTMLElement>('#data-window-open')!;
+const dataWindowHigh = document.querySelector<HTMLElement>('#data-window-high')!;
+const dataWindowLow = document.querySelector<HTMLElement>('#data-window-low')!;
+const dataWindowClose = document.querySelector<HTMLElement>('#data-window-close')!;
+const dataWindowChange = document.querySelector<HTMLElement>('#data-window-change')!;
+const dataWindowChangePercent = document.querySelector<HTMLElement>('#data-window-change-percent')!;
+const dataWindowVolume = document.querySelector<HTMLElement>('#data-window-volume')!;
 const chartTypeMenu = document.querySelector<HTMLDetailsElement>('#chart-type-menu')!;
 const chartTypeSummary = chartTypeMenu.querySelector<HTMLElement>('summary')!;
 const previousCloseToggle = document.querySelector<HTMLButtonElement>('#previous-close-toggle')!;
@@ -1046,6 +1107,7 @@ const goToDateInput = document.querySelector<HTMLInputElement>('#go-to-date')!;
 const chartSettingsLayer = document.querySelector<HTMLDivElement>('#chart-settings-layer')!;
 const chartSettingsDialog = document.querySelector<HTMLElement>('#chart-settings-dialog')!;
 const openChartSettingsButton = document.querySelector<HTMLButtonElement>('#open-chart-settings')!;
+const chartSettingsTimeZone = document.querySelector<HTMLSelectElement>('#chart-settings-time-zone')!;
 const chartSettingInputs = [...chartSettingsDialog.querySelectorAll<HTMLInputElement>('[data-chart-setting]')];
 const chartSettingsTabs = [...chartSettingsDialog.querySelectorAll<HTMLButtonElement>('[data-settings-tab]')];
 let chartSettingsReturnFocus: HTMLElement | null = null;
@@ -1054,6 +1116,7 @@ const drawingMenus = [...document.querySelectorAll<HTMLDetailsElement>('.drawing
 const drawingPropertyControls = [...drawingProperties.querySelectorAll<HTMLDetailsElement>('.drawing-property-control')];
 let pendingTextButton: HTMLButtonElement | null = null;
 const SYMBOL_RESULT_PAGE_SIZE = 80;
+const WIDGET_PANEL_WIDTH_STORAGE_KEY = 'tradeflow-lite.widget-panel-width.v1';
 type MarketCatalogLoadState = {
   descriptor: MarketProviderDescriptor;
   venue: string;
@@ -1068,6 +1131,8 @@ let visibleSymbolResults: MarketSymbol[] = [];
 let activeSymbolResult = -1;
 let activeSymbolCategory: MarketSearchCategory = 'all';
 let activeSymbolSource: MarketSearchSource = 'all';
+let symbolDialogMode: 'select' | 'watchlist' = 'select';
+let symbolDialogReturnFocus: HTMLElement = input;
 let renderedPriceLines: IPriceLine[] = [];
 let chartToastTimer: number | undefined;
 let priceLineEditorMode: 'cost' | 'custom' | null = null;
@@ -1232,6 +1297,14 @@ function openChartSettings() {
     if (input.type === 'checkbox') input.checked = chartSettings[key] as boolean;
     else input.value = chartSettings[key] as string;
   }
+  const now = new Date();
+  for (const option of TRADING_TIME_ZONE_OPTIONS) {
+    const element = [...chartSettingsTimeZone.options].find((item) => item.value === option.value);
+    if (!element) continue;
+    const zone = resolveTradingTimeZone(option.value, exchangeTimeZone(), systemTimeZone);
+    element.textContent = `(${formatUtcOffset(timeZoneOffsetMinutes(now, zone))}) ${option.label}`;
+  }
+  chartSettingsTimeZone.value = tradingTimeChoice;
   selectChartSettingsTab('symbol');
   chartSettingsLayer.hidden = false;
   requestAnimationFrame(() => chartSettingsTabs[0]?.focus());
@@ -1251,6 +1324,7 @@ function confirmChartSettings() {
   }
   chartSettings = next;
   applyChartSettings(chartSettings);
+  applyTradingTimeChoice(chartSettingsTimeZone.value as TradingTimeChoice);
   if (!saveChartSettings(localStorage, chartSettings)) showChartToast('设置未能保存');
   closeChartSettings();
 }
@@ -1505,6 +1579,13 @@ function createSymbolLogo(item: MarketSymbol) {
   return logo;
 }
 
+function createWatchlistLogo(item: MarketSymbol) {
+  const logo = document.createElement('span');
+  logo.className = 'watchlist-logo';
+  renderSymbolLogo(logo, item, true);
+  return logo;
+}
+
 function createExchangeBadge(exchange: MarketSymbol['exchange']) {
   const badge = document.createElement('span');
   badge.className = 'symbol-result-exchange';
@@ -1532,6 +1613,66 @@ function persistWatchlist() {
   }
 }
 
+function watchlistContains(item: MarketSymbol): boolean {
+  const key = watchlistSymbolKey(item.providerId, item.symbol);
+  return watchlistSymbols.includes(key)
+    || (legacyStateBelongsToProvider(item) && watchlistSymbols.includes(item.symbol));
+}
+
+function addSymbolToWatchlist(item: MarketSymbol): boolean {
+  if (watchlistContains(item)) return false;
+  if (watchlistSymbols.length >= 100) {
+    errorLayer.hidden = false;
+    errorLayer.textContent = '自选最多保存 100 个证券';
+    return false;
+  }
+  watchlistSymbols = [...watchlistSymbols, watchlistSymbolKey(item.providerId, item.symbol)];
+  persistWatchlist();
+  renderWatchlist();
+  if (!watchlistPanel.hidden) void refreshWatchlistQuotes();
+  return true;
+}
+
+function formatWatchlistPrice(item: MarketSymbol, value: number): string {
+  if (item.kind === 'prediction') return `${value.toFixed(1)}%`;
+  if (item.kind === 'etf') return value.toFixed(3).replace(/\.?0+$/, '');
+  if (item.kind === 'stock' || item.kind === 'index') return value.toFixed(2);
+  const digits = value >= 1_000 ? 2 : value >= 1 ? 4 : value >= 0.01 ? 6 : 8;
+  return value.toFixed(digits).replace(/\.?0+$/, '');
+}
+
+function watchlistQuoteFor(item: MarketSymbol): QuoteSnapshot | undefined {
+  if (currentSymbol.providerId === item.providerId && currentSymbol.symbol === item.symbol && currentQuote) {
+    return currentQuote;
+  }
+  return watchlistQuotes.get(marketSymbolKey(item));
+}
+
+function renderWatchlistQuoteCells(row: HTMLElement, item: MarketSymbol, quote = watchlistQuoteFor(item)): void {
+  const lastCell = row.querySelector<HTMLElement>('.watchlist-last')!;
+  const changeCell = row.querySelector<HTMLElement>('.watchlist-change')!;
+  const percentCell = row.querySelector<HTMLElement>('.watchlist-change-percent')!;
+  lastCell.className = 'watchlist-last';
+  changeCell.className = 'watchlist-change';
+  percentCell.className = 'watchlist-change-percent';
+  if (!quote) {
+    lastCell.textContent = '--';
+    changeCell.textContent = '--';
+    percentCell.textContent = '--';
+    return;
+  }
+  const change = quote.last - quote.previousClose;
+  const percent = quote.previousClose ? change / quote.previousClose * 100 : 0;
+  const direction = change > 0 ? 'positive' : change < 0 ? 'negative' : 'neutral';
+  const sign = change > 0 ? '+' : '';
+  lastCell.textContent = formatWatchlistPrice(item, quote.last);
+  changeCell.textContent = `${sign}${formatWatchlistPrice(item, change)}`;
+  percentCell.textContent = `${sign}${percent.toFixed(2)}%`;
+  lastCell.classList.add(direction);
+  changeCell.classList.add(direction);
+  percentCell.classList.add(direction);
+}
+
 function renderWatchlist() {
   watchlistItems.replaceChildren();
   watchlistEmpty.hidden = watchlistSymbols.length > 0;
@@ -1548,39 +1689,107 @@ function renderWatchlist() {
     const row = document.createElement('div');
     row.className = `watchlist-row${symbolId === currentWatchlistKey
       || (legacyStateBelongsToProvider(currentSymbol) && symbolId === currentSymbol.symbol) ? ' current' : ''}`;
+    row.dataset.watchlistQuoteKey = marketSymbolKey(item);
+    row.setAttribute('role', 'row');
+    row.tabIndex = 0;
     const openButton = document.createElement('button');
     openButton.className = 'watchlist-open';
-    openButton.innerHTML = '<strong></strong><span></span>';
+    openButton.type = 'button';
+    openButton.innerHTML = '<strong></strong>';
+    openButton.prepend(createWatchlistLogo(item));
     openButton.querySelector('strong')!.textContent = item.name;
-    openButton.querySelector('span')!.textContent = `${item.code} · ${item.exchange} · ${kindLabels[item.kind]}`;
-    openButton.addEventListener('click', () => void selectSymbol(item));
-    row.append(openButton);
+    openButton.title = `${item.name} · ${item.code} · ${item.exchange}`;
+    const lastCell = document.createElement('span');
+    lastCell.className = 'watchlist-last';
+    const changeCell = document.createElement('span');
+    changeCell.className = 'watchlist-change';
+    const percentCell = document.createElement('span');
+    percentCell.className = 'watchlist-change-percent';
+    const actions = document.createElement('div');
+    actions.className = 'watchlist-actions';
+    row.append(openButton, lastCell, changeCell, percentCell, actions);
+    renderWatchlistQuoteCells(row, item);
+    row.addEventListener('click', (event) => {
+      if (!(event.target as Element).closest('.watchlist-actions')) void selectSymbol(item);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        void selectSymbol(item);
+      }
+    });
 
-    for (const [label, direction] of [['↑', -1], ['↓', 1]] as const) {
+    for (const [label, direction, iconMarkup] of [['上移', -1, moveUpWidgetIcon], ['下移', 1, moveDownWidgetIcon]] as const) {
       const moveButton = document.createElement('button');
       moveButton.className = 'watchlist-action';
-      moveButton.textContent = label;
-      moveButton.title = direction < 0 ? '上移' : '下移';
+      moveButton.type = 'button';
+      moveButton.innerHTML = iconMarkup;
+      moveButton.title = label;
+      moveButton.setAttribute('aria-label', label);
       moveButton.disabled = direction < 0 ? index === 0 : index === watchlistSymbols.length - 1;
       moveButton.addEventListener('click', () => {
         watchlistSymbols = moveWatchlistSymbol(watchlistSymbols, index, direction);
         persistWatchlist();
         renderWatchlist();
       });
-      row.append(moveButton);
+      actions.append(moveButton);
     }
     const removeButton = document.createElement('button');
     removeButton.className = 'watchlist-action danger';
-    removeButton.textContent = '×';
+    removeButton.type = 'button';
+    removeButton.innerHTML = removeSymbolWidgetIcon;
     removeButton.title = '删除';
+    removeButton.setAttribute('aria-label', `从自选移除 ${item.name}`);
     removeButton.addEventListener('click', () => {
       watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== symbolId);
+      watchlistQuotes.delete(marketSymbolKey(item));
       persistWatchlist();
       renderWatchlist();
     });
-    row.append(removeButton);
+    actions.append(removeButton);
     watchlistItems.append(row);
   }
+}
+
+async function refreshWatchlistQuotes(): Promise<void> {
+  const refreshId = ++watchlistQuoteRefreshId;
+  const items = watchlistSymbols
+    .map((symbolId) => marketSymbolById.get(symbolId))
+    .filter((item): item is MarketSymbol => item !== undefined && providerSupportsQuote(item));
+  watchlistRefresh.classList.add('loading');
+  watchlistRefresh.disabled = true;
+  let updated = 0;
+  let failed = 0;
+  for (let index = 0; index < items.length && refreshId === watchlistQuoteRefreshId; index += 4) {
+    const results = await Promise.allSettled(items.slice(index, index + 4).map(async (item) => {
+      const response = await invoke<QuoteResponse>('get_quote_snapshot', {
+        providerId: item.providerId,
+        symbol: item.symbol,
+        kind: item.kind,
+      });
+      if (!matchesQuoteResponse(response, item.providerId, item.symbol) || !isUsableQuote(response.quote)) {
+        throw new Error('invalid quote response');
+      }
+      return { item, quote: response.quote };
+    }));
+    if (refreshId !== watchlistQuoteRefreshId) break;
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        watchlistQuotes.set(marketSymbolKey(result.value.item), result.value.quote);
+        updated += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    for (const row of watchlistItems.querySelectorAll<HTMLElement>('.watchlist-row')) {
+      const item = marketSymbolById.get(row.dataset.watchlistQuoteKey ?? '');
+      if (item) renderWatchlistQuoteCells(row, item);
+    }
+  }
+  if (refreshId !== watchlistQuoteRefreshId) return;
+  watchlistRefresh.classList.remove('loading');
+  watchlistRefresh.disabled = false;
+  console.info('watchlist.quotes.refresh', { requested: items.length, updated, failed });
 }
 
 function formatMarketPrice(value: number): string {
@@ -2606,7 +2815,36 @@ function formatPrice(value: number): string {
   return value.toFixed(currentSymbol.kind === 'etf' ? 3 : 2);
 }
 
+function renderDataWindow(bar = currentBars.at(-1), previous?: Bar): void {
+  if (dataWindowPanel.hidden) return;
+  dataWindowSymbol.textContent = `${currentSymbol.name} · ${currentSymbol.code}`;
+  if (!bar) {
+    for (const field of [dataWindowTime, dataWindowOpen, dataWindowHigh, dataWindowLow, dataWindowClose, dataWindowChange, dataWindowChangePercent, dataWindowVolume]) {
+      field.textContent = '--';
+      field.className = '';
+    }
+    return;
+  }
+  const index = currentBars.indexOf(bar);
+  const prior = previous ?? (index > 0 ? currentBars[index - 1] : undefined);
+  const change = prior ? bar.close - prior.close : null;
+  const percentage = change !== null && prior?.close ? change / prior.close * 100 : null;
+  const direction = change === null ? '' : change >= 0 ? 'up' : 'down';
+  const sign = change !== null && change > 0 ? '+' : '';
+  dataWindowTime.textContent = formatChartTime(bar.time as UTCTimestamp);
+  dataWindowOpen.textContent = formatPrice(bar.open);
+  dataWindowHigh.textContent = formatPrice(bar.high);
+  dataWindowLow.textContent = formatPrice(bar.low);
+  dataWindowClose.textContent = formatPrice(bar.close);
+  dataWindowChange.textContent = change === null ? '--' : `${sign}${formatPrice(change)}`;
+  dataWindowChangePercent.textContent = percentage === null ? '--' : `${sign}${percentage.toFixed(2)}%`;
+  dataWindowVolume.textContent = currentSeriesKind === 'probability' ? '--' : formatCompactVolume(bar.volume);
+  dataWindowChange.className = direction;
+  dataWindowChangePercent.className = direction;
+}
+
 function showBar(bar: Bar, previous?: Bar) {
+  renderDataWindow(bar, previous);
   const change = previous ? bar.close - previous.close : 0;
   if (currentSeriesKind === 'probability') {
     const sign = change > 0 ? '+' : '';
@@ -2642,7 +2880,10 @@ function showQuote(quote: NonNullable<HistoryResponse['quote']>) {
 }
 
 function showCurrentSnapshot() {
-  if (currentQuote) showQuote(currentQuote);
+  if (currentQuote) {
+    showQuote(currentQuote);
+    renderDataWindow();
+  }
   else showLatest(currentBars);
 }
 
@@ -2865,6 +3106,7 @@ function closeSymbolResults() {
   symbolSourceMenu.hidden = true;
   symbolSourceTrigger.setAttribute('aria-expanded', 'false');
   input.setAttribute('aria-expanded', 'false');
+  watchlistPanelAdd.setAttribute('aria-expanded', 'false');
   activeSymbolResult = -1;
 }
 
@@ -2973,13 +3215,28 @@ function shouldLoadMorePolymarketSymbols(): boolean {
     && Boolean(polymarketCatalogState()?.nextCursor);
 }
 
-function openSymbolDialog() {
+function openSymbolDialog(mode: 'select' | 'watchlist' = 'select') {
+  symbolDialogMode = mode;
+  symbolDialogReturnFocus = mode === 'watchlist' ? watchlistPanelAdd : input;
+  symbolDialogTitle.textContent = mode === 'watchlist' ? '添加商品代码' : '商品代码搜索';
+  symbolDialogFooter.textContent = mode === 'watchlist'
+    ? '输入代码、名称或拼音查找品种，点击结果添加到自选'
+    : '输入代码、名称或拼音查找品种，点击结果即可切换图表';
   symbolDialogLayer.hidden = false;
-  input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-expanded', String(mode === 'select'));
+  watchlistPanelAdd.setAttribute('aria-expanded', String(mode === 'watchlist'));
   symbolDialogInput.value = '';
   renderSymbolSources();
   renderSymbolResults();
   window.requestAnimationFrame(() => symbolDialogInput.focus());
+}
+
+function activateSymbolResult(item: MarketSymbol): void {
+  if (symbolDialogMode === 'watchlist') {
+    if (addSymbolToWatchlist(item)) renderSymbolResults(visibleSymbolResults.length, symbolResults.scrollTop);
+    return;
+  }
+  void selectSymbol(item);
 }
 
 function renderSymbolSources() {
@@ -3028,7 +3285,9 @@ function appendNextSymbolResults() {
     const index = start + offset;
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `symbol-result-row${item.kind === 'crypto' || item.kind === 'prediction' ? ' wide' : ''}${item.kind === 'prediction' ? ' prediction' : ''}`;
+    const isWatchlistMode = symbolDialogMode === 'watchlist';
+    const isAdded = isWatchlistMode && watchlistContains(item);
+    button.className = `symbol-result-row${item.kind === 'crypto' || item.kind === 'prediction' ? ' wide' : ''}${item.kind === 'prediction' ? ' prediction' : ''}${isWatchlistMode ? ' watchlist-add-mode' : ''}${isAdded ? ' added' : ''}`;
     button.role = 'option';
     button.setAttribute('aria-selected', 'false');
     button.innerHTML = '<span class="symbol-result-code"></span><span class="symbol-result-name"><strong></strong></span><span class="symbol-result-kind"></span>';
@@ -3040,9 +3299,20 @@ function appendNextSymbolResults() {
       ? item.providerDisplayName
       : kindMetaLabels[item.kind];
     kind.append(document.createTextNode(marketType), createExchangeBadge(item.exchange));
+    if (isWatchlistMode) {
+      const action = document.createElement('span');
+      action.className = 'symbol-result-action';
+      action.innerHTML = addSymbolWidgetIcon;
+      action.setAttribute('aria-hidden', 'true');
+      button.append(action);
+      button.setAttribute('aria-label', isAdded ? `${item.name} 已在自选` : `添加 ${item.name} 到自选`);
+      button.setAttribute('aria-disabled', String(isAdded));
+    }
     button.title = `${item.code} ${item.name} ${kindLabels[item.kind]} ${item.exchange}`;
     button.addEventListener('pointerdown', (event) => event.preventDefault());
-    button.addEventListener('click', () => void selectSymbol(item));
+    button.addEventListener('click', () => {
+      if (!isAdded) activateSymbolResult(item);
+    });
     button.addEventListener('pointermove', () => setActiveSymbolResult(index));
     symbolResults.append(button);
   }
@@ -4001,7 +4271,7 @@ chart.subscribeClick((param) => {
   openMarkerEditor(time);
 });
 
-document.querySelector<HTMLButtonElement>('#open')!.addEventListener('click', openSymbolDialog);
+document.querySelector<HTMLButtonElement>('#open')!.addEventListener('click', () => openSymbolDialog('select'));
 watchlistAdd.addEventListener('click', () => {
   const currentKey = watchlistSymbolKey(currentSymbol.providerId, currentSymbol.symbol);
   const hasCurrent = watchlistSymbols.includes(currentKey)
@@ -4010,38 +4280,112 @@ watchlistAdd.addEventListener('click', () => {
     watchlistSymbols = watchlistSymbols.filter((symbol) => symbol !== currentKey
       && (!legacyStateBelongsToProvider(currentSymbol) || symbol !== currentSymbol.symbol));
   } else {
-    if (watchlistSymbols.length >= 100) {
-      errorLayer.hidden = false;
-      errorLayer.textContent = '自选最多保存 100 个证券';
-      return;
-    }
-    watchlistSymbols = [...watchlistSymbols, currentKey];
+    addSymbolToWatchlist(currentSymbol);
+    return;
   }
   persistWatchlist();
   renderWatchlist();
+  if (!watchlistPanel.hidden) void refreshWatchlistQuotes();
 });
-document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.addEventListener('click', (event) => {
-  closeToolbarMenus();
-  watchlistPanel.hidden = !watchlistPanel.hidden;
-  marketDataPanel.hidden = true;
-  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
-  drawingManager.hidden = true;
-  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
-  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !watchlistPanel.hidden);
+function setActiveWidgetPanel(panel: 'watchlist' | 'market-data' | 'drawing-manager' | 'data-window' | null): void {
+  const isOpen = panel !== null;
+  widgetBar.classList.toggle('open', isOpen);
+  widgetBarPages.hidden = !isOpen;
+  watchlistPanel.hidden = panel !== 'watchlist';
+  marketDataPanel.hidden = panel !== 'market-data';
+  drawingManager.hidden = panel !== 'drawing-manager';
+  dataWindowPanel.hidden = panel !== 'data-window';
+  watchlistToggle.classList.toggle('active', panel === 'watchlist');
+  marketDataToggle.classList.toggle('active', panel === 'market-data');
+  drawingManagerToggle.classList.toggle('active', panel === 'drawing-manager');
+  dataWindowToggle.classList.toggle('active', panel === 'data-window');
+  watchlistToggle.setAttribute('aria-selected', String(panel === 'watchlist'));
+  marketDataToggle.setAttribute('aria-selected', String(panel === 'market-data'));
+  drawingManagerToggle.setAttribute('aria-selected', String(panel === 'drawing-manager'));
+  dataWindowToggle.setAttribute('aria-selected', String(panel === 'data-window'));
+  if (panel !== 'watchlist') {
+    watchlistQuoteRefreshId += 1;
+    watchlistRefresh.classList.remove('loading');
+    watchlistRefresh.disabled = false;
+  }
+  if (panel === 'watchlist') {
+    renderWatchlist();
+    void refreshWatchlistQuotes();
+  }
+  if (panel === 'market-data') renderMarketDataPanel();
+  if (panel === 'drawing-manager') renderDrawingManager();
+  if (panel === 'data-window') renderDataWindow();
+}
+
+function widgetPanelWidthLimits(): { min: number; max: number } {
+  const available = (widgetBar.parentElement?.clientWidth ?? window.innerWidth) - 52 - 45 - 420;
+  return { min: 280, max: Math.max(280, Math.min(520, available)) };
+}
+
+function setWidgetPanelWidth(width: number, persist = false): void {
+  const { min, max } = widgetPanelWidthLimits();
+  const next = Math.round(Math.min(max, Math.max(min, width)));
+  widgetBar.style.setProperty('--tf-widget-panel-width', `${next}px`);
+  widgetBarResizer.setAttribute('aria-valuenow', String(next));
+  widgetBarResizer.setAttribute('aria-valuemax', String(max));
+  if (!persist) return;
+  try {
+    localStorage.setItem(WIDGET_PANEL_WIDTH_STORAGE_KEY, String(next));
+  } catch {
+    showChartToast('侧栏宽度未能保存');
+  }
+}
+
+setWidgetPanelWidth(320);
+try {
+  const savedWidgetPanelWidth = Number(localStorage.getItem(WIDGET_PANEL_WIDTH_STORAGE_KEY));
+  if (Number.isFinite(savedWidgetPanelWidth) && savedWidgetPanelWidth > 0) setWidgetPanelWidth(savedWidgetPanelWidth);
+} catch {}
+
+widgetBarResizer.addEventListener('pointerdown', (event) => {
+  if (!widgetBar.classList.contains('open')) return;
+  const startX = event.clientX;
+  const startWidth = widgetBar.getBoundingClientRect().width
+    - widgetBar.querySelector<HTMLElement>('.widget-bar-tabs')!.getBoundingClientRect().width;
+  widgetBarResizer.setPointerCapture(event.pointerId);
+  widgetBar.classList.add('resizing');
+  document.body.classList.add('widget-bar-resizing');
+  const resize = (moveEvent: PointerEvent) => setWidgetPanelWidth(startWidth + startX - moveEvent.clientX);
+  const finish = (endEvent: PointerEvent) => {
+    resize(endEvent);
+    widgetBarResizer.releasePointerCapture(endEvent.pointerId);
+    widgetBarResizer.removeEventListener('pointermove', resize);
+    widgetBarResizer.removeEventListener('pointerup', finish);
+    widgetBarResizer.removeEventListener('pointercancel', finish);
+    widgetBar.classList.remove('resizing');
+    document.body.classList.remove('widget-bar-resizing');
+    const width = Number.parseFloat(getComputedStyle(widgetBar).getPropertyValue('--tf-widget-panel-width'));
+    if (Number.isFinite(width)) setWidgetPanelWidth(width, true);
+  };
+  widgetBarResizer.addEventListener('pointermove', resize);
+  widgetBarResizer.addEventListener('pointerup', finish);
+  widgetBarResizer.addEventListener('pointercancel', finish);
 });
-document.querySelector<HTMLButtonElement>('#market-data-toggle')!.addEventListener('click', (event) => {
+widgetBarResizer.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const current = widgetBar.getBoundingClientRect().width
+    - widgetBar.querySelector<HTMLElement>('.widget-bar-tabs')!.getBoundingClientRect().width;
+  setWidgetPanelWidth(current + (event.key === 'ArrowLeft' ? 16 : -16), true);
+});
+
+watchlistToggle.addEventListener('click', () => {
   closeToolbarMenus();
-  marketDataPanel.hidden = !marketDataPanel.hidden;
-  watchlistPanel.hidden = true;
-  drawingManager.hidden = true;
-  document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.classList.remove('active');
-  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
-  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !marketDataPanel.hidden);
-  if (!marketDataPanel.hidden) renderMarketDataPanel();
+  setActiveWidgetPanel(watchlistPanel.hidden ? 'watchlist' : null);
+});
+watchlistRefresh.addEventListener('click', () => void refreshWatchlistQuotes());
+watchlistPanelAdd.addEventListener('click', () => openSymbolDialog('watchlist'));
+marketDataToggle.addEventListener('click', () => {
+  closeToolbarMenus();
+  setActiveWidgetPanel(marketDataPanel.hidden ? 'market-data' : null);
 });
 document.querySelector<HTMLButtonElement>('#close-market-data')!.addEventListener('click', () => {
-  marketDataPanel.hidden = true;
-  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
+  setActiveWidgetPanel(null);
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-market-data-tab]')) {
   button.addEventListener('click', () => {
@@ -4058,11 +4402,11 @@ for (const [button, outcome] of [[predictionYes, 'YES'], [predictionNo, 'NO']] a
     void selectSymbol(opposing);
   });
 }
-document.querySelector<HTMLDivElement>('.symbol-control')!.addEventListener('click', openSymbolDialog);
+document.querySelector<HTMLDivElement>('.symbol-control')!.addEventListener('click', () => openSymbolDialog('select'));
 input.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
   event.preventDefault();
-  openSymbolDialog();
+    openSymbolDialog('select');
 });
 symbolDialogInput.addEventListener('input', () => renderSymbolResults());
 symbolResults.addEventListener('scroll', () => {
@@ -4084,7 +4428,7 @@ symbolDialogInput.addEventListener('keydown', (event) => {
   } else if (event.key === 'Enter') {
     event.preventDefault();
     const match = activeSymbolResult >= 0 ? visibleSymbolResults[activeSymbolResult] : resolveInputSymbol();
-    if (match) void selectSymbol(match);
+    if (match) activateSymbolResult(match);
   }
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-symbol-category]')) {
@@ -4107,7 +4451,7 @@ symbolSourceTrigger.addEventListener('click', () => {
 });
 document.querySelector<HTMLButtonElement>('#symbol-dialog-close')!.addEventListener('click', () => {
   closeSymbolResults();
-  input.focus();
+  symbolDialogReturnFocus.focus();
 });
 symbolDialogLayer.addEventListener('pointerdown', (event) => {
   if (event.target === symbolDialogLayer) closeSymbolResults();
@@ -4121,7 +4465,7 @@ symbolDialog.addEventListener('keydown', (event) => {
     return;
   }
   closeSymbolResults();
-  input.focus();
+  symbolDialogReturnFocus.focus();
 });
 document.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, currentAdjustment));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
@@ -4421,19 +4765,16 @@ redoDrawing.addEventListener('click', () => {
   if (snapshot && applyDrawingSnapshot(snapshot)) persistDrawingSnapshot(snapshot);
   updateDrawingHistoryButtons();
 });
-document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.addEventListener('click', (event) => {
+drawingManagerToggle.addEventListener('click', () => {
   closeToolbarMenus();
-  drawingManager.hidden = !drawingManager.hidden;
-  watchlistPanel.hidden = true;
-  marketDataPanel.hidden = true;
-  document.querySelector<HTMLButtonElement>('#watchlist-toggle')!.classList.remove('active');
-  document.querySelector<HTMLButtonElement>('#market-data-toggle')!.classList.remove('active');
-  (event.currentTarget as HTMLButtonElement).classList.toggle('active', !drawingManager.hidden);
-  if (!drawingManager.hidden) renderDrawingManager();
+  setActiveWidgetPanel(drawingManager.hidden ? 'drawing-manager' : null);
 });
 document.querySelector<HTMLButtonElement>('#close-drawing-manager')!.addEventListener('click', () => {
-  drawingManager.hidden = true;
-  document.querySelector<HTMLButtonElement>('#drawing-manager-toggle')!.classList.remove('active');
+  setActiveWidgetPanel(null);
+});
+dataWindowToggle.addEventListener('click', () => {
+  closeToolbarMenus();
+  setActiveWidgetPanel(dataWindowPanel.hidden ? 'data-window' : null);
 });
 document.querySelector<HTMLButtonElement>('#zoom-tool')!.addEventListener('click', () => {
   const range = chart.timeScale().getVisibleLogicalRange();
