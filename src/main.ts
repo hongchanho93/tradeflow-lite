@@ -140,6 +140,7 @@ import {
   realtimeSequenceKey,
   realtimeRequestSeed,
   type RealtimeBarEvent,
+  type RealtimeBarSource,
   type RealtimeDepthEvent,
   type RealtimeStatusEvent,
   type RealtimeTradeEvent,
@@ -1412,7 +1413,14 @@ function realtimeProviderId(symbol: MarketSymbol): string {
 }
 
 function acceptsRealtimeSequence(
-  event: { requestId: number; providerId: string; symbol: string; resolution: string; sequence?: number | null },
+  event: {
+    requestId: number;
+    providerId: string;
+    symbol: string;
+    resolution: string;
+    sequence?: number | null;
+    source?: RealtimeBarSource;
+  },
   channel: 'bar' | 'depth' | 'trade',
 ) {
   if (event.sequence == null) return true;
@@ -3227,15 +3235,14 @@ async function startRealtimeMarket(
   }
 }
 
-function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
+function applyRealtimeBar(event: RealtimeBarEvent<Bar>): boolean {
   if (!matchesRealtimeSelection(
     event,
     activeRealtimeRequestId,
     currentSymbol.symbol,
     currentResolution,
     activeRealtimeProviderId,
-  )) return;
-  if (!acceptsRealtimeSequence(event, 'bar')) return;
+  )) return false;
   if (!canApplyRealtimeBar(currentBars, event.bar)) {
     console.warn('market.realtime.stale_bar', {
       symbol: event.symbol,
@@ -3243,10 +3250,10 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
       incomingTime: event.bar.time,
       latestTime: currentBars.at(-1)?.time,
     });
-    return;
+    return false;
   }
 
-  if (updateLatestBarInPlace(currentBars, event.bar) === 'rejected') return;
+  if (updateLatestBarInPlace(currentBars, event.bar) === 'rejected') return false;
   updatePrimarySeries(event.bar);
   volumeSeries.update({
     time: event.bar.time as UTCTimestamp,
@@ -3267,6 +3274,7 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>) {
     setStatusLabel(status, statusText);
     status.title = `最后一次 ${providerName} ${event.source} 更新：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
   }
+  return true;
 }
 
 let pendingRealtimeBar: RealtimeBarEvent<Bar> | null = null;
@@ -3377,17 +3385,18 @@ function flushRealtimeFrame(now: number, fallback = false) {
   const pendingBar = pendingRealtimeBar;
   pendingRealtimeBar = null;
   if (pendingBar) {
-    if (realtimeHealthLastApplyAt > 0) {
-      realtimeHealthMaxApplyGapMs = Math.max(
-        realtimeHealthMaxApplyGapMs,
-        frameStartedAt - realtimeHealthLastApplyAt,
-      );
+    if (applyRealtimeBar(pendingBar)) {
+      if (realtimeHealthLastApplyAt > 0) {
+        realtimeHealthMaxApplyGapMs = Math.max(
+          realtimeHealthMaxApplyGapMs,
+          frameStartedAt - realtimeHealthLastApplyAt,
+        );
+      }
+      realtimeHealthLastApplyAt = frameStartedAt;
+      realtimeHealthBarsApplied += 1;
+      realtimeHealthMaxQueueMs = Math.max(realtimeHealthMaxQueueMs, frameStartedAt - pendingRealtimeBarQueuedAt);
+      realtimeHealthMaxEventAgeMs = Math.max(realtimeHealthMaxEventAgeMs, Date.now() - pendingBar.eventTimeMs);
     }
-    realtimeHealthLastApplyAt = frameStartedAt;
-    realtimeHealthBarsApplied += 1;
-    realtimeHealthMaxQueueMs = Math.max(realtimeHealthMaxQueueMs, frameStartedAt - pendingRealtimeBarQueuedAt);
-    realtimeHealthMaxEventAgeMs = Math.max(realtimeHealthMaxEventAgeMs, Date.now() - pendingBar.eventTimeMs);
-    applyRealtimeBar(pendingBar);
   }
   if (pendingRealtimeDepth || pendingRealtimeTrades.length) {
     const delay = marketDataRenderDelay(now, lastMarketDataRenderAt);

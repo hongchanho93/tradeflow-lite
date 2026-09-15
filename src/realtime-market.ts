@@ -1,3 +1,5 @@
+export type RealtimeBarSource = 'kline' | 'aggTrade';
+
 export type RealtimeBarEvent<TBar> = {
   requestId: number;
   providerId: string;
@@ -7,7 +9,7 @@ export type RealtimeBarEvent<TBar> = {
   bar: TBar;
   closed: boolean;
   eventTimeMs: number;
-  source: string;
+  source: RealtimeBarSource;
 };
 
 export type RealtimeStatusEvent = {
@@ -49,11 +51,25 @@ export type RealtimeTradeEvent = {
 
 export type RealtimeSequenceChannel = 'bar' | 'depth' | 'trade';
 
+type RealtimeSequenceIdentity = {
+  requestId: number;
+  providerId: string;
+  symbol: string;
+  resolution: string;
+};
+
+function normalizeRealtimeBarSource(source: unknown): RealtimeBarSource | 'unknown' {
+  return source === 'kline' || source === 'aggTrade' ? source : 'unknown';
+}
+
 export function realtimeSequenceKey(
-  event: { requestId: number; providerId: string; symbol: string; resolution: string },
+  event: RealtimeSequenceIdentity & { source?: unknown },
   channel: RealtimeSequenceChannel,
 ) {
-  return `${event.requestId}:${event.providerId}:${event.symbol}:${event.resolution}:${channel}`;
+  const channelKey = channel === 'bar'
+    ? `${channel}:${normalizeRealtimeBarSource(event.source)}`
+    : channel;
+  return `${event.requestId}:${event.providerId}:${event.symbol}:${event.resolution}:${channelKey}`;
 }
 
 export function realtimeRequestSeed(nowMs: number) {
