@@ -21,12 +21,20 @@ use crate::market_router::{HistoryRequest, MarketDataAdapter};
 
 const GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const CLOB_BASE: &str = "https://clob.polymarket.com";
+const GATEWAY_ENV: &str = "TRADEFLOW_POLYMARKET_GATEWAY_URL";
 const CATALOG_LIMIT: usize = 100;
 const SOURCE: &str = "polymarket";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct PolymarketAdapter;
+
+#[derive(Debug, PartialEq)]
+struct ApiBases {
+    gamma: String,
+    clob: String,
+    diagnostics_host: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,11 +114,57 @@ fn client() -> Result<&'static Client, AppError> {
         .map_err(|message| AppError::new("market_data_client_unavailable", message.clone()))
 }
 
+fn api_bases_from(gateway: Option<&str>) -> Result<ApiBases, AppError> {
+    let Some(raw_gateway) = gateway.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(ApiBases {
+            gamma: GAMMA_BASE.to_string(),
+            clob: CLOB_BASE.to_string(),
+            diagnostics_host: "clob.polymarket.com".to_string(),
+        });
+    };
+    let parsed = reqwest::Url::parse(raw_gateway).map_err(|_| {
+        AppError::new(
+            "market_data_configuration_invalid",
+            format!("{GATEWAY_ENV} 不是有效 URL"),
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_none()
+    {
+        return Err(AppError::new(
+            "market_data_configuration_invalid",
+            format!("{GATEWAY_ENV} 必须是无凭据、无查询参数的 HTTP(S) URL"),
+        ));
+    }
+    let base = raw_gateway.trim_end_matches('/');
+    let diagnostics_host = parsed
+        .port()
+        .map(|port| format!("{}:{port}", parsed.host_str().unwrap_or_default()))
+        .unwrap_or_else(|| parsed.host_str().unwrap_or_default().to_string());
+    Ok(ApiBases {
+        gamma: format!("{base}/v1/polymarket/gamma"),
+        clob: format!("{base}/v1/polymarket/clob"),
+        diagnostics_host,
+    })
+}
+
+fn api_bases() -> Result<ApiBases, AppError> {
+    let runtime = std::env::var(GATEWAY_ENV).ok();
+    let configured = runtime
+        .as_deref()
+        .or(option_env!("TRADEFLOW_POLYMARKET_GATEWAY_URL"));
+    api_bases_from(configured)
+}
+
 fn map_http_error(error: reqwest::Error) -> AppError {
-    let message = if error.status().is_some_and(|status| status.as_u16() == 451) {
-        "Polymarket 在当前网络区域不可用".to_string()
-    } else {
-        format!("Polymarket 请求失败：{error}")
+    let message = match error.status().map(|status| status.as_u16()) {
+        Some(451) => "Polymarket 在当前网络区域不可用".to_string(),
+        Some(502..=504) => "Polymarket 只读数据服务暂不可用".to_string(),
+        _ => format!("Polymarket 请求失败：{error}"),
     };
     AppError::new("market_data_unavailable", message)
 }
@@ -197,16 +251,22 @@ fn unix_seconds() -> i64 {
         .as_secs() as i64
 }
 
+fn bucket_time(timestamp: i64, interval_seconds: i64) -> i64 {
+    timestamp - timestamp.rem_euclid(interval_seconds.max(1))
+}
+
 fn fetch_history(request: HistoryRequest) -> Result<HistoryResponse, AppError> {
     let started = Instant::now();
+    let bases = api_bases()?;
     let (_, token_id) = request.symbol.parts();
     let end_ts = unix_seconds();
     let interval_seconds = resolution_seconds(request.resolution);
     let requested = request.count.clamp(2, 12_000);
     let start_ts = end_ts.saturating_sub(interval_seconds.saturating_mul(requested as i64));
     let fidelity = (interval_seconds / 60).max(1);
-    let response = client()?
-        .get(format!("{CLOB_BASE}/prices-history"))
+    let http = client()?;
+    let response = http
+        .get(format!("{}/prices-history", bases.clob))
         .query(&[
             ("market", token_id.to_string()),
             ("startTs", start_ts.to_string()),
@@ -214,14 +274,31 @@ fn fetch_history(request: HistoryRequest) -> Result<HistoryResponse, AppError> {
             ("fidelity", fidelity.to_string()),
         ])
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(map_http_error)?;
+    // CLOB rejects a window whose start predates a newly-created market.
+    // In that specific case, asking for the market's complete lifetime is bounded
+    // by the shorter lifetime and preserves the requested fidelity.
+    let response = if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        http.get(format!("{}/prices-history", bases.clob))
+            .query(&[
+                ("market", token_id.to_string()),
+                ("interval", "max".to_string()),
+                ("fidelity", fidelity.to_string()),
+            ])
+            .send()
+            .map_err(map_http_error)?
+    } else {
+        response
+    };
+    let response = response
+        .error_for_status()
         .map_err(map_http_error)?
         .json::<PriceHistoryResponse>()
         .map_err(map_http_error)?;
     let mut unique = BTreeMap::new();
     for point in response.history {
         if point.p.is_finite() && (0.0..=1.0).contains(&point.p) {
-            unique.insert(point.t, point.p * 100.0);
+            unique.insert(bucket_time(point.t, interval_seconds), point.p * 100.0);
         }
     }
     let mut points = unique
@@ -244,7 +321,7 @@ fn fetch_history(request: HistoryRequest) -> Result<HistoryResponse, AppError> {
         points,
         diagnostics: HistoryDiagnostics {
             source: SOURCE,
-            host: "clob.polymarket.com".to_string(),
+            host: bases.diagnostics_host,
             latency_ms: started.elapsed().as_secs_f64() * 1_000.0,
         },
         quote: None,
@@ -252,8 +329,9 @@ fn fetch_history(request: HistoryRequest) -> Result<HistoryResponse, AppError> {
 }
 
 fn fetch_midpoint(token_id: &str) -> Result<f64, AppError> {
+    let bases = api_bases()?;
     let response = client()?
-        .get(format!("{CLOB_BASE}/midpoint"))
+        .get(format!("{}/midpoint", bases.clob))
         .query(&[("token_id", token_id)])
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -284,8 +362,9 @@ fn parse_level(level: BookLevel) -> Option<RealtimePriceLevel> {
 fn fetch_book(
     token_id: &str,
 ) -> Result<(Vec<RealtimePriceLevel>, Vec<RealtimePriceLevel>), AppError> {
+    let bases = api_bases()?;
     let response = client()?
-        .get(format!("{CLOB_BASE}/book"))
+        .get(format!("{}/book", bases.clob))
         .query(&[("token_id", token_id)])
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -310,8 +389,9 @@ fn fetch_book(
 }
 
 fn fetch_last_trade(token_id: &str) -> Result<(f64, String), AppError> {
+    let bases = api_bases()?;
     let response = client()?
-        .get(format!("{CLOB_BASE}/last-trade-price"))
+        .get(format!("{}/last-trade-price", bases.clob))
         .query(&[("token_id", token_id)])
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
@@ -350,8 +430,9 @@ impl CatalogAdapter for PolymarketAdapter {
                 "目录市场与 Polymarket provider 不匹配",
             ));
         }
+        let bases = api_bases()?;
         let markets = client()?
-            .get(format!("{GAMMA_BASE}/markets"))
+            .get(format!("{}/markets", bases.gamma))
             .query(&[
                 ("active", "true"),
                 ("closed", "false"),
@@ -406,7 +487,7 @@ impl RealtimeAdapter for PolymarketAdapter {
                         }
                         let received_at = unix_seconds();
                         let bucket = resolution_seconds(request.resolution);
-                        let now = received_at - received_at.rem_euclid(bucket);
+                        let now = bucket_time(received_at, bucket);
                         let _ = sink.emit(request.envelope(
                             Some(sequence),
                             RealtimePayload::Point {
@@ -489,8 +570,9 @@ impl MarketDataAdapter for PolymarketAdapter {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogAdapter, CatalogRequest, GammaMarket, HistoryRequest, MarketDataAdapter,
-        PolymarketAdapter, Resolution, SymbolKind, catalog_symbols, value_string_array,
+        ApiBases, CatalogAdapter, CatalogRequest, GammaMarket, HistoryRequest, MarketDataAdapter,
+        PolymarketAdapter, Resolution, SymbolKind, api_bases_from, catalog_symbols,
+        bucket_time, value_string_array,
     };
     use crate::contracts::{Adjustment, MarketSeriesKind, Symbol};
     use serde_json::json;
@@ -527,6 +609,28 @@ mod tests {
     }
 
     #[test]
+    fn gateway_configuration_switches_both_polymarket_api_families() {
+        assert_eq!(
+            api_bases_from(Some("https://market-data.example.test/base/")).unwrap(),
+            ApiBases {
+                gamma: "https://market-data.example.test/base/v1/polymarket/gamma".to_string(),
+                clob: "https://market-data.example.test/base/v1/polymarket/clob".to_string(),
+                diagnostics_host: "market-data.example.test".to_string(),
+            }
+        );
+        assert!(api_bases_from(Some("file:///tmp/socket")).is_err());
+        assert!(api_bases_from(Some("https://user:secret@example.test")).is_err());
+        assert!(api_bases_from(Some("https://example.test?target=evil")).is_err());
+    }
+
+    #[test]
+    fn history_and_realtime_share_the_same_resolution_bucket() {
+        assert_eq!(bucket_time(1_789_455_016, 86_400), 1_789_430_400);
+        assert_eq!(bucket_time(1_789_455_069, 86_400), 1_789_430_400);
+        assert_eq!(bucket_time(1_789_455_069, 3_600), 1_789_452_000);
+    }
+
+    #[test]
     #[ignore = "connects to Polymarket public REST APIs"]
     fn real_polymarket_catalog_and_probability_history() {
         let adapter = PolymarketAdapter;
@@ -551,5 +655,6 @@ mod tests {
             .expect("Polymarket probability history must be reachable");
         assert_eq!(response.series_kind, MarketSeriesKind::Probability);
         assert!(!response.points.is_empty());
+        assert!(response.points.iter().all(|point| point.time % 3_600 == 0));
     }
 }

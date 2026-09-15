@@ -222,3 +222,19 @@
 - 应用入口现以 provider-neutral 的 `list_market_providers` / `list_market_catalog` 发现并合并目录；旧 Binance 目录命令只是兼容转换。历史、独立报价和实时命令均从同一个可注入 `MarketRouter` State 走 provider identity。历史附带报价失败时保留已验证 bars 并将 quote 置为 `None`，独立报价命令仍严格失败；关闭 Binance feature 时四个能力入口统一明确不可用且不落 TDX。
 - `MarketDataSnapshot<'a>` 预留未来只读 AI Tools 的借用边界，当前不连接 AI、不存密钥、不上传数据；`recent_bars` 指针合同证明限定快照不复制整批 K 线。
 - 新增 fake adapter、能力/feature-disabled/路由合同、TDX quote 实盘断言，以及 `npm run test:adapter` 结构回归门。代码、测试和文档尚未提交、推送、打包或发布。
+
+### 2026-09-15 · Polymarket 只读中转候选
+
+- ITDOG 实测 `polymarket.com` 中国大陆 261 个节点中 258 个失败、3 个无结果；Gamma API 260 个大陆节点仅 1 个返回 200；CLOB API 260 个大陆节点无成功。大量节点把域名解析到 Facebook、Dropbox、Twitter 等错误地址，客户端直连不具备产品可用性。韩国出口则在 Cloudflare 韩国节点收到当地法律限制的 451，两者不是同一故障。
+- 新增无第三方 npm 依赖的独立 Node.js 只读网关，只允许 Gamma 市场目录和 CLOB 概率历史、中间价、盘口、最新成交五类固定路由；非法参数、POST 和任意 URL 代理在到达上游前拒绝。成功 JSON 按用途缓存 1/30/60 秒，缓存上限 512 项；上游失败不缓存，日志记录路由、状态、缓存命中和耗时。
+- Lite Polymarket 适配器支持运行时或构建时 `TRADEFLOW_POLYMARKET_GATEWAY_URL`；配置后 Gamma 与 CLOB 都只走同一网关，故障不静默回退直连，诊断记录实际网关 host。未配置时保留原官方 API 直连行为，TDX 与 Binance 路由未改。
+- 网关白名单/参数/缓存合同通过，`Lite Rust 适配器 → 本地网关 → 模拟 Polymarket` 跨进程测试通过；63 项 Rust 测试通过、8 项真实联网测试按原设计忽略，308 项 UI 合同、全部前端合同和生产构建通过。当前网络无法提供真实 Polymarket 上游验收；网关尚未部署、未配置正式 HTTPS 域名，代码也未提交、推送、打包或发布。
+
+### 2026-09-15 · Cloudflare Worker 连通性验证
+
+- 在用户 Cloudflare 账号部署只读 Worker `tradeflow-polymarket-gateway`，测试域名为 `poly-api.pan911.cn`，上游放置提示为 `aws:eu-west-1`。Worker 版本 `29886101-eff5-4aae-a551-4f4cb489103a`；没有账户、钱包、充值、下单或任意 URL 代理能力。
+- 当前韩国网络从 Lite 直连 Polymarket 返回 451；经 Worker 请求 Gamma 目录、CLOB 概率历史、中间价、盘口和最近成交均返回 200，上游 `CF-Ray` 落在 LHR。Lite 的真实 Polymarket 联网测试通过，诊断 host 为 `poly-api.pan911.cn`。
+- ITDOG 中国大陆探测：健康检查 259 个节点中 243 个返回 200；真实 Gamma 目录 259 个节点中 244 个返回 200；真实 CLOB midpoint 258 个节点中 241 个返回 200。该结果明显优于直连的 0–1 个成功节点，但仍有约 5%–7% 节点失败，因此只作为测试候选，不宣称中国大陆全网可用。
+- 用户实测发现新市场日线 300 根会把 `startTs` 算到市场创建前，CLOB 因无效时间窗口返回 400。适配器现在只在该窗口请求返回 400 时，以相同 fidelity 改取市场完整生命周期；截图中的 token 实测返回 14 个日线概率点，另一个较老市场返回 75 个日线点。Worker 与 Node 网关同步允许严格的 `interval=max` 备用请求，混用时间窗口参数仍在网关层拒绝。
+- 恢复后日志继续暴露历史采样点带秒级偏移、实时点按周期整点对齐的不一致，导致实时概率被误判为旧点。历史和实时现在统一按所选周期落桶；小时线真实联网断言要求所有时间戳整除 3,600，防止“历史能打开但实时不推进”回归。
+- 修复后的本地网关合同、Worker 合同和跨进程端到端测试通过；真实开发版日志已出现多笔 `series=Probability`、`source=polymarket`、`host=poly-api.pan911.cn` 的成功历史响应。当前改动尚未提交、推送、打包或发布；Cloudflare 免费 Workers 额度和大陆非 100% 连通性仍是试用边界。

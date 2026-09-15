@@ -27,3 +27,7 @@ npm run test:real-market
 ```
 
 Packaging, signing, release publication, and Windows verification are outside the current delivery scope. Open-market continuous quote acceptance is tracked separately in the implementation progress document.
+
+## Polymarket read-only gateway
+
+Networks that cannot reach Polymarket directly can point the Polymarket adapter at the standalone read-only gateway in [`server/polymarket-gateway.mjs`](server/polymarket-gateway.mjs). Deployment and client configuration are documented in [`server/README.md`](server/README.md). The gateway exposes public market data only; it has no wallet, account, deposit, or order route.
