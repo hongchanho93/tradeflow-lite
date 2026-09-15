@@ -179,16 +179,23 @@ async fn get_history_bars(
     .map_err(|error| AppError::new("history_task_failed", format!("行情任务异常结束：{error}")))?;
     match &result {
         Ok(response) => eprintln!(
-            "market.history.ok symbol={} requested={} bars={} first_time={} last_time={} source={} host={} latency_ms={}",
+            "market.history.ok symbol={} requested={} series={:?} rows={} first_time={} last_time={} source={} host={} latency_ms={}",
             response.symbol.parts().1,
             count,
-            response.bars.len(),
+            response.series_kind,
+            response.bars.len().max(response.points.len()),
             response
                 .bars
                 .first()
                 .map(|bar| bar.time)
+                .or_else(|| response.points.first().map(|point| point.time))
                 .unwrap_or_default(),
-            response.bars.last().map(|bar| bar.time).unwrap_or_default(),
+            response
+                .bars
+                .last()
+                .map(|bar| bar.time)
+                .or_else(|| response.points.last().map(|point| point.time))
+                .unwrap_or_default(),
             response.diagnostics.source,
             response.diagnostics.host,
             response.diagnostics.latency_ms

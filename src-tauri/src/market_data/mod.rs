@@ -19,7 +19,9 @@ mod real_market;
 
 use serde::Serialize;
 
-use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
+use crate::contracts::{
+    Adjustment, AppError, Bar, MarketSeriesKind, ProbabilityPoint, Resolution, Symbol, SymbolKind,
+};
 use crate::tdx::standard::{Market, SecurityQuote, SecurityQuotes};
 use crate::tdx::{SecurityCode, Session};
 use history::HistoryQuery;
@@ -51,7 +53,10 @@ pub struct HostBenchmarkResponse {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryResponse {
     pub symbol: Symbol,
+    pub series_kind: MarketSeriesKind,
     pub bars: Vec<Bar>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<ProbabilityPoint>,
     pub diagnostics: HistoryDiagnostics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<QuoteSnapshot>,
@@ -155,7 +160,9 @@ pub(crate) fn fetch_history_bars_raw(
 
     Ok(HistoryResponse {
         symbol,
+        series_kind: MarketSeriesKind::Ohlcv,
         bars,
+        points: Vec::new(),
         diagnostics: HistoryDiagnostics {
             source: SOURCE,
             host: success.host,

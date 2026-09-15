@@ -48,7 +48,7 @@ assert.equal(isRealtimeSequenceFresh(10, 10), false, 'duplicate sequence must be
 assert.equal(isRealtimeSequenceFresh(9, 10), false);
 assert.equal(isRealtimeSequenceFresh(null, 10), true);
 const sequenceByChannel = new Map();
-for (const channel of ['bar', 'depth', 'trade']) {
+for (const channel of ['bar', 'point', 'depth', 'trade']) {
   const key = realtimeSequenceKey(current, channel);
   assert.equal(sequenceByChannel.has(key), false);
   sequenceByChannel.set(key, 10);
@@ -59,6 +59,12 @@ for (const channel of ['bar', 'depth', 'trade']) {
   );
 }
 assert.notEqual(realtimeSequenceKey(current, 'bar'), realtimeSequenceKey(current, 'depth'));
+assert.notEqual(realtimeSequenceKey(current, 'point'), realtimeSequenceKey(current, 'bar'));
+assert.equal(
+  realtimeSequenceKey({ ...current, source: 'midpoint' }, 'point'),
+  `${current.requestId}:${current.providerId}:${current.symbol}:${current.resolution}:point`,
+  'probability point sequences must use a dedicated bounded domain',
+);
 const klineSequenceEvent = { ...current, source: 'kline' };
 const aggregateTradeSequenceEvent = { ...current, source: 'aggTrade' };
 assert.notEqual(

@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use super::QuoteSnapshot;
 use super::hosts::{self, DEFAULT_HOSTS};
-use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
+use crate::contracts::{
+    Adjustment, AppError, Bar, MarketSeriesKind, Resolution, Symbol, SymbolKind,
+};
 #[cfg(feature = "provider-binance")]
 use crate::market_adapter::CatalogRequest;
 use crate::market_adapter::{
@@ -555,6 +557,7 @@ impl TestRealtimeSink {
             match &event.payload {
                 RealtimePayload::Status { status, .. } => connected |= *status == "connected",
                 RealtimePayload::Bar { .. } => bar = true,
+                RealtimePayload::Point { .. } => {}
                 RealtimePayload::Trade { .. } => trade = true,
                 RealtimePayload::Depth { .. } => depth = true,
             }
@@ -640,6 +643,12 @@ fn assert_realtime_envelopes(
                 assert!(event.sequence.is_some_and(|sequence| sequence > 0));
                 assert!(!source.is_empty());
                 Bar::validate_series(std::slice::from_ref(bar)).unwrap();
+            }
+            RealtimePayload::Point { point, source, .. } => {
+                assert!(event.sequence.is_some_and(|sequence| sequence > 0));
+                assert!(!source.is_empty());
+                crate::contracts::ProbabilityPoint::validate_series(std::slice::from_ref(point))
+                    .unwrap();
             }
             RealtimePayload::Trade {
                 price, quantity, ..
@@ -806,6 +815,7 @@ impl RecoverySink {
     fn channel_key(event: &RealtimeEventEnvelope) -> Option<String> {
         let channel = match event.payload {
             RealtimePayload::Bar { .. } => "bar",
+            RealtimePayload::Point { .. } => "point",
             RealtimePayload::Trade { .. } => "trade",
             RealtimePayload::Depth { .. } => "depth",
             RealtimePayload::Status { .. } => return None,
@@ -976,7 +986,9 @@ impl MarketDataAdapter for RecoveryAdapter {
     fn fetch_history(&self, request: HistoryRequest) -> Result<HistoryResponse, AppError> {
         Ok(HistoryResponse {
             symbol: request.symbol,
+            series_kind: MarketSeriesKind::Ohlcv,
             bars: vec![Bar::new(1, 10.0, 11.0, 9.0, 10.5, 1.0, None)],
+            points: Vec::new(),
             diagnostics: HistoryDiagnostics {
                 source: "fake.recovery",
                 host: "fake.test".to_string(),

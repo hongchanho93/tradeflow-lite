@@ -15,7 +15,7 @@ const customProvider = {
   id: 'custom-feed',
   displayName: 'Custom Feed',
   version: '1',
-  contractVersion: '1',
+  contractVersion: '2',
   enabled: true,
   capabilities: {
     catalog: true,
@@ -44,6 +44,52 @@ if (customSymbol.exchange !== 'CUSTOM' || customSymbol.baseAsset !== 'ABC') {
   throw new Error('catalog compatibility display metadata failed');
 }
 
+const predictionProvider = {
+  id: 'polymarket',
+  displayName: 'Polymarket 预测市场',
+  version: '1',
+  contractVersion: '2',
+  enabled: true,
+  capabilities: {
+    catalog: true,
+    history: true,
+    quote: false,
+    realtime: true,
+    venues: ['POLYMARKET'],
+    kinds: ['prediction'],
+    resolutions: ['1', '5', '15', '30', '60', '120', '240', '1D', '1W', '1M'],
+    adjustments: ['none'],
+  },
+};
+const predictionMetadata = {
+  conditionId: 'condition-1',
+  outcome: 'YES',
+  opposingSymbol: 'POLYMARKET:NO_TOKEN',
+  description: 'Resolves from the published source.',
+  resolutionSource: 'https://example.com/rules',
+  endDate: '2026-12-31T00:00:00Z',
+  volume: 120000,
+  liquidity: 45000,
+  probability: 62.5,
+  change24h: 3.2,
+};
+const predictionSymbol = marketSymbolFromCatalog({
+  providerId: 'polymarket',
+  symbol: 'POLYMARKET:YES_TOKEN',
+  name: 'Will the event happen?',
+  kind: 'prediction',
+  prediction: predictionMetadata,
+}, predictionProvider, 'POLYMARKET');
+if (predictionSymbol.code !== 'YES 62.5%' || predictionSymbol.prediction?.opposingSymbol !== 'POLYMARKET:NO_TOKEN') {
+  throw new Error('prediction catalog metadata conversion failed');
+}
+if (!searchMarketSymbols([predictionSymbol], 'condition-1').length) {
+  throw new Error('prediction condition-id search failed');
+}
+if (!marketSymbolMatchesSource(predictionSymbol, 'prediction', 'polymarket')) {
+  throw new Error('Polymarket source hierarchy failed');
+}
+
 const stock = searchMarketSymbols(rows, '600000')[0];
 if (stock?.symbol !== 'SH:600000' || stock.kind !== 'stock') throw new Error('stock code search failed');
 if (searchMarketSymbols(rows, '浦发银行')[0]?.symbol !== 'SH:600000') throw new Error('Chinese name search failed');
@@ -65,6 +111,7 @@ const fixtures = [
   { symbol: 'SZ:159915', code: '159915', name: '创业板ETF', exchange: 'SZ', kind: 'etf' },
   { symbol: 'BINANCE:BTCUSDT', code: 'BTC/USDT', name: 'Bitcoin / TetherUS', exchange: 'BINANCE', kind: 'crypto', quoteAsset: 'USDT' },
   { symbol: 'BINANCE_USDM:BTCUSDT', code: 'BTC/USDT 永续', name: 'Bitcoin / TetherUS Perpetual', exchange: 'BINANCE_USDM', kind: 'crypto', quoteAsset: 'USDT' },
+  predictionSymbol,
 ];
 if (!marketSymbolMatchesSource(fixtures[3], 'stock', 'chinext')) throw new Error('302 stock must be classified as ChiNext');
 if (marketSymbolMatchesSource(fixtures[1], 'stock', 'sh_main')) throw new Error('STAR stock leaked into SH main board');
@@ -86,6 +133,9 @@ if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm', 20)[0]?.symbol !==
 }
 if (listMarketSymbols(fixtures, '', 'crypto', 'binance_usdm_usdt', 20)[0]?.symbol !== 'BINANCE_USDM:BTCUSDT') {
   throw new Error('USD-M perpetual quote-asset filter failed');
+}
+if (listMarketSymbols(fixtures, '', 'prediction', 'polymarket', 20)[0]?.symbol !== 'POLYMARKET:YES_TOKEN') {
+  throw new Error('prediction category filter failed');
 }
 const dynamic = buildBinanceSpotSymbols([
   { symbol: 'WTRY', baseAsset: 'W', quoteAsset: 'TRY' },

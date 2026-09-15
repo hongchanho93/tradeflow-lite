@@ -67,7 +67,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb
 .symbol-source-menu button[aria-checked="true"] { background: #d1d4dc; color: #1e1e1e; }
 .symbol-results { min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid #363636; scrollbar-color: #555 transparent; }
 .symbol-result-row { width: 100%; height: 44px; display: grid; grid-template-columns: 28px 82px minmax(0, 1fr) 90px; align-items: center; gap: 10px; padding: 2px 16px; border-bottom: 1px solid #303030; color: #d1d4dc; text-align: left; }
-.symbol-result-row.crypto { grid-template-columns: 28px 150px minmax(0, 1fr) 90px; }
+.symbol-result-row.wide { grid-template-columns: 28px 150px minmax(0, 1fr) 120px; }
+.symbol-result-row.prediction { min-height: 54px; height: auto; padding-block: 7px; }
+.symbol-result-row.prediction .symbol-result-name strong { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .symbol-result-row:hover, .symbol-result-row.active { background: #343434; }
 .symbol-result-logo, .instrument-logo { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; overflow: hidden; border-radius: 50%; background: #f2f3f5; }
 .symbol-result-logo { width: 22px; height: 22px; }
@@ -285,7 +287,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb
 .market-data-tabs button:hover { background: var(--tv-hover); color: #d9dce2; }
 .market-data-tabs button[aria-selected="true"] { color: #f0f2f5; background: rgba(41, 98, 255, .18); }
 .market-data-unavailable { margin: auto 20px; color: #747a84; font-size: 11px; line-height: 18px; text-align: center; }
-.market-data-unavailable[hidden], .market-depth-view[hidden], .market-trades-view[hidden] { display: none; }
+.market-data-unavailable[hidden], .market-depth-view[hidden], .market-trades-view[hidden], .prediction-rules-view[hidden] { display: none; }
 .market-depth-view, .market-trades-view { min-height: 0; flex: 1; overflow-y: auto; }
 .market-best-prices { height: 42px; display: grid; grid-template-columns: 1fr 1fr; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--tv-border); color: #747b86; font-size: 10px; }
 .market-best-prices span:last-child { text-align: right; }
@@ -303,6 +305,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb
 .market-depth-spread { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-block: 1px solid var(--tv-border); color: #6f7580; font-size: 10px; }
 .market-depth-spread strong { color: #a7adb6; font-weight: 500; font-variant-numeric: tabular-nums; }
 .market-trades > p { margin: 28px 16px; color: #707680; font-size: 11px; text-align: center; }
+.prediction-rules-view { min-height: 0; flex: 1; overflow-y: auto; padding: 14px; color: #a8adb6; }
+.prediction-outcomes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.prediction-outcomes button { height: 34px; border: 1px solid var(--tv-border); border-radius: 5px; color: #a8adb6; background: #17191f; font-weight: 600; }
+.prediction-outcomes button.active { border-color: #2962ff; color: #fff; background: rgba(41, 98, 255, .22); }
+.prediction-stats { margin: 14px 0; }
+.prediction-stats div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--tv-border); }
+.prediction-stats dt { color: #707680; }
+.prediction-stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.prediction-rules-view h3 { margin: 18px 0 7px; color: #d1d4dc; font-size: 12px; }
+.prediction-rules-view p { margin: 0; color: #a8adb6; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+.prediction-rules-view a { display: inline-block; margin-top: 12px; color: #5b8def; font-size: 11px; }
 .drawing-manager { position: absolute; z-index: 9; top: 0; left: 0; bottom: 0; width: 270px; display: flex; flex-direction: column; border-right: 1px solid var(--tv-border); background: rgba(19, 23, 34, .98); box-shadow: 8px 0 24px rgba(0, 0, 0, .2); }
 .drawing-manager[hidden] { display: none; }
 .drawing-manager header { height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; border-bottom: 1px solid var(--tv-border); }

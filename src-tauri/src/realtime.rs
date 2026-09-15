@@ -11,6 +11,7 @@ use crate::market_adapter::{
 use crate::market_router::MarketRouter;
 
 pub const BAR_EVENT: &str = "market-realtime-bar";
+pub const POINT_EVENT: &str = "market-realtime-point";
 pub const STATUS_EVENT: &str = "market-realtime-status";
 pub const DEPTH_EVENT: &str = "market-realtime-depth";
 pub const TRADE_EVENT: &str = "market-realtime-trade";
@@ -54,6 +55,19 @@ struct RealtimeBarPayload {
     sequence: Option<u64>,
     bar: crate::contracts::Bar,
     closed: bool,
+    event_time_ms: i64,
+    source: std::borrow::Cow<'static, str>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RealtimePointPayload {
+    request_id: u64,
+    provider_id: &'static str,
+    symbol: String,
+    resolution: Resolution,
+    sequence: Option<u64>,
+    point: crate::contracts::ProbabilityPoint,
     event_time_ms: i64,
     source: std::borrow::Cow<'static, str>,
 }
@@ -145,6 +159,23 @@ impl RealtimeSink for TauriRealtimeSink {
                     sequence,
                     bar,
                     closed,
+                    event_time_ms,
+                    source,
+                },
+            ),
+            RealtimePayload::Point {
+                point,
+                event_time_ms,
+                source,
+            } => self.app.emit(
+                POINT_EVENT,
+                RealtimePointPayload {
+                    request_id,
+                    provider_id,
+                    symbol,
+                    resolution,
+                    sequence,
+                    point,
                     event_time_ms,
                     source,
                 },

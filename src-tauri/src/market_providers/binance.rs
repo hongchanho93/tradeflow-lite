@@ -9,7 +9,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tradeflow_binance_market_data::{Client, Interval, Kline};
 
 use crate::contracts::{
-    Adjustment, AppError, Bar, BinanceSpotSymbol, BinanceUsdMarginedSymbol, Resolution,
+    Adjustment, AppError, Bar, BinanceSpotSymbol, BinanceUsdMarginedSymbol, MarketSeriesKind,
+    Resolution,
 };
 use crate::market_adapter::{
     BINANCE_SPOT_PROVIDER_DESCRIPTOR, BINANCE_USDM_PROVIDER_DESCRIPTOR, CatalogAdapter,
@@ -176,6 +177,7 @@ impl CatalogAdapter for BinanceSpotAdapter {
                     kind: crate::contracts::SymbolKind::Crypto,
                     base_asset: Some(symbol.base_asset),
                     quote_asset: Some(symbol.quote_asset),
+                    prediction: None,
                 })
                 .collect()
         })
@@ -202,6 +204,7 @@ impl CatalogAdapter for BinanceUsdMarginedAdapter {
                     kind: crate::contracts::SymbolKind::Crypto,
                     base_asset: Some(symbol.base_asset),
                     quote_asset: Some(symbol.quote_asset),
+                    prediction: None,
                 })
                 .collect()
         })
@@ -667,7 +670,9 @@ fn fetch_binance_history(
     };
     Ok(HistoryResponse {
         symbol: request.symbol,
+        series_kind: MarketSeriesKind::Ohlcv,
         bars,
+        points: Vec::new(),
         diagnostics: HistoryDiagnostics {
             source,
             host: host.to_string(),

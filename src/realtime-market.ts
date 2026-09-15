@@ -12,6 +12,17 @@ export type RealtimeBarEvent<TBar> = {
   source: RealtimeBarSource;
 };
 
+export type RealtimePointEvent<TPoint> = {
+  requestId: number;
+  providerId: string;
+  symbol: string;
+  resolution: string;
+  sequence?: number | null;
+  point: TPoint;
+  eventTimeMs: number;
+  source: string;
+};
+
 export type RealtimeStatusEvent = {
   requestId: number;
   providerId: string;
@@ -49,7 +60,7 @@ export type RealtimeTradeEvent = {
   flags?: number | null;
 };
 
-export type RealtimeSequenceChannel = 'bar' | 'depth' | 'trade';
+export type RealtimeSequenceChannel = 'bar' | 'point' | 'depth' | 'trade';
 
 type RealtimeSequenceIdentity = {
   requestId: number;

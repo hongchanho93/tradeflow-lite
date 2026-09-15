@@ -8,12 +8,14 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
+use crate::contracts::{
+    Adjustment, AppError, Bar, ProbabilityPoint, Resolution, Symbol, SymbolKind,
+};
 
 pub use crate::market_data::{HistoryDiagnostics, HistoryResponse, QuoteSnapshot};
 
 /// 当前公开适配器合同的版本。
-pub const ADAPTER_CONTRACT_VERSION: &str = "1";
+pub const ADAPTER_CONTRACT_VERSION: &str = "2";
 pub const MAX_PROVIDER_ID_CHARS: usize = 64;
 
 /// provider id 会进入 `providerId|symbol` 的稳定身份 key，只允许与前端解析器
@@ -95,7 +97,7 @@ pub struct CatalogRequest {
 }
 
 /// 目录返回的 provider-neutral 稳定身份。`symbol` 必须是包含 venue 的 `VENUE:CODE`。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogSymbol {
     pub provider_id: String,
@@ -104,6 +106,23 @@ pub struct CatalogSymbol {
     pub kind: SymbolKind,
     pub base_asset: Option<String>,
     pub quote_asset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prediction: Option<PredictionMarketMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredictionMarketMetadata {
+    pub condition_id: String,
+    pub outcome: String,
+    pub opposing_symbol: String,
+    pub description: String,
+    pub resolution_source: String,
+    pub end_date: String,
+    pub volume: f64,
+    pub liquidity: f64,
+    pub probability: f64,
+    pub change_24h: f64,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -144,6 +163,11 @@ pub enum RealtimePayload {
     Bar {
         bar: Bar,
         closed: bool,
+        event_time_ms: i64,
+        source: Cow<'static, str>,
+    },
+    Point {
+        point: ProbabilityPoint,
         event_time_ms: i64,
         source: Cow<'static, str>,
     },
@@ -584,6 +608,34 @@ pub static BINANCE_USDM_DISABLED_DESCRIPTOR: ProviderDescriptor = ProviderDescri
         kinds: &[SymbolKind::Crypto],
         resolutions: &[],
         adjustments: &[],
+    },
+};
+
+#[cfg(feature = "provider-polymarket")]
+pub static POLYMARKET_PROVIDER_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "polymarket",
+    display_name: "Polymarket 预测市场",
+    version: "1",
+    contract_version: ADAPTER_CONTRACT_VERSION,
+    enabled: true,
+    capabilities: ProviderCapabilities {
+        catalog: true,
+        history: true,
+        quote: false,
+        realtime: true,
+        venues: &["POLYMARKET"],
+        kinds: &[SymbolKind::Prediction],
+        resolutions: &[
+            Resolution::Minute1,
+            Resolution::Minute5,
+            Resolution::Minute15,
+            Resolution::Minute30,
+            Resolution::Minute60,
+            Resolution::Day,
+            Resolution::Week,
+            Resolution::Month,
+        ],
+        adjustments: &[Adjustment::None],
     },
 };
 

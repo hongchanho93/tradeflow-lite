@@ -15,6 +15,7 @@ import {
   createSeriesMarkers,
   createTextWatermark,
   type CandlestickData,
+  type AutoscaleInfo,
   type IPaneApi,
   type IPriceLine,
   type ISeriesApi,
@@ -142,9 +143,11 @@ import {
   type RealtimeBarEvent,
   type RealtimeBarSource,
   type RealtimeDepthEvent,
+  type RealtimePointEvent,
   type RealtimeStatusEvent,
   type RealtimeTradeEvent,
 } from './realtime-market';
+import { normalizeProbabilityHistory, type ProbabilityPoint } from './probability-series';
 import {
   loadMarkerScopes,
   markerScope,
@@ -172,7 +175,9 @@ import './style.css';
 type Bar = { time: number; open: number; high: number; low: number; close: number; volume: number; amount?: number };
 type HistoryResponse = {
   symbol: string;
+  seriesKind: 'ohlcv' | 'probability';
   bars: Bar[];
+  points?: ProbabilityPoint[];
   diagnostics: { source: string; host: string; latencyMs: number };
   quote?: QuoteSnapshot;
 };
@@ -265,8 +270,8 @@ function isCurrentMarketSelection(
 }
 
 const defaultSymbol = marketSymbols.find((item) => item.symbol === 'SH:600000' && item.kind === 'stock')!;
-const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数', crypto: '数字货币' };
-const kindMetaLabels: Record<Exclude<MarketSymbol['kind'], 'crypto'>, string> = { stock: 'stock', etf: 'fund', index: 'index' };
+const kindLabels: Record<MarketSymbol['kind'], string> = { stock: '股票', etf: 'ETF', index: '指数', crypto: '数字货币', prediction: '预测市场' };
+const kindMetaLabels: Record<Exclude<MarketSymbol['kind'], 'crypto' | 'prediction'>, string> = { stock: 'stock', etf: 'fund', index: 'index' };
 const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; label: string }[]> = {
   all: [
     { value: 'all', label: '全部来源' },
@@ -275,6 +280,7 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'bj', label: '北京市场' },
     { value: 'binance_spot', label: '币安现货' },
     { value: 'binance_usdm', label: '币安 U 本位永续' },
+    { value: 'polymarket', label: 'Polymarket' },
   ],
   stock: [
     { value: 'all', label: '全部来源' },
@@ -307,6 +313,10 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
     { value: 'binance_usdm_usdt', label: 'U 本位永续 · USDT' },
     { value: 'binance_usdm_usdc', label: 'U 本位永续 · USDC' },
   ],
+  prediction: [
+    { value: 'all', label: '全部预测市场' },
+    { value: 'polymarket', label: 'Polymarket' },
+  ],
 };
 const resolutionLabels: Record<Resolution, string> = {
   '1': '1分', '5': '5分', '15': '15分', '30': '30分', '60': '1小时',
@@ -325,6 +335,7 @@ const priceScaleModes: Record<PriceScaleSetting, PriceScaleMode> = {
   indexed: PriceScaleMode.IndexedTo100,
 };
 let currentSymbol = defaultSymbol;
+let currentSeriesKind: HistoryResponse['seriesKind'] = 'ohlcv';
 let currentResolution: Resolution = '1D';
 let currentAdjustment: Adjustment = 'none';
 const historyRequestGate = new LatestRequestGate();
@@ -348,7 +359,7 @@ let realtimeConnected = false;
 let realtimeBarRequestId = 0;
 let latestDepth: RealtimeDepthEvent | null = null;
 let recentTrades: RealtimeTradeEvent[] = [];
-let activeMarketDataTab: 'depth' | 'trades' = 'depth';
+let activeMarketDataTab: 'depth' | 'trades' | 'rules' = 'depth';
 let deepHistoryTimer: number | undefined;
 let deepHistoryTimerKey = '';
 let deepHistoryNavigationReady = false;
@@ -556,6 +567,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <button type="button" data-symbol-category="index" aria-selected="false">指数</button>
           <button type="button" data-symbol-category="etf" aria-selected="false">ETF</button>
           <button type="button" data-symbol-category="crypto" aria-selected="false">数字货币</button>
+          <button type="button" data-symbol-category="prediction" aria-selected="false">预测市场</button>
         </nav>
         <div class="symbol-source-row">
           <button id="symbol-source-trigger" class="symbol-source-trigger" type="button" aria-haspopup="menu" aria-expanded="false">全部来源</button>
@@ -731,6 +743,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <nav class="market-data-tabs" aria-label="公开市场数据">
             <button type="button" data-market-data-tab="depth" aria-selected="true">盘口</button>
             <button type="button" data-market-data-tab="trades" aria-selected="false">成交</button>
+            <button id="prediction-rules-tab" type="button" data-market-data-tab="rules" aria-selected="false" hidden>规则</button>
           </nav>
           <div id="market-data-unavailable" class="market-data-unavailable">当前品种暂未接入盘口和逐笔成交</div>
           <section id="market-depth-view" class="market-depth-view">
@@ -743,6 +756,22 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <section id="market-trades-view" class="market-trades-view" hidden>
             <div class="market-table-head"><span>时间</span><span>价格</span><span>数量</span></div>
             <div id="market-trades" class="market-trades"></div>
+          </section>
+          <section id="prediction-rules-view" class="prediction-rules-view" hidden>
+            <div class="prediction-outcomes" aria-label="预测结果">
+              <button id="prediction-yes" type="button">YES</button>
+              <button id="prediction-no" type="button">NO</button>
+            </div>
+            <dl class="prediction-stats">
+              <div><dt>当前概率</dt><dd id="prediction-current">--</dd></div>
+              <div><dt>24 小时</dt><dd id="prediction-change">--</dd></div>
+              <div><dt>截止时间</dt><dd id="prediction-end-date">--</dd></div>
+              <div><dt>成交量</dt><dd id="prediction-volume">--</dd></div>
+              <div><dt>流动性</dt><dd id="prediction-liquidity">--</dd></div>
+            </dl>
+            <h3>结算说明</h3>
+            <p id="prediction-description">--</p>
+            <a id="prediction-resolution-source" href="#" target="_blank" rel="noreferrer" hidden>查看官方结算来源</a>
           </section>
         </aside>
         <aside id="drawing-manager" class="drawing-manager" hidden>
@@ -915,6 +944,17 @@ const marketDataSymbol = document.querySelector<HTMLElement>('#market-data-symbo
 const marketDataUnavailable = document.querySelector<HTMLDivElement>('#market-data-unavailable')!;
 const marketDepthView = document.querySelector<HTMLElement>('#market-depth-view')!;
 const marketTradesView = document.querySelector<HTMLElement>('#market-trades-view')!;
+const predictionRulesTab = document.querySelector<HTMLButtonElement>('#prediction-rules-tab')!;
+const predictionRulesView = document.querySelector<HTMLElement>('#prediction-rules-view')!;
+const predictionYes = document.querySelector<HTMLButtonElement>('#prediction-yes')!;
+const predictionNo = document.querySelector<HTMLButtonElement>('#prediction-no')!;
+const predictionEndDate = document.querySelector<HTMLElement>('#prediction-end-date')!;
+const predictionCurrent = document.querySelector<HTMLElement>('#prediction-current')!;
+const predictionChange = document.querySelector<HTMLElement>('#prediction-change')!;
+const predictionVolume = document.querySelector<HTMLElement>('#prediction-volume')!;
+const predictionLiquidity = document.querySelector<HTMLElement>('#prediction-liquidity')!;
+const predictionDescription = document.querySelector<HTMLElement>('#prediction-description')!;
+const predictionResolutionSource = document.querySelector<HTMLAnchorElement>('#prediction-resolution-source')!;
 const marketDepthAsks = document.querySelector<HTMLDivElement>('#market-depth-asks')!;
 const marketDepthBids = document.querySelector<HTMLDivElement>('#market-depth-bids')!;
 const marketTrades = document.querySelector<HTMLDivElement>('#market-trades')!;
@@ -1189,7 +1229,8 @@ function setPrimarySeriesData() {
   candleSeries.setData(currentBars.map((bar) => candlePoint(bar)));
   const ohlc = currentBars.map((bar) => ({ ...bar, time: bar.time as UTCTimestamp }));
   const closes = currentBars.map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.close }));
-  const candlesVisible = primarySeriesVisible && currentChartType === 'candles';
+  const isProbability = currentSeriesKind === 'probability';
+  const candlesVisible = !isProbability && primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
     upColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
     downColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
@@ -1200,21 +1241,33 @@ function setPrimarySeriesData() {
     priceLineVisible: candlesVisible && chartSettings.lastPriceLineVisible,
     lastValueVisible: candlesVisible && chartSettings.lastPriceLineVisible,
   });
-  barSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'bars' });
-  closeLineSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'line' });
-  areaSeries.applyOptions({ visible: primarySeriesVisible && currentChartType === 'area' });
+  barSeries.applyOptions({ visible: !isProbability && primarySeriesVisible && currentChartType === 'bars' });
+  closeLineSeries.applyOptions({
+    visible: primarySeriesVisible && (isProbability || currentChartType === 'line'),
+    priceFormat: isProbability
+      ? { type: 'custom', minMove: 0.1, formatter: (value: number) => `${value.toFixed(1)}%` }
+      : { type: 'price', precision: 2, minMove: 0.01 },
+    autoscaleInfoProvider: isProbability
+      ? () => ({ priceRange: { minValue: 0, maxValue: 100 } })
+      : (baseImplementation: () => AutoscaleInfo | null) => baseImplementation(),
+  });
+  areaSeries.applyOptions({ visible: !isProbability && primarySeriesVisible && currentChartType === 'area' });
   baselineSeries.applyOptions({
-    visible: primarySeriesVisible && currentChartType === 'baseline',
+    visible: !isProbability && primarySeriesVisible && currentChartType === 'baseline',
     baseValue: { type: 'price', price: currentBars[0]?.close ?? 0 },
   });
-  barSeries.setData(currentChartType === 'bars' ? ohlc : []);
-  closeLineSeries.setData(currentChartType === 'line' ? closes : []);
-  areaSeries.setData(currentChartType === 'area' ? closes : []);
-  baselineSeries.setData(currentChartType === 'baseline' ? closes : []);
+  barSeries.setData(!isProbability && currentChartType === 'bars' ? ohlc : []);
+  closeLineSeries.setData(isProbability || currentChartType === 'line' ? closes : []);
+  areaSeries.setData(!isProbability && currentChartType === 'area' ? closes : []);
+  baselineSeries.setData(!isProbability && currentChartType === 'baseline' ? closes : []);
 }
 
 function updatePrimarySeries(bar: Bar) {
   candleSeries.update(candlePoint(bar));
+  if (currentSeriesKind === 'probability') {
+    closeLineSeries.update({ time: bar.time as UTCTimestamp, value: bar.close });
+    return;
+  }
   if (currentChartType === 'bars') barSeries.update({ ...bar, time: bar.time as UTCTimestamp });
   const close = { time: bar.time as UTCTimestamp, value: bar.close };
   if (currentChartType === 'line') closeLineSeries.update(close);
@@ -1222,7 +1275,11 @@ function updatePrimarySeries(bar: Bar) {
   if (currentChartType === 'baseline') baselineSeries.update(close);
 }
 
-function applyChartType(chartType: ChartType, preserveRange = true) {
+function applyChartType(chartType: ChartType, preserveRange = true, persist = true) {
+  if (currentSeriesKind === 'probability' && chartType !== 'line') {
+    showChartToast('预测市场使用概率折线，不提供伪造 K 线');
+    return;
+  }
   const range = preserveRange ? chart.timeScale().getVisibleLogicalRange() : null;
   currentChartType = chartType;
   setPrimarySeriesData();
@@ -1239,7 +1296,7 @@ function applyChartType(chartType: ChartType, preserveRange = true) {
     else button.removeAttribute('aria-current');
   }
   if (range) requestAnimationFrame(() => chart.timeScale().setVisibleLogicalRange(range));
-  persistChartPreferences();
+  if (persist) persistChartPreferences();
 }
 
 function applyPriceScale(setting: PriceScaleSetting) {
@@ -1394,6 +1451,7 @@ function renderWatchlist() {
 }
 
 function formatMarketPrice(value: number): string {
+  if (currentSeriesKind === 'probability') return `${value.toFixed(1)}%`;
   const digits = value >= 1_000 ? 2 : value >= 1 ? 4 : value >= 0.01 ? 6 : 8;
   return value.toFixed(digits).replace(/\.?0+$/, '');
 }
@@ -1419,9 +1477,9 @@ function acceptsRealtimeSequence(
     symbol: string;
     resolution: string;
     sequence?: number | null;
-    source?: RealtimeBarSource;
+    source?: unknown;
   },
-  channel: 'bar' | 'depth' | 'trade',
+  channel: 'bar' | 'point' | 'depth' | 'trade',
 ) {
   if (event.sequence == null) return true;
   const key = realtimeSequenceKey(event, channel);
@@ -1472,9 +1530,9 @@ function renderMarketDepth() {
   }
   const ask = depth.asks[0];
   const bid = depth.bids[0];
-  bestAsk.textContent = formatMarketPrice(ask.price);
-  bestBid.textContent = formatMarketPrice(bid.price);
-  marketDepthSpread.textContent = formatMarketPrice(ask.price - bid.price);
+  bestAsk.textContent = ask ? formatMarketPrice(ask.price) : '--';
+  bestBid.textContent = bid ? formatMarketPrice(bid.price) : '--';
+  marketDepthSpread.textContent = ask && bid ? formatMarketPrice(ask.price - bid.price) : '--';
   updateDepthRows(marketDepthAsks, 'ask', [...depth.asks].reverse());
   updateDepthRows(marketDepthBids, 'bid', depth.bids);
 }
@@ -1494,21 +1552,78 @@ function renderMarketTrades() {
     row.className = `market-trade-row ${trade.side === 'sell' ? 'sell' : trade.side === 'buy' ? 'buy' : ''}`;
     row.children[0].textContent = realtimeTimeFormatter.format(new Date(trade.tradeTimeMs));
     row.children[1].textContent = formatMarketPrice(trade.price);
-    row.children[2].textContent = formatMarketQuantity(trade.quantity);
+    row.children[2].textContent = currentSeriesKind === 'probability' && trade.quantity === 0
+      ? '--'
+      : formatMarketQuantity(trade.quantity);
+  }
+}
+
+const compactUsd = new Intl.NumberFormat('zh-CN', {
+  style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1,
+});
+
+function opposingPredictionSymbol(symbol: MarketSymbol): MarketSymbol | null {
+  const metadata = symbol.prediction;
+  if (!metadata) return null;
+  const nextOutcome = metadata.outcome.toUpperCase() === 'YES' ? 'NO' : 'YES';
+  return {
+    ...symbol,
+    symbol: metadata.opposingSymbol,
+    code: nextOutcome,
+    aliases: [metadata.opposingSymbol.split(':')[1] ?? '', symbol.name, metadata.conditionId],
+    prediction: {
+      ...metadata,
+      outcome: nextOutcome,
+      opposingSymbol: symbol.symbol,
+      probability: 100 - metadata.probability,
+      change24h: -metadata.change24h,
+    },
+  };
+}
+
+function renderPredictionRules() {
+  const metadata = currentSymbol.prediction;
+  if (!metadata) return;
+  const outcome = metadata.outcome.toUpperCase();
+  predictionYes.classList.toggle('active', outcome === 'YES');
+  predictionNo.classList.toggle('active', outcome === 'NO');
+  predictionCurrent.textContent = `${metadata.probability.toFixed(1)}%`;
+  predictionChange.textContent = `${metadata.change24h > 0 ? '+' : ''}${metadata.change24h.toFixed(1)} 个百分点`;
+  predictionChange.className = metadata.change24h >= 0 ? 'up' : 'down';
+  const endDate = metadata.endDate ? new Date(metadata.endDate) : null;
+  predictionEndDate.textContent = endDate && Number.isFinite(endDate.getTime())
+    ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }).format(endDate)
+    : '--';
+  predictionVolume.textContent = compactUsd.format(metadata.volume);
+  predictionLiquidity.textContent = compactUsd.format(metadata.liquidity);
+  predictionDescription.textContent = metadata.description || '以 Polymarket 公布的市场规则和结算来源为准。';
+  try {
+    const url = new URL(metadata.resolutionSource);
+    const safe = url.protocol === 'https:' || url.protocol === 'http:';
+    predictionResolutionSource.hidden = !safe;
+    if (safe) predictionResolutionSource.href = url.href;
+  } catch {
+    predictionResolutionSource.hidden = true;
+    predictionResolutionSource.removeAttribute('href');
   }
 }
 
 function renderMarketDataPanel() {
   const supported = isRealtimeMarketDataSupported();
+  const prediction = currentSymbol.kind === 'prediction' && currentSymbol.prediction !== undefined;
+  if (!prediction && activeMarketDataTab === 'rules') activeMarketDataTab = 'depth';
   marketDataSymbol.textContent = currentSymbol.code;
-  marketDataTitle.textContent = activeMarketDataTab === 'depth' ? '盘口' : '成交';
+  marketDataTitle.textContent = activeMarketDataTab === 'depth' ? '盘口' : activeMarketDataTab === 'trades' ? '成交' : '规则';
+  predictionRulesTab.hidden = !prediction;
   marketDataUnavailable.hidden = supported;
   marketDepthView.hidden = !supported || activeMarketDataTab !== 'depth';
   marketTradesView.hidden = !supported || activeMarketDataTab !== 'trades';
+  predictionRulesView.hidden = !prediction || activeMarketDataTab !== 'rules';
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-market-data-tab]')) {
     button.setAttribute('aria-selected', String(button.dataset.marketDataTab === activeMarketDataTab));
   }
-  if (!supported) return;
+  if (prediction) renderPredictionRules();
+  if (!supported || activeMarketDataTab === 'rules') return;
   if (activeMarketDataTab === 'depth') renderMarketDepth();
   else renderMarketTrades();
 }
@@ -1708,8 +1823,9 @@ function applyMainSeriesOrder() {
 function applyManagedSeriesVisibility(series: ManagedSeries) {
   const visible = isManagedSeriesVisible(series);
   if (series === 'volume') {
-    volumeSeries.applyOptions({ visible });
-    document.querySelector<HTMLDivElement>('#volume-legend')!.hidden = !visible || !chartSettings.volumeLegendVisible;
+    const marketVisible = visible && currentSeriesKind === 'ohlcv';
+    volumeSeries.applyOptions({ visible: marketVisible });
+    document.querySelector<HTMLDivElement>('#volume-legend')!.hidden = !marketVisible || !chartSettings.volumeLegendVisible;
   }
   if (series === 'ma') maSeries.applyOptions({ visible });
   if (series === 'ema') emaSeries.applyOptions({ visible });
@@ -2324,11 +2440,20 @@ function formatCompactVolume(volume: number): string {
 }
 
 function formatPrice(value: number): string {
+  if (currentSeriesKind === 'probability') return `${value.toFixed(1)}%`;
   return value.toFixed(currentSymbol.kind === 'etf' ? 3 : 2);
 }
 
 function showBar(bar: Bar, previous?: Bar) {
   const change = previous ? bar.close - previous.close : 0;
+  if (currentSeriesKind === 'probability') {
+    const sign = change > 0 ? '+' : '';
+    legendValues.className = `legend-values ${change >= 0 ? 'up' : 'down'}`;
+    legendValues.removeAttribute('title');
+    legendValues.textContent = `${currentSymbol.prediction?.outcome ?? 'YES'} 概率 ${bar.close.toFixed(1)}% · ${sign}${change.toFixed(1)} 个百分点`;
+    volumeLegend.hidden = true;
+    return;
+  }
   const percentage = previous && previous.close ? (change / previous.close) * 100 : 0;
   const sign = change > 0 ? '+' : '';
   const direction = change >= 0 ? 'up' : 'down';
@@ -2524,6 +2649,21 @@ function renderSecondaryPaneOrder() {
 }
 
 function refreshIndicators(updatedTimes?: number[]) {
+  if (currentSeriesKind === 'probability') {
+    maSeries.setData([]);
+    emaSeries.setData([]);
+    bollUpperSeries.setData([]);
+    bollMiddleSeries.setData([]);
+    bollLowerSeries.setData([]);
+    clearBollPresentation();
+    if (macdPane) {
+      macdPane.dif.setData([]);
+      macdPane.dea.setData([]);
+      macdPane.histogram.setData([]);
+    }
+    if (rsiPane) rsiPane.line.setData([]);
+    return;
+  }
   if (activeIndicators.size === 0 || currentBars.length === 0) return;
   const closes = currentBars.map((bar) => bar.close);
   if (activeIndicators.has('ma')) updateIndicatorSeries(maSeries, sma(closes, 20), updatedTimes);
@@ -2673,7 +2813,7 @@ function appendNextSymbolResults() {
     const index = start + offset;
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `symbol-result-row${item.kind === 'crypto' ? ' crypto' : ''}`;
+    button.className = `symbol-result-row${item.kind === 'crypto' || item.kind === 'prediction' ? ' wide' : ''}${item.kind === 'prediction' ? ' prediction' : ''}`;
     button.role = 'option';
     button.setAttribute('aria-selected', 'false');
     button.innerHTML = '<span class="symbol-result-code"></span><span class="symbol-result-name"><strong></strong></span><span class="symbol-result-kind"></span>';
@@ -2681,7 +2821,7 @@ function appendNextSymbolResults() {
     button.querySelector('.symbol-result-code')!.textContent = item.code;
     button.querySelector('strong')!.textContent = item.name;
     const kind = button.querySelector('.symbol-result-kind')!;
-    const marketType = item.kind === 'crypto'
+    const marketType = item.kind === 'crypto' || item.kind === 'prediction'
       ? item.providerDisplayName
       : kindMetaLabels[item.kind];
     kind.append(document.createTextNode(marketType), createExchangeBadge(item.exchange));
@@ -2712,7 +2852,7 @@ function renderSymbolResults() {
   if (!matchingSymbolResults.length) {
     const empty = document.createElement('p');
     empty.className = 'symbol-results-empty';
-    empty.textContent = '没有找到符合条件的证券';
+    empty.textContent = '没有找到符合条件的品种';
     symbolResults.append(empty);
     symbolResultCount.textContent = '';
     activeSymbolResult = -1;
@@ -2813,7 +2953,7 @@ async function refreshMissingHistoryQuote(
 async function selectSymbol(symbol: MarketSymbol) {
   input.value = symbol.code;
   closeSymbolResults();
-  await openHistory(symbol, currentResolution, symbol.kind === 'crypto' ? 'none' : currentAdjustment);
+  await openHistory(symbol, currentResolution, symbol.kind === 'crypto' || symbol.kind === 'prediction' ? 'none' : currentAdjustment);
 }
 
 function marketHistoryCacheKey(symbol: MarketSymbol, resolution: Resolution, adjustment: Adjustment): string {
@@ -2851,7 +2991,7 @@ function requestHistory(
     adjustment,
     count,
     includeQuote: false,
-  }).finally(() => historyRequests.delete(requestKey));
+  }).then(normalizeProbabilityHistory).finally(() => historyRequests.delete(requestKey));
   historyRequests.set(requestKey, request);
   return request;
 }
@@ -2866,6 +3006,7 @@ function replaceHistorySeries(bars: Bar[], preserveVisibleRange: boolean) {
     value: bar.volume,
     color: bar.close >= bar.open ? 'rgba(8, 153, 129, .48)' : 'rgba(242, 54, 69, .48)',
   })));
+  volumeSeries.applyOptions({ visible: currentSeriesKind === 'ohlcv' && volumeVisible });
   refreshIndicators();
   renderPriceLines();
   renderSeriesMarkers();
@@ -2895,6 +3036,11 @@ function showHistory(
   currentSymbol = symbol;
   currentResolution = resolution;
   currentAdjustment = adjustment;
+  currentSeriesKind = response.seriesKind;
+  if (currentSeriesKind === 'probability') activeMarketDataTab = 'rules';
+  else if (activeMarketDataTab === 'rules') activeMarketDataTab = 'depth';
+  const requiredChartType = currentSeriesKind === 'probability' ? 'line' : chartPreferences.chartType;
+  if (currentChartType !== requiredChartType) applyChartType(requiredChartType, false, false);
   currentQuote = response.quote && isUsableQuote(response.quote) ? response.quote : null;
   resetMarketData();
   if (priceScopeChanged && !priceScaleAuto) {
@@ -2916,18 +3062,30 @@ function showHistory(
   }
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-adjustment]')) {
     button.classList.toggle('active', button.dataset.adjustment === currentAdjustment);
-    button.disabled = symbol.kind === 'crypto' && button.dataset.adjustment === 'qfq';
+    button.disabled = (symbol.kind === 'crypto' || symbol.kind === 'prediction') && button.dataset.adjustment === 'qfq';
   }
-  legendSymbol.textContent = `${symbol.name} · ${resolutionLabels[currentResolution]} · ${symbol.exchange}${currentAdjustment === 'qfq' ? ' · 前复权' : ''}`;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-chart-type]')) {
+    button.disabled = currentSeriesKind === 'probability' && button.dataset.chartType !== 'line';
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-indicator]')) {
+    button.disabled = currentSeriesKind === 'probability';
+  }
+  document.querySelector<HTMLButtonElement>('#volume-toggle')!.disabled = currentSeriesKind === 'probability';
+  legendSymbol.textContent = currentSeriesKind === 'probability'
+    ? `${symbol.name} · ${symbol.prediction?.outcome ?? 'YES'} · ${resolutionLabels[currentResolution]}`
+    : `${symbol.name} · ${resolutionLabels[currentResolution]} · ${symbol.exchange}${currentAdjustment === 'qfq' ? ' · 前复权' : ''}`;
   const dateInputFormatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: symbol.kind === 'crypto' ? 'UTC' : 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    timeZone: symbol.kind === 'crypto' || symbol.kind === 'prediction' ? 'UTC' : 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   });
   goToDateInput.min = dateInputFormatter.format(new Date(response.bars[0].time * 1000));
   goToDateInput.max = dateInputFormatter.format(new Date(response.bars.at(-1)!.time * 1000));
   syncPriceLineMenu();
   renderPriceLines();
   renderWatchlist();
-  document.querySelector<HTMLDivElement>('#chart')!.setAttribute('aria-label', `${symbol.name}${resolutionLabels[currentResolution]}K线图`);
+  document.querySelector<HTMLDivElement>('#chart')!.setAttribute(
+    'aria-label',
+    `${symbol.name}${resolutionLabels[currentResolution]}${currentSeriesKind === 'probability' ? '概率走势图' : 'K线图'}`,
+  );
   showLatest(response.bars);
   status.className = 'connection-status ready';
   const statusText = source === 'memory'
@@ -3030,7 +3188,7 @@ async function openHistory(
     errorLayer.textContent = '没有找到这个行情品种';
     return;
   }
-  if (match.kind === 'crypto') requestedAdjustment = 'none';
+  if (match.kind === 'crypto' || match.kind === 'prediction') requestedAdjustment = 'none';
   const generation = historyRequestGate.begin();
   stopRealtimeMarket();
   clearDeepHistoryTimer();
@@ -3455,20 +3613,21 @@ function applyRealtimeStatus(event: RealtimeStatusEvent) {
     realtimeConnected = true;
     status.className = 'connection-status ready';
     const providerName = activeRealtimeProviderDisplayName || event.providerId;
-    const statusText = `实时 · ${providerName} WS`;
+    const statusText = `实时 · ${providerName}${currentSymbol.kind === 'prediction' ? ' · 轮询' : ' WS'}`;
     setStatusLabel(status, statusText);
-    status.title = `${providerName} WebSocket 已连接，等待实时推送`;
+    status.title = event.message ?? `${providerName} 实时行情已连接`;
     scheduleLatestPoll(60_000);
     return;
   }
   realtimeConnected = false;
   status.className = 'connection-status loading';
   const providerName = activeRealtimeProviderDisplayName || event.providerId;
+  const prediction = currentSymbol.kind === 'prediction';
   const statusText = event.status === 'connecting'
-    ? `正在连接 ${providerName} WS`
-    : `实时重连中 · ${providerName} · 轮询保护`;
+    ? `正在连接 ${providerName}${prediction ? ' 公开行情' : ' WS'}`
+    : `实时重连中 · ${providerName}${prediction ? ' · 轮询' : ' · 轮询保护'}`;
   setStatusLabel(status, statusText);
-  status.title = event.message ?? `正在建立 ${providerName} WebSocket 连接`;
+  status.title = event.message ?? `正在建立 ${providerName}${prediction ? ' 公开行情' : ' WebSocket 连接'}`;
   if (event.status === 'reconnecting') scheduleLatestPoll(0);
 }
 
@@ -3508,9 +3667,53 @@ function queueRealtimeTrade(event: RealtimeTradeEvent) {
   else scheduleMarketDataTimer(delay);
 }
 
+function applyRealtimePoint(event: RealtimePointEvent<ProbabilityPoint>) {
+  if (currentSeriesKind !== 'probability' || !matchesRealtimeSelection(
+    event,
+    activeRealtimeRequestId,
+    currentSymbol.symbol,
+    currentResolution,
+    activeRealtimeProviderId,
+  )) return;
+  if (!acceptsRealtimeSequence(event, 'point')) return;
+  const point = event.point;
+  if (!Number.isFinite(point.time) || !Number.isFinite(point.value)
+    || point.value < 0 || point.value > 100
+    || (currentBars.at(-1)?.time ?? -Infinity) > point.time) {
+    console.warn('market.realtime.invalid_probability', { point, symbol: event.symbol });
+    return;
+  }
+  const bar: Bar = {
+    time: point.time,
+    open: point.value,
+    high: point.value,
+    low: point.value,
+    close: point.value,
+    volume: 0,
+  };
+  if (currentBars.at(-1)?.time === point.time) currentBars[currentBars.length - 1] = bar;
+  else currentBars.push(bar);
+  if (currentSymbol.prediction) currentSymbol.prediction.probability = point.value;
+  updatePrimarySeries(bar);
+  showCurrentSnapshot();
+  if (!marketDataPanel.hidden) renderPredictionRules();
+  const cacheKey = marketHistoryCacheKey(currentSymbol, currentResolution, currentAdjustment);
+  const cached = getHistoryCache(currentSymbol, currentResolution, currentAdjustment);
+  if (cached) {
+    const points = [...(cached.value.points ?? [])];
+    if (points.at(-1)?.time === point.time) points[points.length - 1] = point;
+    else points.push(point);
+    historyCache.set(cacheKey, { ...cached.value, bars: [...currentBars], points }, cached.deep);
+  }
+  status.className = 'connection-status ready';
+  setStatusLabel(status, `实时 · ${currentSymbol.providerDisplayName} · 概率 ${point.value.toFixed(1)}%`);
+  status.title = `最后一次概率更新：${realtimeTimeFormatter.format(new Date(event.eventTimeMs))}`;
+}
+
 async function installRealtimeListeners() {
   await Promise.all([
     listen<RealtimeBarEvent<Bar>>('market-realtime-bar', (event) => queueRealtimeBar(event.payload)),
+    listen<RealtimePointEvent<ProbabilityPoint>>('market-realtime-point', (event) => applyRealtimePoint(event.payload)),
     listen<RealtimeStatusEvent>('market-realtime-status', (event) => applyRealtimeStatus(event.payload)),
     listen<RealtimeDepthEvent>('market-realtime-depth', (event) => queueRealtimeDepth(event.payload)),
     listen<RealtimeTradeEvent>('market-realtime-trade', (event) => queueRealtimeTrade(event.payload)),
@@ -3615,8 +3818,17 @@ document.querySelector<HTMLButtonElement>('#close-market-data')!.addEventListene
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-market-data-tab]')) {
   button.addEventListener('click', () => {
-    activeMarketDataTab = button.dataset.marketDataTab as 'depth' | 'trades';
+    activeMarketDataTab = button.dataset.marketDataTab as 'depth' | 'trades' | 'rules';
     renderMarketDataPanel();
+  });
+}
+for (const [button, outcome] of [[predictionYes, 'YES'], [predictionNo, 'NO']] as const) {
+  button.addEventListener('click', () => {
+    if (currentSymbol.prediction?.outcome.toUpperCase() === outcome) return;
+    const opposing = opposingPredictionSymbol(currentSymbol);
+    if (!opposing) return;
+    marketSymbolById.set(marketSymbolKey(opposing), opposing);
+    void selectSymbol(opposing);
   });
 }
 document.querySelector<HTMLDivElement>('.symbol-control')!.addEventListener('click', openSymbolDialog);

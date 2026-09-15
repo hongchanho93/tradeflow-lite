@@ -1,8 +1,21 @@
-export type MarketSymbolKind = 'stock' | 'etf' | 'index' | 'crypto';
+export type MarketSymbolKind = 'stock' | 'etf' | 'index' | 'crypto' | 'prediction';
 export type MarketSearchCategory = 'all' | MarketSymbolKind;
 export type MarketSearchSource = 'all' | 'sh' | 'sz' | 'bj' | 'sh_main' | 'star' | 'sz_main' | 'chinext'
   | 'binance_spot' | 'binance_usdt' | 'binance_usdc' | 'binance_fdusd' | 'binance_btc' | 'binance_other'
-  | 'binance_usdm' | 'binance_usdm_usdt' | 'binance_usdm_usdc';
+  | 'binance_usdm' | 'binance_usdm_usdt' | 'binance_usdm_usdc' | 'polymarket';
+
+export type PredictionMarketMetadata = {
+  conditionId: string;
+  outcome: string;
+  opposingSymbol: string;
+  description: string;
+  resolutionSource: string;
+  endDate: string;
+  volume: number;
+  liquidity: number;
+  probability: number;
+  change24h: number;
+};
 
 export type MarketSymbol = {
   symbol: string;
@@ -20,6 +33,7 @@ export type MarketSymbol = {
   baseAsset?: string;
   quoteAsset?: string;
   aliases?: string[];
+  prediction?: PredictionMarketMetadata;
 };
 
 const MARKET_SYMBOL_COMPONENT = /^[A-Z0-9._-]+$/;
@@ -67,6 +81,7 @@ export type MarketCatalogSymbol = {
   kind: MarketSymbolKind;
   baseAsset?: string | null;
   quoteAsset?: string | null;
+  prediction?: PredictionMarketMetadata | null;
 };
 
 export function marketSymbolFromCatalog(
@@ -75,9 +90,9 @@ export function marketSymbolFromCatalog(
   venue: string,
 ): MarketSymbol {
   const [, rawCode = row.symbol] = row.symbol.split(':', 2);
-  const code = row.baseAsset && row.quoteAsset
-    ? `${row.baseAsset}/${row.quoteAsset}`
-    : rawCode;
+  const code = row.prediction
+    ? `${row.prediction.outcome} ${row.prediction.probability.toFixed(1)}%`
+    : (row.baseAsset && row.quoteAsset ? `${row.baseAsset}/${row.quoteAsset}` : rawCode);
   return {
     symbol: row.symbol,
     code,
@@ -91,7 +106,8 @@ export function marketSymbolFromCatalog(
     quote: descriptor.enabled && descriptor.capabilities.quote,
     baseAsset: row.baseAsset ?? undefined,
     quoteAsset: row.quoteAsset ?? undefined,
-    aliases: [rawCode, row.name],
+    aliases: [rawCode, row.name, row.prediction?.conditionId ?? ''].filter(Boolean),
+    prediction: row.prediction ?? undefined,
   };
 }
 
@@ -116,6 +132,7 @@ export function marketSymbolMatchesSource(
 ): boolean {
   if (category !== 'all' && item.kind !== category) return false;
   if (source === 'all') return true;
+  if (source === 'polymarket') return item.kind === 'prediction' && item.exchange === 'POLYMARKET';
   if (source === 'binance_spot') return item.kind === 'crypto' && item.exchange === 'BINANCE';
   if (source === 'binance_usdm') return item.kind === 'crypto' && item.exchange === 'BINANCE_USDM';
   if (source.startsWith('binance_usdm_')) {
@@ -158,7 +175,7 @@ export function listMarketSymbols(
       .slice(0, limit)
       .map(({ item }) => item);
   }
-  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, index: 1, etf: 2, crypto: 3 };
+  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, index: 1, etf: 2, crypto: 3, prediction: 4 };
   return filtered
     .sort((left, right) => kindOrder[left.kind] - kindOrder[right.kind]
       || left.code.localeCompare(right.code)
@@ -169,7 +186,7 @@ export function listMarketSymbols(
 export function searchMarketSymbols(rows: MarketSymbol[], rawQuery: string, limit = 30): MarketSymbol[] {
   const query = normalizeSearchText(rawQuery);
   if (!query || limit <= 0) return [];
-  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, etf: 1, index: 2, crypto: 3 };
+  const kindOrder: Record<MarketSymbolKind, number> = { stock: 0, etf: 1, index: 2, crypto: 3, prediction: 4 };
   return rows
     .flatMap((item) => {
       const rank = matchRank(item, query);

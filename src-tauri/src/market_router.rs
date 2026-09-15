@@ -1,16 +1,19 @@
 use std::sync::OnceLock;
 
-use crate::contracts::{Adjustment, AppError, Bar, Resolution};
+use crate::contracts::{Adjustment, AppError, Bar, MarketSeriesKind, Resolution};
 use crate::market_adapter::{HistoryResponse, QuoteAdapter, TDX_PROVIDER_DESCRIPTOR};
 use crate::market_data;
 #[cfg(feature = "provider-binance")]
 use crate::market_providers::binance::{BinanceSpotAdapter, BinanceUsdMarginedAdapter};
+#[cfg(feature = "provider-polymarket")]
+use crate::market_providers::polymarket::PolymarketAdapter;
 
 pub use crate::market_adapter::{
     AdapterRegistration, AdapterRegistry, CatalogAdapter, CatalogRequest, CatalogSymbol,
-    HistoryRequest, MarketDataAdapter, MarketDataSnapshot, ProviderCapabilities,
-    ProviderDescriptor, QuoteRequest, QuoteResponse, QuoteSnapshot, RealtimeAdapter,
-    RealtimeEventEnvelope, RealtimePayload, RealtimePriceLevel, RealtimeRequest, RealtimeSink,
+    HistoryRequest, MarketDataAdapter, MarketDataSnapshot, PredictionMarketMetadata,
+    ProviderCapabilities, ProviderDescriptor, QuoteRequest, QuoteResponse, QuoteSnapshot,
+    RealtimeAdapter, RealtimeEventEnvelope, RealtimePayload, RealtimePriceLevel, RealtimeRequest,
+    RealtimeSink,
 };
 
 struct TdxAdapter;
@@ -94,6 +97,8 @@ impl MarketDataAdapter for BinanceUsdMarginedAdapter {
 static TDX_ADAPTER: TdxAdapter = TdxAdapter;
 static BINANCE_SPOT_ADAPTER: BinanceSpotAdapter = BinanceSpotAdapter;
 static BINANCE_USDM_ADAPTER: BinanceUsdMarginedAdapter = BinanceUsdMarginedAdapter;
+#[cfg(feature = "provider-polymarket")]
+static POLYMARKET_ADAPTER: PolymarketAdapter = PolymarketAdapter;
 
 /// 内置编译期注册点。第三方 provider 只需实现公开合同并把自己的 registration 加入
 /// 一个 `AdapterRegistry`；Registry 会在安装时检查重复 id、重叠路由和能力漂移。
@@ -101,6 +106,8 @@ static REGISTERED_ADAPTERS: &[AdapterRegistration] = &[
     AdapterRegistration::new(&TDX_ADAPTER),
     AdapterRegistration::new(&BINANCE_SPOT_ADAPTER),
     AdapterRegistration::new(&BINANCE_USDM_ADAPTER),
+    #[cfg(feature = "provider-polymarket")]
+    AdapterRegistration::new(&POLYMARKET_ADAPTER),
 ];
 
 /// 返回内置 provider 的可注入 Registry 副本。
@@ -182,22 +189,39 @@ fn validate_history_response(
             format!("{} 返回了与请求不同的品种", descriptor.id),
         ));
     }
-    if response.bars.is_empty() {
-        return Err(AppError::new(
-            "empty_history",
-            format!("{} 返回了空的历史数据", descriptor.display_name),
-        ));
-    }
     let max_count = request.count.clamp(2, 12_000);
-    if response.bars.len() > max_count {
-        return Err(AppError::new(
-            "provider_contract_violation",
-            format!("{} 返回的 K 线超过请求数量", descriptor.id),
-        ));
-    }
-    match request.adjustment {
-        Adjustment::None => Bar::validate_series(&response.bars)?,
-        Adjustment::Qfq => Bar::validate_adjusted_series(&response.bars)?,
+    match response.series_kind {
+        MarketSeriesKind::Ohlcv => {
+            if response.bars.is_empty() || !response.points.is_empty() {
+                return Err(AppError::new(
+                    "provider_contract_violation",
+                    format!("{} 返回了不匹配的 OHLCV 数据", descriptor.id),
+                ));
+            }
+            if response.bars.len() > max_count {
+                return Err(AppError::new(
+                    "provider_contract_violation",
+                    format!("{} 返回的 K 线超过请求数量", descriptor.id),
+                ));
+            }
+            match request.adjustment {
+                Adjustment::None => Bar::validate_series(&response.bars)?,
+                Adjustment::Qfq => Bar::validate_adjusted_series(&response.bars)?,
+            }
+        }
+        MarketSeriesKind::Probability => {
+            if request.kind != crate::contracts::SymbolKind::Prediction
+                || !response.bars.is_empty()
+                || response.points.is_empty()
+                || response.points.len() > max_count
+            {
+                return Err(AppError::new(
+                    "provider_contract_violation",
+                    format!("{} 返回了不匹配的概率数据", descriptor.id),
+                ));
+            }
+            crate::contracts::ProbabilityPoint::validate_series(&response.points)?;
+        }
     }
     if !descriptor.accepts_diagnostics_source(response.diagnostics.source) {
         return Err(AppError::new(
@@ -468,6 +492,38 @@ fn validate_catalog_symbols(
                 format!("{} 返回了不安全的目录资产身份", descriptor.id),
             ));
         }
+        match (&symbol.kind, &symbol.prediction) {
+            (crate::contracts::SymbolKind::Prediction, Some(metadata)) => {
+                let opposing = metadata.opposing_symbol.split_once(':');
+                let opposing = opposing
+                    .and_then(|(market, code)| crate::contracts::Symbol::new(market, code).ok());
+                if metadata.condition_id.trim().is_empty()
+                    || !matches!(metadata.outcome.as_str(), "YES" | "NO")
+                    || opposing.as_ref().map(|value| value.as_str())
+                        != Some(metadata.opposing_symbol.as_str())
+                    || opposing.as_ref().map(|value| value.parts().0) != Some(venue)
+                    || !metadata.volume.is_finite()
+                    || metadata.volume < 0.0
+                    || !metadata.liquidity.is_finite()
+                    || metadata.liquidity < 0.0
+                    || !metadata.probability.is_finite()
+                    || !(0.0..=100.0).contains(&metadata.probability)
+                    || !metadata.change_24h.is_finite()
+                {
+                    return Err(AppError::new(
+                        "provider_contract_violation",
+                        format!("{} 返回了不合法的预测市场元数据", descriptor.id),
+                    ));
+                }
+            }
+            (crate::contracts::SymbolKind::Prediction, None) | (_, Some(_)) => {
+                return Err(AppError::new(
+                    "provider_contract_violation",
+                    format!("{} 返回了不匹配的预测市场元数据", descriptor.id),
+                ));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -514,7 +570,7 @@ mod tests {
         QuoteRequest, RealtimeAdapter, RealtimePayload, RealtimeRequest, RealtimeSink, Resolution,
         provider_descriptors,
     };
-    use crate::contracts::{AppError, Bar, Symbol, SymbolKind};
+    use crate::contracts::{AppError, Bar, MarketSeriesKind, Symbol, SymbolKind};
     use crate::market_adapter::{
         ADAPTER_CONTRACT_VERSION, HistoryDiagnostics, ProviderCapabilities, QuoteResponse,
         QuoteSnapshot, RealtimeEventEnvelope,
@@ -523,7 +579,7 @@ mod tests {
     #[test]
     fn provider_descriptors_declare_real_facets() {
         let descriptors = provider_descriptors();
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 4);
         assert!(descriptors.iter().all(|descriptor| {
             !descriptor.id.is_empty()
                 && !descriptor.display_name.is_empty()
@@ -847,6 +903,7 @@ mod tests {
             kind: SymbolKind::Stock,
             base_asset: Some("A".to_string()),
             quote_asset: Some("B".to_string()),
+            prediction: None,
         };
         let error = super::validate_catalog_symbols(
             &FAKE_DESCRIPTOR,
@@ -866,6 +923,7 @@ mod tests {
                 kind: SymbolKind::Stock,
                 base_asset: Some("A".to_string()),
                 quote_asset: Some("B".to_string()),
+                prediction: None,
             }
         };
         let error = super::validate_catalog_symbols(&FAKE_DESCRIPTOR, "EXAMPLE", &[unsafe_symbol])
@@ -1139,7 +1197,9 @@ mod tests {
     fn fake_response(symbol: Symbol) -> HistoryResponse {
         HistoryResponse {
             symbol,
+            series_kind: MarketSeriesKind::Ohlcv,
             bars: vec![Bar::new(1, 10.0, 11.0, 9.0, 10.5, 1.0, None)],
+            points: Vec::new(),
             diagnostics: HistoryDiagnostics {
                 source: "fake",
                 host: "fake.test".to_string(),
@@ -1189,6 +1249,7 @@ mod tests {
                 kind: SymbolKind::Stock,
                 base_asset: Some("A".to_string()),
                 quote_asset: Some("B".to_string()),
+                prediction: None,
             }])
         }
     }
@@ -1254,7 +1315,9 @@ mod tests {
         fn fetch_history(&self, _request: HistoryRequest) -> Result<HistoryResponse, AppError> {
             Ok(HistoryResponse {
                 symbol: Symbol::new("MALFORMED", "OTHER").unwrap(),
+                series_kind: MarketSeriesKind::Ohlcv,
                 bars: vec![Bar::new(1, 10.0, 11.0, 9.0, 10.5, 1.0, None)],
+                points: Vec::new(),
                 diagnostics: HistoryDiagnostics {
                     source: "malformed",
                     host: "fake.test".to_string(),

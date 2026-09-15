@@ -10,7 +10,9 @@ const tdxHistory = fs.readFileSync('src-tauri/src/market_data/history.rs', 'utf8
 const frontendQuote = fs.readFileSync('src/quote.ts', 'utf8');
 const frontendRealtime = fs.readFileSync('src/realtime-market.ts', 'utf8');
 
-assert.match(adapter, /pub const ADAPTER_CONTRACT_VERSION: &str = "1"/);
+assert.match(adapter, /pub const ADAPTER_CONTRACT_VERSION: &str = "2"/);
+assert.match(adapter, /pub struct PredictionMarketMetadata/);
+assert.match(adapter, /Point \{\s*point: ProbabilityPoint/);
 assert.match(adapter, /pub struct ProviderCapabilities/);
 for (const field of ['catalog', 'history', 'quote', 'realtime']) {
   assert.match(adapter, new RegExp(`pub ${field}: bool`));

@@ -46,6 +46,7 @@ pub enum SymbolKind {
     Etf,
     Index,
     Crypto,
+    Prediction,
 }
 
 impl SymbolKind {
@@ -55,7 +56,44 @@ impl SymbolKind {
             Self::Etf => "etf",
             Self::Index => "index",
             Self::Crypto => "crypto",
+            Self::Prediction => "prediction",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketSeriesKind {
+    Ohlcv,
+    Probability,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbabilityPoint {
+    pub time: i64,
+    pub value: f64,
+}
+
+impl ProbabilityPoint {
+    pub fn validate_series(points: &[Self]) -> Result<(), AppError> {
+        let mut previous_time = None;
+        for point in points {
+            if !point.value.is_finite() || !(0.0..=100.0).contains(&point.value) {
+                return Err(AppError::new(
+                    "invalid_probability",
+                    "预测市场概率必须在 0% 到 100% 之间",
+                ));
+            }
+            if previous_time == Some(point.time) {
+                return Err(AppError::new("duplicate_time", "概率时间不能重复"));
+            }
+            if previous_time.is_some_and(|time| time > point.time) {
+                return Err(AppError::new("out_of_order", "概率数据必须按时间升序排列"));
+            }
+            previous_time = Some(point.time);
+        }
+        Ok(())
     }
 }
 
