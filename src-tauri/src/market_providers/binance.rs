@@ -117,14 +117,22 @@ impl MarketDataAdapter for BinanceUsdMarginedAdapter {
 }
 
 impl RealtimeAdapter for BinanceSpotAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
         start_realtime(request, sink, false);
         Ok(())
     }
 }
 
 impl RealtimeAdapter for BinanceUsdMarginedAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
         start_realtime(request, sink, true);
         Ok(())
     }

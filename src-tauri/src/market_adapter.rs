@@ -15,7 +15,7 @@ use crate::contracts::{
 pub use crate::market_data::{HistoryDiagnostics, HistoryResponse, QuoteSnapshot};
 
 /// 当前公开适配器合同的版本。
-pub const ADAPTER_CONTRACT_VERSION: &str = "2";
+pub const ADAPTER_CONTRACT_VERSION: &str = "3";
 pub const MAX_PROVIDER_ID_CHARS: usize = 64;
 
 /// provider id 会进入 `providerId|symbol` 的稳定身份 key，只允许与前端解析器
@@ -261,7 +261,13 @@ pub trait RealtimeSink: Send + Sync {
 }
 
 pub trait RealtimeAdapter: Sync {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError>;
+    /// 原子替换当前实时订阅。支持订阅切换的 provider 应复用已建立的 transport；
+    /// 暂不支持复用的 provider 仍必须依靠 `request.is_active()` 终止旧任务。
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError>;
 }
 
 /// 一个适配器同时提供历史入口，并可选择性暴露报价、目录和推送 facet。

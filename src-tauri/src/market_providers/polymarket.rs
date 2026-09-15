@@ -511,7 +511,11 @@ impl CatalogAdapter for PolymarketAdapter {
 }
 
 impl RealtimeAdapter for PolymarketAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
         thread::spawn(move || {
             let (_, token_id) = request.symbol.parts();
             let token_id = token_id.to_string();

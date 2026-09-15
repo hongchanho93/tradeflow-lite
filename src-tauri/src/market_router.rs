@@ -468,7 +468,7 @@ impl MarketRouter {
         registration
             .realtime_adapter()
             .expect("realtime capability was validated")
-            .start(request, sink)
+            .replace_subscription(request, sink)
     }
 }
 
@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     impl RealtimeAdapter for FakeAdapter {
-        fn start(
+        fn replace_subscription(
             &self,
             request: RealtimeRequest,
             sink: Arc<dyn RealtimeSink>,

@@ -901,7 +901,11 @@ impl RecoveryAdapter {
 }
 
 impl RealtimeAdapter for RecoveryAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
         let connector = Arc::clone(&self.connector);
         let gate = Arc::clone(&self.gate);
         let join = thread::spawn(move || {

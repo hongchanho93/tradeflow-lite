@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,10 +30,10 @@ const PUBLIC_WS_URL: &str = "wss://ws.okx.com:8443/ws/v5/public";
 const BUSINESS_WS_URL: &str = "wss://ws.okx.com:8443/ws/v5/business";
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HISTORY_COUNT: usize = 12_000;
-const HISTORY_PAGE_SIZE: usize = 100;
+const HISTORY_PAGE_SIZE: usize = 300;
 const HISTORY_PAGE_DELAY: Duration = Duration::from_millis(110);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-const IO_TIMEOUT: Duration = Duration::from_secs(1);
+const IO_TIMEOUT: Duration = Duration::from_millis(200);
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,16 +137,22 @@ impl CatalogAdapter for OkxSwapAdapter {
 }
 
 impl RealtimeAdapter for OkxSpotAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
-        start_realtime(OkxMarket::Spot, request, sink);
-        Ok(())
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
+        replace_realtime_subscription(OkxMarket::Spot, request, sink)
     }
 }
 
 impl RealtimeAdapter for OkxSwapAdapter {
-    fn start(&self, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) -> Result<(), AppError> {
-        start_realtime(OkxMarket::Swap, request, sink);
-        Ok(())
+    fn replace_subscription(
+        &self,
+        request: RealtimeRequest,
+        sink: Arc<dyn RealtimeSink>,
+    ) -> Result<(), AppError> {
+        replace_realtime_subscription(OkxMarket::Swap, request, sink)
     }
 }
 
@@ -230,6 +237,7 @@ fn fetch_history(market: OkxMarket, request: HistoryRequest) -> Result<HistoryRe
     let requested = request.count.clamp(2, MAX_HISTORY_COUNT);
     let mut after: Option<i64> = None;
     let mut bars = BTreeMap::new();
+    let mut pages = 0_usize;
 
     while bars.len() < requested {
         let limit = (requested - bars.len()).min(HISTORY_PAGE_SIZE);
@@ -243,6 +251,7 @@ fn fetch_history(market: OkxMarket, request: HistoryRequest) -> Result<HistoryRe
             thread::sleep(HISTORY_PAGE_DELAY);
         }
         let rows = client()?.get_data("/api/v5/market/history-candles", &query)?;
+        pages += 1;
         if rows.is_empty() {
             break;
         }
@@ -290,6 +299,15 @@ fn fetch_history(market: OkxMarket, request: HistoryRequest) -> Result<HistoryRe
     } else {
         None
     };
+    eprintln!(
+        "market.history.okx provider={} symbol={} requested={} rows={} pages={} latency_ms={:.1}",
+        request.provider_id,
+        request.symbol.as_str(),
+        requested,
+        bars.len(),
+        pages,
+        started_at.elapsed().as_secs_f64() * 1_000.0
+    );
     Ok(HistoryResponse {
         symbol: request.symbol,
         series_kind: MarketSeriesKind::Ohlcv,
@@ -467,17 +485,33 @@ fn interval_for(resolution: Resolution) -> &'static str {
     }
 }
 
-fn start_realtime(market: OkxMarket, request: RealtimeRequest, sink: Arc<dyn RealtimeSink>) {
+fn replace_realtime_subscription(
+    market: OkxMarket,
+    request: RealtimeRequest,
+    sink: Arc<dyn RealtimeSink>,
+) -> Result<(), AppError> {
     emit_status(&request, &sink, "connecting", None);
+    let contract = contract_spec(market, request.symbol.parts().1)?;
     let bar_state = Arc::new(Mutex::new(OkxRealtimeBarState::default()));
-    spawn_realtime_worker(
+    let subscription = OkxSubscription {
         market,
-        request.clone(),
-        Arc::clone(&sink),
-        WsKind::Public,
-        Arc::clone(&bar_state),
-    );
-    spawn_realtime_worker(market, request, sink, WsKind::Business, bar_state);
+        request: request.clone(),
+        sink: Arc::clone(&sink),
+        contract: contract.clone(),
+        bar_state: Arc::clone(&bar_state),
+        requested_at: Instant::now(),
+    };
+    realtime_manager()?.replace(
+        subscription,
+        OkxSubscription {
+            market,
+            request,
+            sink,
+            contract,
+            bar_state,
+            requested_at: Instant::now(),
+        },
+    )
 }
 
 #[derive(Default)]
@@ -557,7 +591,7 @@ impl OkxRealtimeBarState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WsKind {
     Public,
     Business,
@@ -572,81 +606,198 @@ impl WsKind {
     }
 }
 
-fn spawn_realtime_worker(
+#[derive(Clone)]
+struct OkxSubscription {
     market: OkxMarket,
     request: RealtimeRequest,
     sink: Arc<dyn RealtimeSink>,
-    kind: WsKind,
+    contract: Option<Arc<ContractSpec>>,
     bar_state: Arc<Mutex<OkxRealtimeBarState>>,
-) {
-    thread::spawn(move || {
-        let mut retry_delay = Duration::from_secs(1);
-        while request.is_active() {
-            match run_realtime_session(market, &request, &sink, kind, &bar_state) {
-                Ok(()) if !request.is_active() => return,
-                Ok(()) => {}
-                Err(_error) if !request.is_active() => return,
-                Err(error) => {
-                    emit_reconnecting(&request, &sink, error.message);
-                }
-            }
-            if !wait_while_active(&request, retry_delay) {
-                return;
-            }
-            retry_delay = (retry_delay * 2).min(Duration::from_secs(15));
-        }
-    });
+    requested_at: Instant,
 }
 
-fn run_realtime_session(
-    market: OkxMarket,
-    request: &RealtimeRequest,
-    sink: &Arc<dyn RealtimeSink>,
-    kind: WsKind,
-    bar_state: &Arc<Mutex<OkxRealtimeBarState>>,
-) -> Result<(), AppError> {
-    let code = request.symbol.parts().1;
-    let contract = (market == OkxMarket::Swap)
-        .then(|| fetch_contract_spec(code))
-        .transpose()?;
-    let mut socket = connect_socket(kind.url())?;
-    let subscription = match kind {
-        WsKind::Public => json!({
-            "id": format!("{}P", request.request_id),
-            "op": "subscribe",
-            "args": [{"channel": "books5", "instId": code}]
-        }),
-        WsKind::Business => json!({
-            "id": format!("{}B", request.request_id),
-            "op": "subscribe",
-            "args": [
-                {"channel": format!("candle{}", interval_for(request.resolution)), "instId": code},
-                {"channel": "trades-all", "instId": code}
-            ]
-        }),
-    };
-    socket
-        .send(Message::Text(subscription.to_string().into()))
-        .map_err(|error| ws_error("订阅发送失败", error))?;
+struct OkxRealtimeManager {
+    public: Sender<OkxSubscription>,
+    business: Sender<OkxSubscription>,
+}
+
+impl OkxRealtimeManager {
+    fn new() -> Self {
+        let (public, public_rx) = mpsc::channel();
+        let (business, business_rx) = mpsc::channel();
+        thread::spawn(move || run_persistent_worker(WsKind::Public, public_rx));
+        thread::spawn(move || run_persistent_worker(WsKind::Business, business_rx));
+        Self { public, business }
+    }
+
+    fn replace(&self, public: OkxSubscription, business: OkxSubscription) -> Result<(), AppError> {
+        self.public
+            .send(public)
+            .map_err(|_| AppError::new("realtime_state_unavailable", "OKX 公共行情会话不可用"))?;
+        self.business
+            .send(business)
+            .map_err(|_| AppError::new("realtime_state_unavailable", "OKX 业务行情会话不可用"))
+    }
+}
+
+fn realtime_manager() -> Result<&'static OkxRealtimeManager, AppError> {
+    static MANAGER: OnceLock<OkxRealtimeManager> = OnceLock::new();
+    Ok(MANAGER.get_or_init(OkxRealtimeManager::new))
+}
+
+fn run_persistent_worker(kind: WsKind, receiver: Receiver<OkxSubscription>) {
+    let mut socket = None;
+    let mut current: Option<OkxSubscription> = None;
     let mut connected = false;
     let mut last_activity = Instant::now();
     let mut sequence = SequenceClock::default();
+    loop {
+        let mut replacement = match receiver.try_recv() {
+            Ok(value) => Some(value),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => return,
+        };
+        while let Ok(value) = receiver.try_recv() {
+            replacement = Some(value);
+        }
+        if let Some(next) = replacement {
+            let mut reused = socket.is_some();
+            let unsubscribe_failed = match (socket.as_mut(), current.as_ref()) {
+                (Some(open_socket), Some(previous)) => {
+                    send_subscription(open_socket, kind, previous, "unsubscribe").is_err()
+                }
+                _ => false,
+            };
+            if unsubscribe_failed {
+                socket = None;
+                reused = false;
+            }
+            current = Some(next);
+            connected = false;
+            sequence = SequenceClock::default();
+            if socket.is_none() {
+                match connect_socket(kind.url()) {
+                    Ok(value) => socket = Some(value),
+                    Err(error) => {
+                        if let Some(active) =
+                            current.as_ref().filter(|value| value.request.is_active())
+                        {
+                            emit_reconnecting(&active.request, &active.sink, error.message);
+                        }
+                        wait_for_replacement(&receiver, &mut current, Duration::from_secs(1));
+                        continue;
+                    }
+                }
+            }
+            let active = current
+                .as_ref()
+                .expect("replacement sets current subscription");
+            if let Err(error) = send_subscription(
+                socket.as_mut().expect("socket connected before subscribe"),
+                kind,
+                active,
+                "subscribe",
+            ) {
+                emit_reconnecting(&active.request, &active.sink, error.message);
+                socket = None;
+                continue;
+            }
+            eprintln!(
+                "market.realtime.subscription_switch provider={} symbol={} resolution={} socket={kind:?} connection_reused={} switch_ms={:.1}",
+                active.request.provider_id,
+                active.request.symbol.as_str(),
+                active.request.resolution.as_str(),
+                reused,
+                active.requested_at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
-    while request.is_active() {
-        match socket.read() {
+        if current
+            .as_ref()
+            .is_some_and(|value| !value.request.is_active())
+        {
+            if let (Some(socket), Some(previous)) = (socket.as_mut(), current.as_ref()) {
+                let _ = send_subscription(socket, kind, previous, "unsubscribe");
+            }
+            current = None;
+            connected = false;
+        }
+
+        if socket.is_none() {
+            if current.is_none() {
+                match receiver.recv() {
+                    Ok(value) => current = Some(value),
+                    Err(_) => return,
+                }
+            }
+            if current
+                .as_ref()
+                .is_some_and(|value| value.request.is_active())
+            {
+                match connect_socket(kind.url()) {
+                    Ok(mut value) => {
+                        let active = current.as_ref().expect("current checked above");
+                        if let Err(error) = send_subscription(&mut value, kind, active, "subscribe")
+                        {
+                            emit_reconnecting(&active.request, &active.sink, error.message);
+                            wait_for_replacement(&receiver, &mut current, Duration::from_secs(1));
+                            continue;
+                        }
+                        eprintln!(
+                            "market.realtime.subscription_switch provider={} symbol={} resolution={} socket={kind:?} connection_reused=false switch_ms={:.1}",
+                            active.request.provider_id,
+                            active.request.symbol.as_str(),
+                            active.request.resolution.as_str(),
+                            active.requested_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                        socket = Some(value);
+                        last_activity = Instant::now();
+                    }
+                    Err(error) => {
+                        let active = current.as_ref().expect("current checked above");
+                        emit_reconnecting(&active.request, &active.sink, error.message);
+                        wait_for_replacement(&receiver, &mut current, Duration::from_secs(1));
+                        continue;
+                    }
+                }
+            } else {
+                current = None;
+                continue;
+            }
+        }
+
+        let read_result = socket.as_mut().expect("socket ensured above").read();
+        match read_result {
             Ok(Message::Text(text)) => {
                 last_activity = Instant::now();
                 if text.as_str() == "pong" {
                     continue;
                 }
-                let payload: Value = serde_json::from_str(text.as_str()).map_err(|error| {
-                    AppError::new(
-                        "invalid_market_data",
-                        format!("OKX WebSocket JSON 无效：{error}"),
-                    )
-                })?;
-                if payload.get("event").and_then(Value::as_str) == Some("error") {
-                    return Err(AppError::new(
+                let payload: Value = match serde_json::from_str(text.as_str()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if let Some(active) =
+                            current.as_ref().filter(|value| value.request.is_active())
+                        {
+                            emit_reconnecting(
+                                &active.request,
+                                &active.sink,
+                                format!("OKX WebSocket JSON 无效：{error}"),
+                            );
+                        }
+                        socket = None;
+                        continue;
+                    }
+                };
+                let Some(active) = current.as_ref() else {
+                    continue;
+                };
+                if !payload_matches_subscription(&payload, kind, active) {
+                    continue;
+                }
+                let control_event = payload.get("event").and_then(Value::as_str);
+                if control_event == Some("error") {
+                    let error = AppError::new(
                         "market_data_source_unavailable",
                         format!(
                             "OKX WebSocket {}: {}",
@@ -659,41 +810,54 @@ fn run_realtime_session(
                                 .and_then(Value::as_str)
                                 .unwrap_or("订阅失败")
                         ),
-                    ));
+                    );
+                    emit_reconnecting(&active.request, &active.sink, error.message);
+                    socket = None;
+                    continue;
                 }
-                if payload.get("event").and_then(Value::as_str) == Some("subscribe") {
+                if control_event == Some("subscribe") {
                     if !connected {
                         connected = true;
-                        emit_status(request, sink, "connected", None);
+                        emit_status(&active.request, &active.sink, "connected", None);
                     }
                     continue;
                 }
-                emit_ws_payload(
-                    market,
-                    request,
-                    sink,
+                if is_control_payload(&payload) {
+                    continue;
+                }
+                if let Err(error) = emit_ws_payload(
+                    active.market,
+                    &active.request,
+                    &active.sink,
                     kind,
-                    contract.as_ref(),
+                    active.contract.as_deref(),
                     &mut sequence,
-                    bar_state,
+                    &active.bar_state,
                     &payload,
-                )?;
+                ) {
+                    emit_reconnecting(&active.request, &active.sink, error.message);
+                    socket = None;
+                }
             }
-            Ok(Message::Ping(payload)) => socket
-                .send(Message::Pong(payload))
-                .map_err(|error| ws_error("Pong 发送失败", error))?,
+            Ok(Message::Ping(payload)) => {
+                socket
+                    .as_mut()
+                    .expect("socket exists")
+                    .send(Message::Pong(payload))
+                    .ok();
+            }
             Ok(Message::Close(frame)) => {
                 let reason = frame
                     .map(|frame| frame.reason.to_string())
                     .filter(|reason| !reason.is_empty())
                     .unwrap_or_else(|| "服务器关闭连接".to_string());
-                return Err(AppError::new("market_data_source_unavailable", reason));
+                if let Some(active) = current.as_ref().filter(|value| value.request.is_active()) {
+                    emit_reconnecting(&active.request, &active.sink, reason);
+                }
+                socket = None;
             }
             Ok(Message::Binary(_)) => {
-                return Err(AppError::new(
-                    "invalid_market_data",
-                    "OKX WebSocket 返回了意外二进制消息",
-                ));
+                socket = None;
             }
             Ok(Message::Pong(_) | Message::Frame(_)) => {}
             Err(tungstenite::Error::Io(error))
@@ -703,17 +867,98 @@ fn run_realtime_session(
                 ) =>
             {
                 if last_activity.elapsed() >= PING_INTERVAL {
-                    socket
+                    if socket
+                        .as_mut()
+                        .expect("socket exists")
                         .send(Message::Text("ping".into()))
-                        .map_err(|error| ws_error("Ping 发送失败", error))?;
+                        .is_err()
+                    {
+                        socket = None;
+                    }
                     last_activity = Instant::now();
                 }
             }
-            Err(error) => return Err(ws_error("读取失败", error)),
+            Err(error) => {
+                if let Some(active) = current.as_ref().filter(|value| value.request.is_active()) {
+                    emit_reconnecting(
+                        &active.request,
+                        &active.sink,
+                        ws_error("读取失败", error).message,
+                    );
+                }
+                socket = None;
+            }
         }
     }
-    let _ = socket.close(None);
-    Ok(())
+}
+
+fn wait_for_replacement(
+    receiver: &Receiver<OkxSubscription>,
+    current: &mut Option<OkxSubscription>,
+    duration: Duration,
+) {
+    if let Ok(value) = receiver.recv_timeout(duration) {
+        *current = Some(value);
+    }
+}
+
+fn subscription_args(kind: WsKind, subscription: &OkxSubscription) -> Vec<Value> {
+    let code = subscription.request.symbol.parts().1;
+    match kind {
+        WsKind::Public => vec![json!({"channel": "books5", "instId": code})],
+        WsKind::Business => vec![
+            json!({"channel": format!("candle{}", interval_for(subscription.request.resolution)), "instId": code}),
+            json!({"channel": "trades-all", "instId": code}),
+        ],
+    }
+}
+
+fn send_subscription(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    kind: WsKind,
+    subscription: &OkxSubscription,
+    operation: &str,
+) -> Result<(), AppError> {
+    socket
+        .send(Message::Text(
+            json!({
+                "id": format!(
+                    "{}{}{}",
+                    subscription.request.request_id,
+                    if kind == WsKind::Public { "P" } else { "B" },
+                    if operation == "subscribe" { "S" } else { "U" },
+                ),
+                "op": operation,
+                "args": subscription_args(kind, subscription),
+            })
+            .to_string()
+            .into(),
+        ))
+        .map_err(|error| ws_error("订阅切换发送失败", error))
+}
+
+fn payload_matches_subscription(
+    payload: &Value,
+    kind: WsKind,
+    subscription: &OkxSubscription,
+) -> bool {
+    let Some(argument) = payload.get("arg") else {
+        return payload.get("event").and_then(Value::as_str) != Some("error");
+    };
+    let Some(instrument_id) = argument.get("instId").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(channel) = argument.get("channel").and_then(Value::as_str) else {
+        return false;
+    };
+    instrument_id == subscription.request.symbol.parts().1
+        && subscription_args(kind, subscription)
+            .iter()
+            .any(|value| value.get("channel").and_then(Value::as_str) == Some(channel))
+}
+
+fn is_control_payload(payload: &Value) -> bool {
+    payload.get("event").and_then(Value::as_str).is_some()
 }
 
 fn emit_ws_payload(
@@ -917,6 +1162,31 @@ fn fetch_contract_spec(instrument_id: &str) -> Result<ContractSpec, AppError> {
     })
 }
 
+fn contract_spec(
+    market: OkxMarket,
+    instrument_id: &str,
+) -> Result<Option<Arc<ContractSpec>>, AppError> {
+    if market == OkxMarket::Spot {
+        return Ok(None);
+    }
+    static CACHE: OnceLock<Mutex<BTreeMap<String, Arc<ContractSpec>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(value) = cache
+        .lock()
+        .map_err(|_| AppError::new("realtime_state_unavailable", "OKX 合约规格缓存锁异常"))?
+        .get(instrument_id)
+        .cloned()
+    {
+        return Ok(Some(value));
+    }
+    let value = Arc::new(fetch_contract_spec(instrument_id)?);
+    cache
+        .lock()
+        .map_err(|_| AppError::new("realtime_state_unavailable", "OKX 合约规格缓存锁异常"))?
+        .insert(instrument_id.to_string(), Arc::clone(&value));
+    Ok(Some(value))
+}
+
 fn market_quantity(
     market: OkxMarket,
     size: f64,
@@ -1029,14 +1299,6 @@ fn configure_socket_timeout(
         .set_read_timeout(Some(IO_TIMEOUT))
         .and_then(|_| stream.set_write_timeout(Some(IO_TIMEOUT)))
         .map_err(|error| AppError::new("market_data_source_unavailable", error.to_string()))
-}
-
-fn wait_while_active(request: &RealtimeRequest, duration: Duration) -> bool {
-    let deadline = Instant::now() + duration;
-    while request.is_active() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
-    }
-    request.is_active()
 }
 
 fn emit_status(
@@ -1229,7 +1491,7 @@ fn client() -> Result<&'static OkxClient, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1237,7 +1499,7 @@ mod tests {
 
     use super::{
         ContractSpec, OkxMarket, OkxRealtimeBarState, candle_close_time, interval_for,
-        market_quantity, parse_candle,
+        is_control_payload, market_quantity, parse_candle,
     };
     use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
     use crate::market_adapter::{
@@ -1256,6 +1518,18 @@ mod tests {
         assert_eq!(interval_for(Resolution::Day), "1Dutc");
         assert_eq!(interval_for(Resolution::Week), "1Wutc");
         assert_eq!(interval_for(Resolution::Month), "1Mutc");
+    }
+
+    #[test]
+    fn unsubscribe_ack_is_control_not_empty_market_data() {
+        assert!(is_control_payload(&json!({
+            "event": "unsubscribe",
+            "arg": {"channel": "trades-all", "instId": "BTC-USDT"}
+        })));
+        assert!(!is_control_payload(&json!({
+            "arg": {"channel": "trades-all", "instId": "BTC-USDT"},
+            "data": [{"px": "1"}]
+        })));
     }
 
     #[test]
@@ -1452,11 +1726,11 @@ mod tests {
                     kind: SymbolKind::Crypto,
                     resolution: Resolution::Minute1,
                     adjustment: Adjustment::None,
-                    count: 205,
+                    count: 300,
                     include_quote: true,
                 })
                 .unwrap();
-            assert_eq!(history.bars.len(), 205);
+            assert_eq!(history.bars.len(), 300);
             assert!(
                 history
                     .bars
@@ -1485,7 +1759,6 @@ mod tests {
     struct ProbeSink {
         events: Mutex<Vec<RealtimeEventEnvelope>>,
         changed: Condvar,
-        stopped: AtomicBool,
     }
 
     impl ProbeSink {
@@ -1529,21 +1802,8 @@ mod tests {
 
     impl RealtimeSink for ProbeSink {
         fn emit(&self, event: RealtimeEventEnvelope) -> Result<(), AppError> {
-            if self.stopped.load(Ordering::Acquire) {
-                return Err(AppError::new(
-                    "test_complete",
-                    "OKX realtime probe complete",
-                ));
-            }
-            let complete = {
-                let mut events = self.events.lock().unwrap();
-                events.push(event);
-                Self::complete(&events)
-            };
+            self.events.lock().unwrap().push(event);
             self.changed.notify_all();
-            if complete {
-                self.stopped.store(true, Ordering::Release);
-            }
             Ok(())
         }
     }
@@ -1553,6 +1813,7 @@ mod tests {
         request_id: u64,
         provider_id: &'static str,
         symbol: Symbol,
+        resolution: Resolution,
     ) {
         let active = Arc::new(AtomicU64::new(request_id));
         let sink = Arc::new(ProbeSink::default());
@@ -1563,7 +1824,7 @@ mod tests {
                     provider_id,
                     symbol: symbol.clone(),
                     kind: SymbolKind::Crypto,
-                    resolution: Resolution::Minute1,
+                    resolution,
                     active_request_id: Arc::clone(&active),
                 },
                 sink.clone(),
@@ -1605,12 +1866,21 @@ mod tests {
             21_001,
             "okx_spot",
             Symbol::new("OKX", "BTC-USDT").unwrap(),
+            Resolution::Minute1,
         );
         run_realtime_case(
             &router,
             21_002,
+            "okx_spot",
+            Symbol::new("OKX", "BTC-USDT").unwrap(),
+            Resolution::Minute5,
+        );
+        run_realtime_case(
+            &router,
+            21_003,
             "okx_swap",
             Symbol::new("OKX_SWAP", "BTC-USDT-SWAP").unwrap(),
+            Resolution::Minute1,
         );
     }
 }
