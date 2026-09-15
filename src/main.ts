@@ -81,6 +81,14 @@ import {
 import { BollingerBandPrimitive } from './boll-band';
 import { loadChartSettings, saveChartSettings, type ChartSettings } from './chart-settings';
 import {
+  APP_LOCALES,
+  loadAppLocale,
+  observeLocalizedUi,
+  saveAppLocale,
+  translateUiText,
+  type AppLocale,
+} from './i18n';
+import {
   RESOLUTION_OPTIONS,
   TRADING_TIME_ZONE_OPTIONS,
   formatUtcOffset,
@@ -223,6 +231,10 @@ type LegacyMarketSymbol = Omit<MarketSymbol, 'providerId' | 'providerDisplayName
   venue?: string;
 };
 
+const appLocale = loadAppLocale(localStorage);
+document.documentElement.lang = appLocale;
+const ui = (value: string): string => translateUiText(value, appLocale);
+
 const tdxDisplayName = '通达信主站';
 const staticTdxSymbols: MarketSymbol[] = (marketUniversePackage as { rows: LegacyMarketSymbol[] }).rows.map((item) => ({
   ...item,
@@ -346,7 +358,7 @@ const symbolSources: Record<MarketSearchCategory, { value: MarketSearchSource; l
 const resolutionLabels = Object.fromEntries(
   RESOLUTION_OPTIONS.map((option) => [option.value, option.shortLabel]),
 ) as Record<Resolution, string>;
-const realtimeTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+const realtimeTimeFormatter = new Intl.DateTimeFormat(appLocale, {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
 });
 const chartTypeLabels: Record<ChartType, string> = {
@@ -473,7 +485,8 @@ const chartTypeIcons: Record<ChartType, string> = {
   baseline: baselineChartIcon,
 };
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
+const appRoot = document.querySelector<HTMLDivElement>('#app')!;
+appRoot.innerHTML = `
   <div class="app-shell">
     <div class="chart-toolbar">
       <div class="symbol-search">
@@ -583,6 +596,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <h3>版面</h3>
             <label class="chart-settings-row"><span>Trade Flow 水印</span><input data-chart-setting="watermarkVisible" type="checkbox" /></label>
             <label class="chart-settings-row"><span>底部时间导航</span><input data-chart-setting="timeNavigationVisible" type="checkbox" /></label>
+            <label class="chart-settings-row"><span>语言</span><select id="language-select" aria-label="语言">
+              <option value="zh-CN">简体中文</option><option value="en-US">English</option>
+            </select></label>
           </div>
         </div>
         <footer class="chart-settings-footer">
@@ -834,6 +850,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </div>
   </div>
 `;
+observeLocalizedUi(appRoot, appLocale);
 
 const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
   autoSize: true,
@@ -855,7 +872,7 @@ const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
   timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 4, barSpacing: 3.5, minBarSpacing: 1.2 },
   rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 58, mode: priceScaleModes[currentPriceScale], scaleMargins: { top: 0.08, bottom: 0.08 } },
   localization: {
-    locale: 'zh-CN',
+    locale: appLocale,
     priceFormatter: (price: number) => price.toFixed(2),
     timeFormatter: (time: Time) => formatChartTime(time),
   },
@@ -1048,6 +1065,7 @@ const chartSettingsDialog = document.querySelector<HTMLElement>('#chart-settings
 const openChartSettingsButton = document.querySelector<HTMLButtonElement>('#open-chart-settings')!;
 const chartSettingInputs = [...chartSettingsDialog.querySelectorAll<HTMLInputElement>('[data-chart-setting]')];
 const chartSettingsTabs = [...chartSettingsDialog.querySelectorAll<HTMLButtonElement>('[data-settings-tab]')];
+const languageSelect = document.querySelector<HTMLSelectElement>('#language-select')!;
 let chartSettingsReturnFocus: HTMLElement | null = null;
 const drawingButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-drawing-tool]')];
 const drawingMenus = [...document.querySelectorAll<HTMLDetailsElement>('.drawing-tool-menu')];
@@ -1098,7 +1116,7 @@ function persistChartPreferences() {
 
 function showChartToast(message: string) {
   if (chartToastTimer !== undefined) window.clearTimeout(chartToastTimer);
-  chartToast.textContent = message;
+  chartToast.textContent = ui(message);
   chartToast.hidden = false;
   chartToastTimer = window.setTimeout(() => {
     chartToast.hidden = true;
@@ -1145,7 +1163,7 @@ async function selectResolution(resolution: Resolution) {
 }
 
 function formatTimeZoneClock(date: Date, timeZone = activeTradingTimeZone()): string {
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(appLocale, {
     timeZone,
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   }).format(date);
@@ -1232,6 +1250,7 @@ function openChartSettings() {
     if (input.type === 'checkbox') input.checked = chartSettings[key] as boolean;
     else input.value = chartSettings[key] as string;
   }
+  languageSelect.value = appLocale;
   selectChartSettingsTab('symbol');
   chartSettingsLayer.hidden = false;
   requestAnimationFrame(() => chartSettingsTabs[0]?.focus());
@@ -1252,6 +1271,17 @@ function confirmChartSettings() {
   chartSettings = next;
   applyChartSettings(chartSettings);
   if (!saveChartSettings(localStorage, chartSettings)) showChartToast('设置未能保存');
+  const nextLocale = APP_LOCALES.includes(languageSelect.value as AppLocale)
+    ? languageSelect.value as AppLocale
+    : appLocale;
+  if (nextLocale !== appLocale) {
+    if (!saveAppLocale(localStorage, nextLocale)) {
+      showChartToast('语言设置未能保存');
+      return;
+    }
+    window.location.reload();
+    return;
+  }
   closeChartSettings();
 }
 
@@ -1290,7 +1320,7 @@ function renderPriceLines() {
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: '昨收',
+      title: ui('昨收'),
     }));
   }
   if (settings.cost !== null) {
@@ -1300,7 +1330,7 @@ function renderPriceLines() {
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: '成本',
+      title: ui('成本'),
     }));
   }
   for (const [index, price] of settings.custom.entries()) {
@@ -1310,7 +1340,7 @@ function renderPriceLines() {
       lineWidth: 1,
       lineStyle: LineStyle.Dotted,
       axisLabelVisible: true,
-      title: `价位 ${index + 1}`,
+      title: ui(`价位 ${index + 1}`),
     }));
   }
 }
@@ -1691,7 +1721,7 @@ function renderMarketTrades() {
   }
 }
 
-const compactUsd = new Intl.NumberFormat('zh-CN', {
+const compactUsd = new Intl.NumberFormat(appLocale, {
   style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1,
 });
 
@@ -1725,11 +1755,11 @@ function renderPredictionRules() {
   predictionChange.className = metadata.change24h >= 0 ? 'up' : 'down';
   const endDate = metadata.endDate ? new Date(metadata.endDate) : null;
   predictionEndDate.textContent = endDate && Number.isFinite(endDate.getTime())
-    ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }).format(endDate)
+    ? new Intl.DateTimeFormat(appLocale, { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }).format(endDate)
     : '--';
   predictionVolume.textContent = compactUsd.format(metadata.volume);
   predictionLiquidity.textContent = compactUsd.format(metadata.liquidity);
-  predictionDescription.textContent = metadata.description || '以 Polymarket 公布的市场规则和结算来源为准。';
+  predictionDescription.textContent = metadata.description || ui('以 Polymarket 公布的市场规则和结算来源为准。');
   try {
     const url = new URL(metadata.resolutionSource);
     const safe = url.protocol === 'https:' || url.protocol === 'http:';
@@ -2417,7 +2447,7 @@ function startDrawing(toolType: DrawingToolType, button: HTMLButtonElement, text
           : toolType === 'Highlighter'
             ? { line: { color: 'rgba(255, 235, 59, .4)', width: 20 } }
           : toolType === 'Text' || toolType === 'Callout'
-            ? { text: { value: textValue || '文字', font: { color: '#d1d4dc', size: 12 } } }
+            ? { text: { value: textValue || ui('文字'), font: { color: '#d1d4dc', size: 12 } } }
             : toolType === 'Triangle'
               ? { triangle: { border: { color: '#2962ff', width: 1 }, background: { color: 'rgba(41, 98, 255, .12)' } } }
             : toolType === 'Path'
@@ -2564,15 +2594,15 @@ function formatChartTick(time: Time, tickMarkType: TickMarkType): string | null 
   const timeZone = activeTradingTimeZone();
   const date = new Date(time * 1000);
   if (tickMarkType === TickMarkType.Year) {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric' }).format(date);
+    return new Intl.DateTimeFormat(appLocale, { timeZone, year: 'numeric' }).format(date);
   }
   if (tickMarkType === TickMarkType.Month) {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone, month: 'short' }).format(date);
+    return new Intl.DateTimeFormat(appLocale, { timeZone, month: 'short' }).format(date);
   }
   if (tickMarkType === TickMarkType.DayOfMonth) {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone, month: '2-digit', day: '2-digit' }).format(date);
+    return new Intl.DateTimeFormat(appLocale, { timeZone, month: '2-digit', day: '2-digit' }).format(date);
   }
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(appLocale, {
     timeZone,
     hour: '2-digit',
     minute: '2-digit',
@@ -2584,7 +2614,7 @@ function formatChartTick(time: Time, tickMarkType: TickMarkType): string | null 
 function formatChartTime(time: Time): string {
   if (typeof time === 'number') {
     const showTime = resolutionShowsIntradayTime(currentResolution);
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(appLocale, {
       timeZone: activeTradingTimeZone(),
       year: 'numeric',
       month: '2-digit',
@@ -2596,6 +2626,9 @@ function formatChartTime(time: Time): string {
 }
 
 function formatCompactVolume(volume: number): string {
+  if (appLocale === 'en-US') {
+    return new Intl.NumberFormat(appLocale, { notation: 'compact', maximumFractionDigits: 2 }).format(volume);
+  }
   if (volume >= 100_000_000) return `${(volume / 100_000_000).toFixed(2)}亿`;
   if (volume >= 10_000) return `${(volume / 10_000).toFixed(2)}万`;
   return volume.toFixed(0);
@@ -2638,7 +2671,7 @@ function showQuote(quote: NonNullable<HistoryResponse['quote']>) {
   const sign = change > 0 ? '+' : '';
   legendValues.className = `legend-values ${change >= 0 ? 'up' : 'down'}`;
   legendValues.textContent = `开=${formatPrice(quote.open)} 高=${formatPrice(quote.high)} 低=${formatPrice(quote.low)} 收=${formatPrice(quote.last)} ${sign}${formatPrice(change)} (${sign}${percentage.toFixed(2)}%)`;
-  legendValues.title = `行情接收时间 ${new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(quote.receivedAt * 1000))}`;
+  legendValues.title = `行情接收时间 ${new Intl.DateTimeFormat(appLocale, { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(quote.receivedAt * 1000))}`;
 }
 
 function showCurrentSnapshot() {
@@ -2714,7 +2747,7 @@ function updateBollPresentation(
       position: 'aboveBar',
       shape: 'arrowUp',
       color: bollUpperBreakoutColor,
-      text: '突破上轨',
+      text: ui('突破上轨'),
       size: 1,
     });
     if (signal === 'lower') markers.push({
@@ -2722,7 +2755,7 @@ function updateBollPresentation(
       position: 'belowBar',
       shape: 'arrowDown',
       color: bollLowerBreakoutColor,
-      text: '跌破下轨',
+      text: ui('跌破下轨'),
       size: 1,
     });
   }
@@ -4336,7 +4369,7 @@ for (const control of drawingPropertyControls) {
 function placeDrawingText() {
   const button = pendingTextButton;
   if (!button) return;
-  const value = drawingTextInput.value.trim() || '文字';
+  const value = drawingTextInput.value.trim() || ui('文字');
   pendingTextButton = null;
   startDrawing(button.dataset.drawingTool as 'Text' | 'Callout', button, value);
 }
