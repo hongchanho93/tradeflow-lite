@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 
 const markup = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+const colorPicker = readFileSync(new URL('../src/color-picker.ts', import.meta.url), 'utf8');
+const colorPickerStyles = readFileSync(new URL('../src/color-picker.css', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 const defaultCapability = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'));
 const upArrowTool = readFileSync(new URL('../src/drawing-tools/up-arrow.ts', import.meta.url), 'utf8');
@@ -47,6 +49,11 @@ const requiredMarkup = [
   'subscribeCrosshairMove',
   'id="open"',
   'id="refresh"',
+  'id="theme-toggle"',
+  'class="theme-moon" viewBox="0 0 28 28"',
+  'class="theme-sun" viewBox="0 0 28 28"',
+  'applyAppTheme(nextTheme)',
+  'saveAppTheme(localStorage, appTheme)',
   'id="fit-chart"',
   'id="market-data-toggle"',
   'id="market-data-panel"',
@@ -70,6 +77,19 @@ const requiredMarkup = [
   'applyTradingTimeChoice(chartSettingsTimeZone.value as TradingTimeChoice)',
   'openChartSettings',
   'applyChartSettings',
+  'installTfColorPickers(appRoot)',
+  'refreshTfColorPicker',
+  'data-tf-color-opacity-target="drawing-opacity"',
+  'data-tf-color-opacity-target="chart-settings-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-down-opacity"',
+  'data-tf-color-opacity-target="chart-settings-border-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-border-down-opacity"',
+  'data-tf-color-opacity-target="chart-settings-wick-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-wick-down-opacity"',
+  'data-chart-setting="bodyVisible"',
+  '...candlestickColorOptions(settings, candlesVisible)',
+  '...candlestickColorOptions(chartSettings, candlesVisible)',
+  "console.info('chart.candlestick_appearance.reapplied'",
   'id="chart-type-menu"',
   'data-chart-type="candles"',
   'data-chart-type="bars"',
@@ -95,12 +115,16 @@ const requiredMarkup = [
   'setVisibleRange',
   'invertScale',
   'id="time-navigation"',
+  'data-time-range="5y"',
   'data-time-range="1m"',
-  'data-time-range="all"',
+  'data-time-range="5d"',
+  'data-time-range="1d"',
   'id="go-to-date"',
-  'id="go-to-latest"',
-  'scrollToRealTime',
-  'panLogicalRange',
+  'class="time-navigation-calendar"',
+  'id="go-to-dialog-layer"',
+  'id="go-to-calendar-grid"',
+  'id="confirm-go-to-date"',
+  'calendarMonthDays',
   'id="marker-tool"',
   'id="marker-editor"',
   'id="marker-shape"',
@@ -329,6 +353,16 @@ const requiredStyles = [
   '.price-scale-menu',
   '.price-range-editor',
   '.time-navigation',
+  '--tf-chart-controls-height: 39px',
+  '.chart-stage { --tf-chart-content-bottom: var(--tf-chart-controls-height);',
+  '.chart-stage.time-navigation-hidden { --tf-chart-content-bottom: 0px; }',
+  '#chart { position: absolute; inset: 0 0 var(--tf-chart-content-bottom); }',
+  '.time-navigation { position: absolute; z-index: 4; left: 0; right: 0; bottom: 0; height: var(--tf-chart-controls-height);',
+  'border-top: 1px solid var(--tv-border);',
+  '.time-navigation-calendar svg { width: 20px; height: 20px;',
+  '.go-to-dialog-layer { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center;',
+  '.go-to-dialog { width: min(266px, calc(100vw - 40px)); height: min(496px, calc(100vh - 40px));',
+  '.go-to-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr);',
   '.marker-editor-popover',
   '.managed-series-row',
   '.marker-object-row',
@@ -388,6 +422,13 @@ if (markup.includes("candles: icon('<path") || markup.includes("bars: icon('<pat
   throw new Error('chart type menu still uses recreated inline icons');
 }
 if (markup.includes('id="price-scale-label"')) throw new Error('price scale trigger still exposes mode text instead of the Trade Flow gear');
+if (markup.includes('id="time-pan-left"') || markup.includes('id="time-pan-right"') || markup.includes('id="go-to-latest"')) {
+  throw new Error('time controls must use the flat Trade Flow bottom bar instead of the former centered navigator');
+}
+if (markup.includes('goToDateInput.showPicker()')) throw new Error('go-to date must use the in-app dialog instead of the native system calendar');
+if (styles.includes('left: 50%; bottom: 6px; height: 25px') || styles.includes('transform: translateX(-50%); padding: 0 3px')) {
+  throw new Error('time controls must not return to a floating centered overlay');
+}
 if (markup.includes('title="自选">自选</button>') || markup.includes('title="盘口">盘口</button>')) {
   throw new Error('widget bar still exposes text labels instead of original icon assets');
 }
@@ -411,6 +452,11 @@ const openHistoryBody = markup.slice(markup.indexOf('async function openHistory(
 if (openHistoryBody.includes('scheduleDeepHistory(')) {
   throw new Error('opening a symbol still schedules an automatic deep-history replacement over realtime');
 }
+const primarySeriesBody = markup.slice(markup.indexOf('function setPrimarySeriesData()'), markup.indexOf('function updatePrimarySeries('));
+if (primarySeriesBody.includes('candlesVisible ? chartSettings.upColor')
+  || primarySeriesBody.includes('borderUpColor: candlesVisible ? chartSettings.upColor')) {
+  throw new Error('period and symbol reloads must not overwrite saved candle opacity or independent border/wick colors');
+}
 if (!markup.includes('shouldLoadDeepHistory(range.from') || !markup.includes('scheduleDeepHistory(\n      currentSymbol,')) {
   throw new Error('deep history must remain available when the user reaches the left history edge');
 }
@@ -422,6 +468,9 @@ for (const contract of [
   '.chart-type-options > button.active { color: #1f1f1f; background: #f2f2f2;',
 ]) {
   if (!styles.includes(contract)) throw new Error(`chart type menu scale differs from Trade Flow: ${contract}`);
+}
+if (!colorPickerStyles.includes('.chart-settings-row .tf-color-trigger { width: 30px; height: 30px;')) {
+  throw new Error('settings color swatches must match the TF 30px square control');
 }
 for (const contract of [
   '.price-scale-controls > summary { width: 28px; height: 28px;',
@@ -438,6 +487,38 @@ if (!styles.includes('overflow: hidden; border-radius: 50%;')) {
 for (const contract of requiredStyles) {
   if (!styles.includes(contract)) throw new Error(`missing style contract: ${contract}`);
 }
+for (const contract of [
+  ':root.theme-light',
+  '#theme-toggle { width: 38px; height: 38px;',
+  '#theme-toggle svg { width: 28px; height: 28px;',
+  '#theme-toggle[data-mode="light"] .theme-sun',
+  'body.theme-light .chart-settings-dialog',
+  '.chart-settings-layer { position: fixed; z-index: 110; inset: 0; display: grid; place-items: center; padding: 20px; background: transparent;',
+  '.chart-settings-dialog { width: min(540px, calc(100vw - 40px)); height: min(494px, calc(100vh - 40px));',
+  'grid-template-rows: 58px minmax(0, 1fr) 58px;',
+  '.chart-settings-row { min-height: 44px; display: flex; align-items: center; justify-content: flex-start; gap: 12px;',
+  '.chart-settings-style-toggle { flex: 0 0 76px;',
+  ':root[lang="zh-CN"] .chart-settings-style-toggle { flex-basis: 56px; }',
+  'appearance: none;',
+  'body.theme-light .chart-settings-tabs button[aria-selected="true"] { color: #131722; background: #f0f3fa; }',
+  'body.theme-light .rail-button.active',
+  'background: #e8eaed;',
+  'body.theme-light .time-navigation { background: var(--tv-toolbar-bg);',
+]) {
+  if (!styles.includes(contract)) throw new Error(`missing light theme contract: ${contract}`);
+}
+for (const contract of [
+  'TF_COLOR_PALETTE',
+  'grid-template-columns: repeat(10, 16px)',
+  '.tf-color-popover',
+  '.tf-color-cell[aria-checked="true"]',
+  '.tf-color-custom-toggle',
+  '.tf-color-opacity',
+  "wrappingLabel.addEventListener('click', (event) => event.preventDefault())",
+]) {
+  if (!`${colorPicker}\n${colorPickerStyles}`.includes(contract)) throw new Error(`missing TF color picker contract: ${contract}`);
+}
+if (colorPicker.includes('showPicker(')) throw new Error('TF color picker must not open the native system color panel');
 for (const [file, expectedHash] of Object.entries(chartTypeAssets)) {
   const content = readFileSync(new URL(`../src/assets/chart-types/${file}`, import.meta.url));
   const actualHash = createHash('sha256').update(content).digest('hex');
@@ -447,4 +528,4 @@ for (const contract of ['class LineToolUpArrow', 'class LineToolUpArrowPaneView'
   if (!upArrowTool.includes(contract)) throw new Error(`missing up-arrow contract: ${contract}`);
 }
 
-console.log(`UI contract OK (${requiredMarkup.length + requiredStyles.length + forbiddenMarkup.length + 12 + Object.keys(chartTypeAssets).length} assertions)`);
+console.log(`UI contract OK (${requiredMarkup.length + requiredStyles.length + forbiddenMarkup.length + 20 + Object.keys(chartTypeAssets).length} assertions)`);

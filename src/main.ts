@@ -87,7 +87,9 @@ import {
   updateLatestBarInPlace,
 } from './bar-series';
 import { BollingerBandPrimitive } from './boll-band';
-import { loadChartSettings, saveChartSettings, type ChartSettings } from './chart-settings';
+import { candlestickColorOptions, chartColorWithOpacity, loadChartSettings, saveChartSettings, type ChartSettings } from './chart-settings';
+import { installTfColorPickers, refreshTfColorPicker } from './color-picker';
+import { appThemePalette, loadAppTheme, saveAppTheme, type AppTheme } from './theme';
 import {
   APP_LOCALES,
   loadAppLocale,
@@ -188,9 +190,9 @@ import {
   type MarkerShape,
 } from './marker-state';
 import {
+  calendarMonthDays,
   logicalRangeAround,
   nearestBarIndex,
-  panLogicalRange,
   parseShanghaiDate,
   resolutionShowsIntradayTime,
   visibleRangeForPreset,
@@ -203,6 +205,7 @@ import {
   watchlistSymbolKey,
 } from './watchlist';
 import './style.css';
+import './color-picker.css';
 
 type Bar = { time: number; open: number; high: number; low: number; close: number; volume: number; amount?: number };
 type HistoryResponse = {
@@ -240,7 +243,12 @@ type LegacyMarketSymbol = Omit<MarketSymbol, 'providerId' | 'providerDisplayName
 };
 
 const appLocale = loadAppLocale(localStorage);
+let appTheme = loadAppTheme(localStorage);
 document.documentElement.lang = appLocale;
+document.documentElement.classList.toggle('theme-light', appTheme === 'light');
+document.documentElement.classList.toggle('theme-dark', appTheme === 'dark');
+document.body.classList.toggle('theme-light', appTheme === 'light');
+document.body.classList.toggle('theme-dark', appTheme === 'dark');
 const ui = (value: string): string => translateUiText(value, appLocale);
 
 const tdxDisplayName = '通达信主站';
@@ -436,6 +444,8 @@ let markerPlacementActive = false;
 let editingMarkerId: string | null = null;
 let pendingMarkerTime: number | null = null;
 let primarySeriesVisible = true;
+let goToCalendarYear = new Date().getFullYear();
+let goToCalendarMonth = new Date().getMonth();
 
 const icon = (paths: string, viewBox = '0 0 24 24') => `
   <svg aria-hidden="true" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
@@ -451,6 +461,7 @@ const icons = {
   fullscreen: icon('<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/>'),
   priceLine: icon('<path d="M3 12h18"/><circle cx="12" cy="12" r="2.5"/>'),
   camera: icon('<path d="M4 7h4l1.5-2h5L16 7h4v12H4V7Z"/><circle cx="12" cy="13" r="3.5"/>'),
+  goToDate: icon('<path d="M5 4v3M19 4v3M4 8h16v12H4V8Z"/><path d="M9 14h7m-3-3 3 3-3 3"/>'),
   copy: icon('<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>'),
   download: icon('<path d="M12 3v12m-4-4 4 4 4-4"/><path d="M4 19h16"/>'),
   crosshair: cursorToolbarIcon,
@@ -494,6 +505,9 @@ const chartTypeIcons: Record<ChartType, string> = {
   area: areaChartIcon,
   baseline: baselineChartIcon,
 };
+const themeButtonIcons = `
+  <svg class="theme-moon" viewBox="0 0 28 28" aria-hidden="true"><path d="M19.7 18.1A7.3 7.3 0 0 1 9.9 8.3a8 8 0 1 0 9.8 9.8Z"></path></svg>
+  <svg class="theme-sun" viewBox="0 0 28 28" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M18.5 14a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-1 0a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z"></path><path d="M13.5 3h1v4h-1V3ZM13.5 21h1v4h-1v-4ZM3 13.5h4v1H3v-1ZM21 13.5h4v1h-4v-1ZM5.65 6.36l.71-.71 2.83 2.83-.71.71-2.83-2.83ZM18.81 19.52l.71-.71 2.83 2.83-.71.71-2.83-2.83ZM21.65 5.65l.71.71-2.83 2.83-.71-.71 2.83-2.83ZM8.48 18.81l.71.71-2.83 2.83-.71-.71-2.83-2.83Z"></path></svg>`;
 
 const appRoot = document.querySelector<HTMLDivElement>('#app')!;
 appRoot.innerHTML = `
@@ -554,6 +568,7 @@ appRoot.innerHTML = `
       <div class="toolbar-spacer"></div>
       <button id="status" class="connection-status" aria-label="正在连接" title="点击重新测速"><i></i><span>正在连接</span></button>
       <button id="refresh" class="toolbar-button" aria-label="刷新K线">${icons.refresh}</button>
+      <button id="theme-toggle" class="toolbar-button" type="button" data-mode="${appTheme}" aria-label="${appTheme === 'light' ? '当前为亮色模式，点击切换到暗色模式' : '当前为暗色模式，点击切换到亮色模式'}" aria-pressed="${appTheme === 'light'}">${themeButtonIcons}</button>
       <button id="fit-chart" class="toolbar-button" aria-label="适应全部数据">${icons.fullscreen}</button>
       <button id="open-chart-settings" class="toolbar-button icon-only" aria-label="设置" title="设置">${priceScaleGearIcon}</button>
       <details id="chart-capture-menu" class="chart-control-menu chart-capture-menu">
@@ -580,10 +595,24 @@ appRoot.innerHTML = `
         <div class="chart-settings-content">
           <div class="chart-settings-panel" data-settings-panel="symbol">
             <h3>K线图</h3>
-            <label class="chart-settings-row"><span>上涨颜色</span><input data-chart-setting="upColor" type="color" aria-label="上涨颜色" /></label>
-            <label class="chart-settings-row"><span>下跌颜色</span><input data-chart-setting="downColor" type="color" aria-label="下跌颜色" /></label>
-            <label class="chart-settings-row"><span>边框</span><input data-chart-setting="borderVisible" type="checkbox" /></label>
-            <label class="chart-settings-row"><span>影线</span><input data-chart-setting="wickVisible" type="checkbox" /></label>
+            <div class="chart-settings-row"><label class="chart-settings-style-toggle"><input data-chart-setting="bodyVisible" type="checkbox" /><span>主体</span></label><span class="chart-settings-color-pair">
+              <input data-chart-setting="downColor" type="color" aria-label="下跌颜色" data-tf-color-opacity-target="chart-settings-down-opacity" />
+              <input data-chart-setting="upColor" type="color" aria-label="上涨颜色" data-tf-color-opacity-target="chart-settings-up-opacity" />
+            </span></div>
+            <div class="chart-settings-row"><label class="chart-settings-style-toggle"><input data-chart-setting="borderVisible" type="checkbox" /><span>边框</span></label><span class="chart-settings-color-pair">
+              <input data-chart-setting="borderDownColor" type="color" aria-label="下跌边框颜色" data-tf-color-opacity-target="chart-settings-border-down-opacity" />
+              <input data-chart-setting="borderUpColor" type="color" aria-label="上涨边框颜色" data-tf-color-opacity-target="chart-settings-border-up-opacity" />
+            </span></div>
+            <div class="chart-settings-row"><label class="chart-settings-style-toggle"><input data-chart-setting="wickVisible" type="checkbox" /><span>影线</span></label><span class="chart-settings-color-pair">
+              <input data-chart-setting="wickDownColor" type="color" aria-label="下跌影线颜色" data-tf-color-opacity-target="chart-settings-wick-down-opacity" />
+              <input data-chart-setting="wickUpColor" type="color" aria-label="上涨影线颜色" data-tf-color-opacity-target="chart-settings-wick-up-opacity" />
+            </span></div>
+            <input id="chart-settings-up-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="upOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="上涨颜色不透明度" />
+            <input id="chart-settings-down-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="downOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="下跌颜色不透明度" />
+            <input id="chart-settings-border-up-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="borderUpOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="上涨边框颜色不透明度" />
+            <input id="chart-settings-border-down-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="borderDownOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="下跌边框颜色不透明度" />
+            <input id="chart-settings-wick-up-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="wickUpOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="上涨影线颜色不透明度" />
+            <input id="chart-settings-wick-down-opacity" class="chart-settings-opacity-source" data-chart-opacity-setting="wickDownOpacity" type="range" min="0" max="100" step="1" value="100" aria-label="下跌影线颜色不透明度" />
             <div class="chart-settings-section-title">数据修改</div>
             <label class="chart-settings-row"><span>时区</span><select id="chart-settings-time-zone" aria-label="时区">${TRADING_TIME_ZONE_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}</select></label>
           </div>
@@ -613,6 +642,27 @@ appRoot.innerHTML = `
           <button id="cancel-chart-settings" type="button">取消</button>
           <button id="confirm-chart-settings" class="primary" type="button">确认</button>
         </footer>
+      </section>
+    </div>
+
+    <div id="go-to-dialog-layer" class="go-to-dialog-layer" hidden>
+      <section id="go-to-dialog" class="go-to-dialog" role="dialog" aria-modal="true" aria-labelledby="go-to-dialog-title">
+        <header><h2 id="go-to-dialog-title">前往到</h2><button id="close-go-to-dialog" type="button" aria-label="关闭前往到">${icons.close}</button></header>
+        <div class="go-to-dialog-body">
+          <div class="go-to-dialog-tabs"><strong>日期</strong></div>
+          <div class="go-to-dialog-fields">
+            <input id="go-to-date" type="text" inputmode="numeric" placeholder="YYYY-MM-DD" aria-label="定位日期" maxlength="10" />
+            <input type="text" value="00:00" aria-label="时间" disabled />
+          </div>
+          <div class="go-to-calendar-header">
+            <button id="go-to-previous-month" type="button" aria-label="上一个月">‹</button>
+            <strong id="go-to-calendar-title"></strong>
+            <button id="go-to-next-month" type="button" aria-label="下一个月">›</button>
+          </div>
+          <div class="go-to-calendar-weekdays"><span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span></div>
+          <div id="go-to-calendar-grid" class="go-to-calendar-grid"></div>
+        </div>
+        <footer><button id="cancel-go-to-date" type="button">取消</button><button id="confirm-go-to-date" class="primary" type="button">前往到</button></footer>
       </section>
     </div>
 
@@ -748,7 +798,7 @@ appRoot.innerHTML = `
           <span class="drawing-property-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
           <strong id="drawing-properties-name">绘图</strong>
           <label class="drawing-property-color" title="颜色">
-            <input id="drawing-color" type="color" value="#089981" aria-label="绘图颜色" />
+            <input id="drawing-color" type="color" value="#089981" aria-label="绘图颜色" data-tf-color-opacity-target="drawing-opacity" />
           </label>
           <details class="drawing-property-control">
             <summary title="粗细"><span class="drawing-line-sample"></span><output id="drawing-size-value">2px</output></summary>
@@ -784,14 +834,11 @@ appRoot.innerHTML = `
           <p id="price-range-message" hidden></p>
         </div>
         <nav id="time-navigation" class="time-navigation" aria-label="时间导航">
-          <button id="time-pan-left" type="button" aria-label="向前浏览" title="向前浏览">‹</button>
-          <button id="time-pan-right" type="button" aria-label="向后浏览" title="向后浏览">›</button>
-          <span></span>
-          <button data-time-range="1m" type="button">1月</button><button data-time-range="3m" type="button">3月</button>
-          <button data-time-range="6m" type="button">6月</button><button data-time-range="ytd" type="button">今年</button>
-          <button data-time-range="1y" type="button">1年</button><button data-time-range="all" type="button">全部</button>
-          <label><span class="visually-hidden">定位日期</span><input id="go-to-date" type="date" aria-label="定位日期" /></label>
-          <button id="go-to-date-button" type="button">转到</button><button id="go-to-latest" type="button">最新</button>
+          <button data-time-range="5y" type="button">5年</button><button data-time-range="1y" type="button">1年</button>
+          <button data-time-range="6m" type="button">6月</button><button data-time-range="3m" type="button">3月</button>
+          <button data-time-range="1m" type="button">1月</button><button data-time-range="5d" type="button">5天</button>
+          <button data-time-range="1d" type="button">1天</button><span></span>
+          <button id="go-to-date-button" class="time-navigation-calendar" type="button" aria-label="前往到" title="前往到">${icons.goToDate}</button>
         </nav>
         <details id="trading-time-menu" class="trading-time-menu">
           <summary id="trading-time-trigger" aria-label="切换交易时间"><span>交易时间</span><strong>--:--:-- UTC</strong></summary>
@@ -891,26 +938,28 @@ appRoot.innerHTML = `
   </div>
 `;
 observeLocalizedUi(appRoot, appLocale);
+installTfColorPickers(appRoot);
 
+const initialThemePalette = appThemePalette(appTheme);
 const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
   autoSize: true,
   layout: {
-    background: { type: ColorType.Solid, color: '#131722' },
-    textColor: '#787b86',
+    background: { type: ColorType.Solid, color: initialThemePalette.background },
+    textColor: initialThemePalette.text,
     fontSize: 11,
-    panes: { separatorColor: 'rgba(148, 163, 184, .14)', separatorHoverColor: 'rgba(148, 163, 184, .18)', enableResize: true },
+    panes: { separatorColor: initialThemePalette.paneSeparator, separatorHoverColor: initialThemePalette.paneSeparatorHover, enableResize: true },
   },
   grid: {
-    vertLines: { color: '#242834', visible: chartSettings.verticalGridVisible },
-    horzLines: { color: '#242834', visible: chartSettings.horizontalGridVisible },
+    vertLines: { color: initialThemePalette.grid, visible: chartSettings.verticalGridVisible },
+    horzLines: { color: initialThemePalette.grid, visible: chartSettings.horizontalGridVisible },
   },
   crosshair: {
     mode: CrosshairMode.Normal,
-    vertLine: { color: '#666b74', width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: '#363a40' },
-    horzLine: { color: '#666b74', width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: '#363a40' },
+    vertLine: { color: initialThemePalette.crosshair, width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: initialThemePalette.crosshairLabel },
+    horzLine: { color: initialThemePalette.crosshair, width: 1, style: 3, labelVisible: chartSettings.crosshairLabelsVisible, labelBackgroundColor: initialThemePalette.crosshairLabel },
   },
-  timeScale: { borderColor: '#2a2e39', timeVisible: false, rightOffset: 4, barSpacing: 3.5, minBarSpacing: 1.2 },
-  rightPriceScale: { borderColor: '#2a2e39', minimumWidth: 58, mode: priceScaleModes[currentPriceScale], scaleMargins: { top: 0.08, bottom: 0.08 } },
+  timeScale: { borderColor: initialThemePalette.border, timeVisible: false, rightOffset: 4, barSpacing: 3.5, minBarSpacing: 1.2 },
+  rightPriceScale: { borderColor: initialThemePalette.border, minimumWidth: 58, mode: priceScaleModes[currentPriceScale], scaleMargins: { top: 0.08, bottom: 0.08 } },
   localization: {
     locale: appLocale,
     priceFormatter: (price: number) => price.toFixed(2),
@@ -921,10 +970,11 @@ const chart = createChart(document.querySelector<HTMLDivElement>('#chart')!, {
 });
 
 const candleSeries = chart.addSeries(CandlestickSeries, {
-  upColor: chartSettings.upColor, downColor: chartSettings.downColor, borderVisible: chartSettings.borderVisible,
-  borderUpColor: chartSettings.upColor, borderDownColor: chartSettings.downColor,
-  wickVisible: chartSettings.wickVisible, wickUpColor: chartSettings.upColor, wickDownColor: chartSettings.downColor,
-  priceLineVisible: chartSettings.lastPriceLineVisible, priceLineColor: chartSettings.upColor,
+  ...candlestickColorOptions(chartSettings),
+  borderVisible: chartSettings.borderVisible,
+  wickVisible: chartSettings.wickVisible,
+  priceLineVisible: chartSettings.lastPriceLineVisible,
+  priceLineColor: chartColorWithOpacity(chartSettings.upColor, chartSettings.upOpacity),
   lastValueVisible: chartSettings.lastPriceLineVisible,
 }, 0);
 const barSeries = chart.addSeries(BarSeries, {
@@ -1008,7 +1058,7 @@ lineTools.setTimeFormatter((time) => formatChartTime(time as Time));
 const chartWatermark = createTextWatermark(chart.panes()[0], {
   visible: chartSettings.watermarkVisible,
   horzAlign: 'left', vertAlign: 'bottom',
-  lines: [{ text: 'TF', color: 'rgba(235, 238, 245, 0.13)', fontSize: 24 }],
+  lines: [{ text: 'TF', color: initialThemePalette.watermark, fontSize: 24 }],
 });
 
 const input = document.querySelector<HTMLInputElement>('#search')!;
@@ -1022,6 +1072,7 @@ const symbolSourceTrigger = document.querySelector<HTMLButtonElement>('#symbol-s
 const symbolSourceMenu = document.querySelector<HTMLDivElement>('#symbol-source-menu')!;
 const symbolResultCount = document.querySelector<HTMLSpanElement>('#symbol-result-count')!;
 const status = document.querySelector<HTMLButtonElement>('#status')!;
+const themeToggle = document.querySelector<HTMLButtonElement>('#theme-toggle')!;
 const loadingLayer = document.querySelector<HTMLDivElement>('#loading-layer')!;
 const errorLayer = document.querySelector<HTMLDivElement>('#chart-error')!;
 const legendValues = document.querySelector<HTMLSpanElement>('#legend-values')!;
@@ -1121,11 +1172,15 @@ const priceRangeMin = document.querySelector<HTMLInputElement>('#price-range-min
 const priceRangeMax = document.querySelector<HTMLInputElement>('#price-range-max')!;
 const priceRangeMessage = document.querySelector<HTMLParagraphElement>('#price-range-message')!;
 const goToDateInput = document.querySelector<HTMLInputElement>('#go-to-date')!;
+const goToDialogLayer = document.querySelector<HTMLDivElement>('#go-to-dialog-layer')!;
+const goToCalendarGrid = document.querySelector<HTMLDivElement>('#go-to-calendar-grid')!;
+const goToCalendarTitle = document.querySelector<HTMLElement>('#go-to-calendar-title')!;
 const chartSettingsLayer = document.querySelector<HTMLDivElement>('#chart-settings-layer')!;
 const chartSettingsDialog = document.querySelector<HTMLElement>('#chart-settings-dialog')!;
 const openChartSettingsButton = document.querySelector<HTMLButtonElement>('#open-chart-settings')!;
 const chartSettingsTimeZone = document.querySelector<HTMLSelectElement>('#chart-settings-time-zone')!;
 const chartSettingInputs = [...chartSettingsDialog.querySelectorAll<HTMLInputElement>('[data-chart-setting]')];
+const chartSettingOpacityInputs = [...chartSettingsDialog.querySelectorAll<HTMLInputElement>('[data-chart-opacity-setting]')];
 const chartSettingsTabs = [...chartSettingsDialog.querySelectorAll<HTMLButtonElement>('[data-settings-tab]')];
 const languageSelect = document.querySelector<HTMLSelectElement>('#language-select')!;
 let chartSettingsReturnFocus: HTMLElement | null = null;
@@ -1261,6 +1316,44 @@ function applyTradingTimeChoice(choice: TradingTimeChoice, persist = true) {
   if (persist && !saveTradingTimeChoice(localStorage, tradingTimeChoice)) showChartToast('交易时间设置未能保存');
 }
 
+function applyAppTheme(nextTheme: AppTheme, persist = true) {
+  appTheme = nextTheme;
+  const isLight = appTheme === 'light';
+  document.documentElement.classList.toggle('theme-light', isLight);
+  document.documentElement.classList.toggle('theme-dark', !isLight);
+  document.documentElement.style.colorScheme = appTheme;
+  document.body.classList.toggle('theme-light', isLight);
+  document.body.classList.toggle('theme-dark', !isLight);
+  themeToggle.dataset.mode = appTheme;
+  themeToggle.setAttribute('aria-pressed', String(isLight));
+  const description = isLight
+    ? '当前为亮色模式，点击切换到暗色模式'
+    : '当前为暗色模式，点击切换到亮色模式';
+  themeToggle.title = ui(description);
+  themeToggle.setAttribute('aria-label', ui(description));
+
+  const palette = appThemePalette(appTheme);
+  chart.applyOptions({
+    layout: {
+      background: { type: ColorType.Solid, color: palette.background },
+      textColor: palette.text,
+      panes: { separatorColor: palette.paneSeparator, separatorHoverColor: palette.paneSeparatorHover },
+    },
+    grid: {
+      vertLines: { color: palette.grid },
+      horzLines: { color: palette.grid },
+    },
+    crosshair: {
+      vertLine: { color: palette.crosshair, labelBackgroundColor: palette.crosshairLabel },
+      horzLine: { color: palette.crosshair, labelBackgroundColor: palette.crosshairLabel },
+    },
+    timeScale: { borderColor: palette.border },
+    rightPriceScale: { borderColor: palette.border },
+  });
+  chartWatermark.applyOptions({ lines: [{ text: 'TF', color: palette.watermark, fontSize: 24 }] });
+  if (persist && !saveAppTheme(localStorage, appTheme)) showChartToast('主题设置未能保存');
+}
+
 function applyChartSettings(settings: ChartSettings) {
   chart.applyOptions({
     grid: {
@@ -1272,18 +1365,14 @@ function applyChartSettings(settings: ChartSettings) {
       horzLine: { labelVisible: settings.crosshairLabelsVisible },
     },
   });
+  const candlesVisible = currentSeriesKind !== 'probability' && primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
-    upColor: settings.upColor,
-    downColor: settings.downColor,
+    ...candlestickColorOptions(settings, candlesVisible),
     borderVisible: settings.borderVisible,
-    borderUpColor: settings.upColor,
-    borderDownColor: settings.downColor,
     wickVisible: settings.wickVisible,
-    wickUpColor: settings.upColor,
-    wickDownColor: settings.downColor,
-    priceLineColor: settings.upColor,
-    priceLineVisible: settings.lastPriceLineVisible && primarySeriesVisible && currentChartType === 'candles',
-    lastValueVisible: settings.lastPriceLineVisible && primarySeriesVisible && currentChartType === 'candles',
+    priceLineColor: chartColorWithOpacity(settings.upColor, settings.upOpacity),
+    priceLineVisible: settings.lastPriceLineVisible && candlesVisible,
+    lastValueVisible: settings.lastPriceLineVisible && candlesVisible,
   });
   for (const series of [barSeries, closeLineSeries, areaSeries, baselineSeries]) {
     series.applyOptions({
@@ -1296,6 +1385,7 @@ function applyChartSettings(settings: ChartSettings) {
   document.querySelector<HTMLElement>('#legend-values')!.hidden = !settings.legendValuesVisible;
   document.querySelector<HTMLElement>('#volume-legend')!.hidden = !volumeVisible || !settings.volumeLegendVisible;
   document.querySelector<HTMLElement>('#time-navigation')!.hidden = !settings.timeNavigationVisible;
+  chartStage.classList.toggle('time-navigation-hidden', !settings.timeNavigationVisible);
   document.querySelector<HTMLElement>('.chart-brand')!.hidden = !settings.watermarkVisible;
   chartWatermark.applyOptions({ visible: settings.watermarkVisible });
 }
@@ -1313,7 +1403,14 @@ function openChartSettings() {
   for (const input of chartSettingInputs) {
     const key = input.dataset.chartSetting as keyof ChartSettings;
     if (input.type === 'checkbox') input.checked = chartSettings[key] as boolean;
-    else input.value = chartSettings[key] as string;
+    else {
+      input.value = chartSettings[key] as string;
+      refreshTfColorPicker(input);
+    }
+  }
+  for (const input of chartSettingOpacityInputs) {
+    const key = input.dataset.chartOpacitySetting as keyof ChartSettings;
+    input.value = String(chartSettings[key]);
   }
   const now = new Date();
   for (const option of TRADING_TIME_ZONE_OPTIONS) {
@@ -1339,7 +1436,11 @@ function confirmChartSettings() {
   const next = { ...chartSettings };
   for (const input of chartSettingInputs) {
     const key = input.dataset.chartSetting as keyof ChartSettings;
-    (next as Record<string, string | boolean>)[key] = input.type === 'checkbox' ? input.checked : input.value;
+    (next as unknown as Record<string, string | boolean>)[key] = input.type === 'checkbox' ? input.checked : input.value;
+  }
+  for (const input of chartSettingOpacityInputs) {
+    const key = input.dataset.chartOpacitySetting as keyof ChartSettings;
+    (next as unknown as Record<string, number>)[key] = Number(input.value);
   }
   chartSettings = next;
   applyChartSettings(chartSettings);
@@ -1469,14 +1570,19 @@ function setPrimarySeriesData() {
   const isProbability = currentSeriesKind === 'probability';
   const candlesVisible = !isProbability && primarySeriesVisible && currentChartType === 'candles';
   candleSeries.applyOptions({
-    upColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
-    downColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
-    borderUpColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
-    borderDownColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
-    wickUpColor: candlesVisible ? chartSettings.upColor : 'rgba(0, 0, 0, 0)',
-    wickDownColor: candlesVisible ? chartSettings.downColor : 'rgba(0, 0, 0, 0)',
+    ...candlestickColorOptions(chartSettings, candlesVisible),
+    borderVisible: chartSettings.borderVisible,
+    wickVisible: chartSettings.wickVisible,
     priceLineVisible: candlesVisible && chartSettings.lastPriceLineVisible,
     lastValueVisible: candlesVisible && chartSettings.lastPriceLineVisible,
+  });
+  console.info('chart.candlestick_appearance.reapplied', {
+    symbol: currentSymbol.symbol,
+    resolution: currentResolution,
+    visible: candlesVisible,
+    bodyOpacity: chartSettings.bodyVisible ? [chartSettings.upOpacity, chartSettings.downOpacity] : [0, 0],
+    borderOpacity: [chartSettings.borderUpOpacity, chartSettings.borderDownOpacity],
+    wickOpacity: [chartSettings.wickUpOpacity, chartSettings.wickDownOpacity],
   });
   barSeries.applyOptions({ visible: !isProbability && primarySeriesVisible && currentChartType === 'bars' });
   closeLineSeries.applyOptions({
@@ -2139,6 +2245,7 @@ function openMarkerEditor(time: number, marker?: ChartMarker) {
   markerShape.value = marker?.shape ?? 'arrowUp';
   markerPosition.value = marker?.position ?? 'belowBar';
   markerColor.value = marker?.color ?? '#2962ff';
+  refreshTfColorPicker(markerColor);
   markerSize.value = String(marker?.size ?? 1);
   deleteMarkerButton.hidden = !marker;
   markerMessage.hidden = true;
@@ -2735,6 +2842,7 @@ function showDrawingProperties(drawing: SelectedDrawing) {
   const style = getSelectedStyle(drawing);
   drawingPropertiesName.textContent = drawingToolNames[drawing.toolType] ?? '绘图';
   drawingColor.value = colorToHex(style.color, drawing.toolType === 'UpArrow' ? '#089981' : '#2962ff');
+  refreshTfColorPicker(drawingColor);
   drawingProperties.style.setProperty('--drawing-color', drawingColor.value);
   drawingColor.disabled = Boolean(style.colorDisabled);
   drawingColor.parentElement!.title = style.colorDisabled ? '多空仓位保留红绿双色' : '颜色';
@@ -4501,6 +4609,10 @@ symbolDialog.addEventListener('keydown', (event) => {
   symbolDialogReturnFocus.focus();
 });
 document.querySelector<HTMLButtonElement>('#refresh')!.addEventListener('click', () => void openHistory(currentSymbol, currentResolution, currentAdjustment));
+themeToggle.addEventListener('click', () => {
+  const nextTheme: AppTheme = appTheme === 'dark' ? 'light' : 'dark';
+  applyAppTheme(nextTheme);
+});
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-resolution]')) {
   button.addEventListener('click', () => void selectResolution(button.dataset.resolution as Resolution));
 }
@@ -4590,23 +4702,89 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-time-ra
     if (range) chart.timeScale().setVisibleRange({ from: range.from as UTCTimestamp, to: range.to as UTCTimestamp });
   });
 }
-document.querySelector<HTMLButtonElement>('#time-pan-left')!.addEventListener('click', () => {
-  const range = chart.timeScale().getVisibleLogicalRange();
-  if (range) chart.timeScale().setVisibleLogicalRange(panLogicalRange(range, -1));
-});
-document.querySelector<HTMLButtonElement>('#time-pan-right')!.addEventListener('click', () => {
-  const range = chart.timeScale().getVisibleLogicalRange();
-  if (range) chart.timeScale().setVisibleLogicalRange(panLogicalRange(range, 1));
-});
-document.querySelector<HTMLButtonElement>('#go-to-latest')!.addEventListener('click', () => chart.timeScale().scrollToRealTime());
-function goToSelectedDate() {
+function renderGoToCalendar() {
+  goToCalendarTitle.textContent = appLocale === 'zh-CN'
+    ? `${goToCalendarMonth + 1}月 ${goToCalendarYear}`
+    : new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+      .format(new Date(Date.UTC(goToCalendarYear, goToCalendarMonth, 1)));
+  goToCalendarGrid.replaceChildren(...calendarMonthDays(goToCalendarYear, goToCalendarMonth).map((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = String(item.day);
+    button.dataset.goToDate = item.iso;
+    button.classList.toggle('outside', !item.inMonth);
+    button.classList.toggle('selected', item.iso === goToDateInput.value);
+    button.disabled = !item.inMonth
+      || Boolean(goToDateInput.min && item.iso < goToDateInput.min)
+      || Boolean(goToDateInput.max && item.iso > goToDateInput.max);
+    button.setAttribute('aria-label', item.iso);
+    return button;
+  }));
+}
+
+function openGoToDialog() {
+  const selected = /^\d{4}-\d{2}-\d{2}$/.test(goToDateInput.value)
+    ? goToDateInput.value
+    : goToDateInput.max || new Date().toISOString().slice(0, 10);
+  goToDateInput.value = selected;
+  const [year, month] = selected.split('-').map(Number);
+  goToCalendarYear = year;
+  goToCalendarMonth = month - 1;
+  renderGoToCalendar();
+  goToDialogLayer.hidden = false;
+  goToDateInput.focus();
+  goToDateInput.select();
+}
+
+function closeGoToDialog() {
+  goToDialogLayer.hidden = true;
+}
+
+function goToSelectedDate(): boolean {
   const timestamp = parseShanghaiDate(goToDateInput.value);
   const index = timestamp === null ? null : nearestBarIndex(currentBars, timestamp);
-  if (index === null) { showChartToast('请选择有效日期'); return; }
+  if (index === null) { showChartToast('请选择有效日期'); return false; }
   chart.timeScale().setVisibleLogicalRange(logicalRangeAround(index, currentBars.length));
+  return true;
 }
-document.querySelector<HTMLButtonElement>('#go-to-date-button')!.addEventListener('click', goToSelectedDate);
-goToDateInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') goToSelectedDate(); });
+document.querySelector<HTMLButtonElement>('#go-to-date-button')!.addEventListener('click', openGoToDialog);
+document.querySelector<HTMLButtonElement>('#close-go-to-dialog')!.addEventListener('click', closeGoToDialog);
+document.querySelector<HTMLButtonElement>('#cancel-go-to-date')!.addEventListener('click', closeGoToDialog);
+document.querySelector<HTMLButtonElement>('#confirm-go-to-date')!.addEventListener('click', () => {
+  if (goToSelectedDate()) closeGoToDialog();
+});
+document.querySelector<HTMLButtonElement>('#go-to-previous-month')!.addEventListener('click', () => {
+  const month = new Date(Date.UTC(goToCalendarYear, goToCalendarMonth - 1, 1));
+  goToCalendarYear = month.getUTCFullYear();
+  goToCalendarMonth = month.getUTCMonth();
+  renderGoToCalendar();
+});
+document.querySelector<HTMLButtonElement>('#go-to-next-month')!.addEventListener('click', () => {
+  const month = new Date(Date.UTC(goToCalendarYear, goToCalendarMonth + 1, 1));
+  goToCalendarYear = month.getUTCFullYear();
+  goToCalendarMonth = month.getUTCMonth();
+  renderGoToCalendar();
+});
+goToCalendarGrid.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-go-to-date]');
+  if (!button || button.disabled) return;
+  goToDateInput.value = button.dataset.goToDate!;
+  renderGoToCalendar();
+});
+goToDateInput.addEventListener('input', () => {
+  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(goToDateInput.value);
+  if (!match) return;
+  goToCalendarYear = Number(match[1]);
+  goToCalendarMonth = Number(match[2]) - 1;
+  renderGoToCalendar();
+});
+goToDateInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && goToSelectedDate()) closeGoToDialog();
+  if (event.key === 'Escape') closeGoToDialog();
+});
+goToDialogLayer.addEventListener('pointerdown', (event) => {
+  if (event.target === goToDialogLayer) closeGoToDialog();
+});
 openChartSettingsButton.addEventListener('click', openChartSettings);
 document.querySelector<HTMLButtonElement>('#close-chart-settings')!.addEventListener('click', closeChartSettings);
 document.querySelector<HTMLButtonElement>('#cancel-chart-settings')!.addEventListener('click', closeChartSettings);

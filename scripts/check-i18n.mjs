@@ -22,6 +22,8 @@ assert.equal(saveAppLocale({ setItem: () => { throw new Error('quota'); } }, 'zh
 
 assert.equal(translateUiText('设置', 'zh-CN'), '设置');
 assert.equal(translateUiText('设置', 'en-US'), 'Settings');
+assert.equal(translateUiText('自定义颜色', 'en-US'), 'Custom color');
+assert.equal(translateUiText('不透明度', 'en-US'), 'Opacity');
 assert.equal(translateUiText('  \n', 'en-US'), '  \n');
 assert.equal(translateUiText('已显示 5 / 共 9 条', 'en-US'), 'Showing 5 / 9');
 assert.equal(translateUiText('浦发银行 · 1天 · SH', 'en-US'), '浦发银行 · 1D · SH');

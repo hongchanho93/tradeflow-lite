@@ -1,8 +1,19 @@
 export type ChartSettings = {
   upColor: string;
   downColor: string;
+  upOpacity: number;
+  downOpacity: number;
+  bodyVisible: boolean;
   borderVisible: boolean;
+  borderUpColor: string;
+  borderDownColor: string;
+  borderUpOpacity: number;
+  borderDownOpacity: number;
   wickVisible: boolean;
+  wickUpColor: string;
+  wickDownColor: string;
+  wickUpOpacity: number;
+  wickDownOpacity: number;
   legendSymbolVisible: boolean;
   legendValuesVisible: boolean;
   volumeLegendVisible: boolean;
@@ -18,8 +29,19 @@ export const CHART_SETTINGS_STORAGE_KEY = 'tradeflow-lite.chart-settings.v1';
 export const DEFAULT_CHART_SETTINGS: ChartSettings = {
   upColor: '#089981',
   downColor: '#f23645',
+  upOpacity: 100,
+  downOpacity: 100,
+  bodyVisible: true,
   borderVisible: false,
+  borderUpColor: '#089981',
+  borderDownColor: '#f23645',
+  borderUpOpacity: 100,
+  borderDownOpacity: 100,
   wickVisible: true,
+  wickUpColor: '#089981',
+  wickDownColor: '#f23645',
+  wickUpOpacity: 100,
+  wickDownOpacity: 100,
   legendSymbolVisible: true,
   legendValuesVisible: true,
   volumeLegendVisible: true,
@@ -32,18 +54,70 @@ export const DEFAULT_CHART_SETTINGS: ChartSettings = {
 };
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
-const settingKeys = Object.keys(DEFAULT_CHART_SETTINGS) as Array<keyof ChartSettings>;
+const colorKeys = ['upColor', 'downColor'] as const;
+const booleanKeys = [
+  'borderVisible', 'wickVisible', 'legendSymbolVisible', 'legendValuesVisible',
+  'volumeLegendVisible', 'verticalGridVisible', 'horizontalGridVisible',
+  'crosshairLabelsVisible', 'lastPriceLineVisible', 'watermarkVisible',
+  'timeNavigationVisible',
+] as const;
+const optionalColorKeys = ['borderUpColor', 'borderDownColor', 'wickUpColor', 'wickDownColor'] as const;
+const optionalBooleanKeys = ['bodyVisible'] as const;
+const optionalOpacityKeys = [
+  'upOpacity', 'downOpacity', 'borderUpOpacity', 'borderDownOpacity',
+  'wickUpOpacity', 'wickDownOpacity',
+] as const;
 const colorPattern = /^#[0-9a-f]{6}$/i;
 
-function isChartSettings(value: unknown): value is ChartSettings {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+function normalizeChartSettings(value: unknown): ChartSettings | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const settings = value as Record<string, unknown>;
-  return settingKeys.every((key) => {
-    const expected = DEFAULT_CHART_SETTINGS[key];
-    return typeof expected === 'boolean'
-      ? typeof settings[key] === 'boolean'
-      : typeof settings[key] === 'string' && colorPattern.test(settings[key] as string);
-  });
+  if (!colorKeys.every((key) => typeof settings[key] === 'string' && colorPattern.test(settings[key] as string))) return null;
+  if (!booleanKeys.every((key) => typeof settings[key] === 'boolean')) return null;
+  if (!optionalColorKeys.every((key) => settings[key] === undefined
+    || (typeof settings[key] === 'string' && colorPattern.test(settings[key] as string)))) return null;
+  if (!optionalBooleanKeys.every((key) => settings[key] === undefined || typeof settings[key] === 'boolean')) return null;
+  if (!optionalOpacityKeys.every((key) => settings[key] === undefined
+    || (Number.isInteger(settings[key]) && (settings[key] as number) >= 0 && (settings[key] as number) <= 100))) return null;
+
+  const upColor = settings.upColor as string;
+  const downColor = settings.downColor as string;
+  return {
+    ...Object.fromEntries(booleanKeys.map((key) => [key, settings[key]])),
+    upColor,
+    downColor,
+    bodyVisible: (settings.bodyVisible as boolean | undefined) ?? true,
+    upOpacity: (settings.upOpacity as number | undefined) ?? 100,
+    downOpacity: (settings.downOpacity as number | undefined) ?? 100,
+    borderUpColor: (settings.borderUpColor as string | undefined) ?? upColor,
+    borderDownColor: (settings.borderDownColor as string | undefined) ?? downColor,
+    borderUpOpacity: (settings.borderUpOpacity as number | undefined) ?? 100,
+    borderDownOpacity: (settings.borderDownOpacity as number | undefined) ?? 100,
+    wickUpColor: (settings.wickUpColor as string | undefined) ?? upColor,
+    wickDownColor: (settings.wickDownColor as string | undefined) ?? downColor,
+    wickUpOpacity: (settings.wickUpOpacity as number | undefined) ?? 100,
+    wickDownOpacity: (settings.wickDownOpacity as number | undefined) ?? 100,
+  } as ChartSettings;
+}
+
+export function chartColorWithOpacity(color: string, opacity: number): string {
+  if (opacity === 100) return color;
+  const red = Number.parseInt(color.slice(1, 3), 16);
+  const green = Number.parseInt(color.slice(3, 5), 16);
+  const blue = Number.parseInt(color.slice(5, 7), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${opacity / 100})`;
+}
+
+export function candlestickColorOptions(settings: ChartSettings, visible = true) {
+  const hidden = 'rgba(0, 0, 0, 0)';
+  return {
+    upColor: visible ? chartColorWithOpacity(settings.upColor, settings.bodyVisible ? settings.upOpacity : 0) : hidden,
+    downColor: visible ? chartColorWithOpacity(settings.downColor, settings.bodyVisible ? settings.downOpacity : 0) : hidden,
+    borderUpColor: visible ? chartColorWithOpacity(settings.borderUpColor, settings.borderUpOpacity) : hidden,
+    borderDownColor: visible ? chartColorWithOpacity(settings.borderDownColor, settings.borderDownOpacity) : hidden,
+    wickUpColor: visible ? chartColorWithOpacity(settings.wickUpColor, settings.wickUpOpacity) : hidden,
+    wickDownColor: visible ? chartColorWithOpacity(settings.wickDownColor, settings.wickDownOpacity) : hidden,
+  };
 }
 
 export function loadChartSettings(storage: Pick<StorageLike, 'getItem'>): ChartSettings {
@@ -51,8 +125,8 @@ export function loadChartSettings(storage: Pick<StorageLike, 'getItem'>): ChartS
     const raw = storage.getItem(CHART_SETTINGS_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CHART_SETTINGS };
     const envelope = JSON.parse(raw) as Record<string, unknown>;
-    if (envelope.version !== 1 || !isChartSettings(envelope)) return { ...DEFAULT_CHART_SETTINGS };
-    return Object.fromEntries(settingKeys.map((key) => [key, envelope[key]])) as ChartSettings;
+    if (envelope.version !== 1) return { ...DEFAULT_CHART_SETTINGS };
+    return normalizeChartSettings(envelope) ?? { ...DEFAULT_CHART_SETTINGS };
   } catch {
     return { ...DEFAULT_CHART_SETTINGS };
   }
