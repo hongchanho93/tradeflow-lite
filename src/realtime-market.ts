@@ -110,9 +110,11 @@ export function isRealtimeSequenceFresh(
 export function canApplyRealtimeBar(
   currentBars: Array<{ time: number }>,
   incoming: { time: number },
+  authoritativeClose = false,
 ) {
   const latestTime = currentBars.at(-1)?.time;
-  return latestTime === undefined || incoming.time >= latestTime;
+  if (latestTime === undefined || incoming.time >= latestTime) return true;
+  return authoritativeClose && currentBars.at(-2)?.time === incoming.time;
 }
 
 export const MARKET_DATA_RENDER_INTERVAL_MS = 100;

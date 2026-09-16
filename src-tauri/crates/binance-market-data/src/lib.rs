@@ -406,9 +406,18 @@ impl RealtimeKlineState {
         }) {
             return Ok(None);
         }
-        self.current = Some(event.kline.clone());
-        self.last_kline_event_time_ms = Some(event.event_time_ms);
-        self.awaiting_calibration = false;
+        let advances_current = self
+            .current
+            .as_ref()
+            .is_none_or(|current| event.kline.open_time_ms >= current.open_time_ms);
+        if advances_current {
+            self.current = Some(event.kline.clone());
+            self.awaiting_calibration = false;
+        }
+        self.last_kline_event_time_ms = Some(
+            self.last_kline_event_time_ms
+                .map_or(event.event_time_ms, |current| current.max(event.event_time_ms)),
+        );
         Ok(Some(RealtimeKlineUpdate {
             event_time_ms: event.event_time_ms,
             kline: event.kline.clone(),
@@ -2263,6 +2272,130 @@ mod tests {
         assert_eq!(update.kline.volume, 0.0);
         assert_eq!(update.kline.quote_volume, 0.0);
         assert!(!state.awaiting_calibration());
+    }
+
+    #[test]
+    fn late_previous_close_does_not_reset_the_provisional_next_bar() {
+        let mut state = RealtimeKlineState::default();
+        let baseline = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375259900,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"101","h":"102","l":"99","v":"5","f":100,"L":106,
+                "x":false,"q":"505"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(baseline)).unwrap();
+
+        let trade = |aggregate_trade_id, event_time_ms, price| AggregateTradeEvent {
+            event_time_ms,
+            trade_time_ms: event_time_ms,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id,
+            first_trade_id: aggregate_trade_id + 100,
+            last_trade_id: aggregate_trade_id + 100,
+            price,
+            quantity: 1.0,
+            buyer_is_maker: false,
+        };
+        state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                82,
+                1_789_375_260_050,
+                103.0,
+            )))
+            .unwrap()
+            .unwrap();
+        state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                83,
+                1_789_375_260_100,
+                105.0,
+            )))
+            .unwrap()
+            .unwrap();
+
+        let late_close = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375260800,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"102","h":"104","l":"99","v":"8","f":100,"L":110,
+                "x":true,"q":"810"}
+            }"#,
+        )
+        .unwrap();
+        let late_update = state
+            .apply(&RealtimeEvent::Kline(late_close))
+            .unwrap()
+            .expect("the previous interval close must still be emitted");
+        assert!(late_update.closed);
+        assert_eq!(late_update.kline.open_time_ms, 1_789_375_200_000);
+
+        let next_update = state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                84,
+                1_789_375_260_900,
+                102.0,
+            )))
+            .unwrap()
+            .expect("the next trade must continue the provisional next bar");
+        assert_eq!(next_update.kline.open_time_ms, 1_789_375_260_000);
+        assert_eq!(next_update.kline.open, 103.0);
+        assert_eq!(next_update.kline.high, 105.0);
+        assert_eq!(next_update.kline.low, 102.0);
+        assert_eq!(next_update.kline.close, 102.0);
+    }
+
+    #[test]
+    fn late_previous_close_does_not_lower_the_kline_event_high_watermark() {
+        let mut state = RealtimeKlineState::default();
+        let current = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375261000,"s":"BTCUSDT",
+                "k":{"t":1789375260000,"T":1789375319999,"i":"1m",
+                "o":"103","c":"104","h":"105","l":"102","v":"2","f":107,"L":109,
+                "x":false,"q":"208"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(current)).unwrap();
+
+        let late_previous_close = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375260500,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"102","h":"104","l":"99","v":"8","f":100,"L":106,
+                "x":true,"q":"810"}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            state
+                .apply(&RealtimeEvent::Kline(late_previous_close))
+                .unwrap()
+                .is_some(),
+            "the previous close must still be forwarded"
+        );
+
+        let stale_trade = AggregateTradeEvent {
+            event_time_ms: 1_789_375_260_750,
+            trade_time_ms: 1_789_375_260_749,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 82,
+            first_trade_id: 110,
+            last_trade_id: 110,
+            price: 99.0,
+            quantity: 1.0,
+            buyer_is_maker: false,
+        };
+        assert!(
+            state
+                .apply(&RealtimeEvent::AggregateTrade(stale_trade))
+                .unwrap()
+                .is_none(),
+            "a late previous close must not let an older trade cross the existing kline watermark"
+        );
     }
 
     #[test]

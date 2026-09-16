@@ -1022,7 +1022,7 @@ fn emit_ws_payload(
                         bar,
                         closed,
                         event_time_ms,
-                        source: Cow::Borrowed(market.source()),
+                        source: Cow::Borrowed("kline"),
                     },
                 ))?;
             }
@@ -1504,8 +1504,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ContractSpec, OkxMarket, OkxRealtimeBarState, candle_close_time, interval_for,
-        is_control_payload, market_quantity, parse_candle,
+        ContractSpec, OkxMarket, OkxRealtimeBarState, SequenceClock, WsKind, candle_close_time,
+        emit_ws_payload, interval_for, is_control_payload, market_quantity, parse_candle,
     };
     use crate::contracts::{Adjustment, AppError, Bar, Resolution, Symbol, SymbolKind};
     use crate::market_adapter::{
@@ -1819,6 +1819,43 @@ mod tests {
             self.changed.notify_all();
             Ok(())
         }
+    }
+
+    #[test]
+    fn official_candle_uses_the_canonical_kline_source() {
+        let active = Arc::new(AtomicU64::new(7));
+        let request = RealtimeRequest {
+            request_id: 7,
+            provider_id: "okx_spot",
+            symbol: Symbol::new("OKX", "BTC-USDT").unwrap(),
+            kind: SymbolKind::Crypto,
+            resolution: Resolution::Minute1,
+            active_request_id: active,
+        };
+        let sink = Arc::new(ProbeSink::default());
+        let realtime_sink: Arc<dyn RealtimeSink> = sink.clone();
+        emit_ws_payload(
+            OkxMarket::Spot,
+            &request,
+            &realtime_sink,
+            WsKind::Business,
+            None,
+            &mut SequenceClock::default(),
+            &Arc::new(Mutex::new(OkxRealtimeBarState::default())),
+            &json!({
+                "arg": {"channel": "candle1m", "instId": "BTC-USDT"},
+                "data": [[
+                    "1789467900000", "77038.8", "77041", "77017.2", "77020",
+                    "125", "1.25", "96275", "1"
+                ]]
+            }),
+        )
+        .unwrap();
+        let events = sink.snapshot();
+        assert!(matches!(
+            &events[0].payload,
+            RealtimePayload::Bar { source, closed: true, .. } if source == "kline"
+        ));
     }
 
     fn run_realtime_case(

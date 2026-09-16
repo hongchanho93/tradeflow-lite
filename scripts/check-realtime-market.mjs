@@ -108,6 +108,16 @@ assert.equal(
 assert.equal(canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 200 }), true);
 assert.equal(canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 201 }), true);
 assert.equal(
+  canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 100 }, true),
+  true,
+  'an authoritative close may update the exact penultimate bar',
+);
+assert.equal(
+  canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 100 }, false),
+  false,
+  'a non-authoritative historical update must still be rejected',
+);
+assert.equal(
   canApplyRealtimeBar([{ time: 100 }, { time: 200 }], { time: 199 }),
   false,
   'realtime must replace the latest bar or append a new bar, never rewrite older history',
@@ -145,17 +155,31 @@ function stripTypeScript(source) {
     .replace(/function applyRealtimeBar\([^)]*\)(?:\s*:\s*boolean)?/, 'function applyRealtimeBar(event)')
     .replace(/function queueRealtimeBar\([^)]*\)/, 'function queueRealtimeBar(event)')
     .replace(/function flushRealtimeFrame\(now: number, fallback = false\)/, 'function flushRealtimeFrame(now, fallback = false)')
+    .replace(/function scheduleRealtimeIndicators\(time: number\)/, 'function scheduleRealtimeIndicators(time)')
+    .replace(/function resetRealtimeHealthWindow\(now: number, resetContinuity = false\)/, 'function resetRealtimeHealthWindow(now, resetContinuity = false)')
+    .replace(/const appliedEvents: RealtimeBarEvent<Bar>\[\] = \[\];/, 'const appliedEvents = [];')
     .replace(/\s+as\s+UTCTimestamp\b/g, '');
 }
 
 const applyRealtimeBarSource = stripTypeScript(
-  sourceBetween('function applyRealtimeBar(', '\nlet pendingRealtimeBar'),
+  sourceBetween('function applyRealtimeBar(', '\nlet pendingRealtimeBars'),
 );
 const flushRealtimeFrameSource = stripTypeScript(
   sourceBetween('function flushRealtimeFrame(', '\nfunction queueRealtimeFrame'),
 );
 const queueRealtimeBarSource = stripTypeScript(
   sourceBetween('function queueRealtimeBar(', '\nfunction applyRealtimeStatus'),
+);
+const scheduleRealtimeIndicatorsSource = stripTypeScript(
+  sourceBetween('function scheduleRealtimeIndicators(', '\nfunction reportRealtimeRenderHealth'),
+);
+const resetRealtimeHealthWindowSource = stripTypeScript(
+  sourceBetween('function resetRealtimeHealthWindow(', '\nfunction scheduleRealtimeIndicators'),
+);
+assert.match(
+  sourceBetween('function resetMarketData()', '\nconst drawingToolLabels'),
+  /resetRealtimeHealthWindow\(performance\.now\(\), true\)/,
+  'market reset must clear the realtime health window and request continuity',
 );
 
 const createRealtimeHarness = new Function(
@@ -195,20 +219,27 @@ const createRealtimeHarness = new Function(
       bars.push(bar);
       return 'appended';
     }
-    function updatePrimarySeries(bar) { appliedBars.push(bar); }
-    const volumeSeries = { update() {} };
+    const historicalPrimaryUpdates = [];
+    function updatePrimarySeries(bar, historicalUpdate = false) {
+      appliedBars.push(bar);
+      historicalPrimaryUpdates.push(historicalUpdate);
+    }
+    const historicalVolumeUpdates = [];
+    const volumeSeries = {
+      update(_bar, historicalUpdate = false) { historicalVolumeUpdates.push(historicalUpdate); },
+    };
     const status = { className: '', title: '' };
     const realtimeTimeFormatter = { format: () => 'now' };
     function setStatusLabel() {}
-    function scheduleRealtimeIndicators() {}
+    const scheduledIndicatorTimes = [];
+    function scheduleRealtimeIndicators(time) { scheduledIndicatorTimes.push(time); }
     function showLatest() {}
 
     let realtimeConnected = false;
     let realtimeBarRequestId = 0;
     let currentQuote = null;
     let lastRealtimeStatusRenderAt = 0;
-    let pendingRealtimeBar = null;
-    let pendingRealtimeBarQueuedAt = 0;
+    let pendingRealtimeBars = new Map();
     let realtimeFrameId;
     let realtimeFrameFallbackTimerId;
     let pendingRealtimeDepth = null;
@@ -216,6 +247,7 @@ const createRealtimeHarness = new Function(
     let lastMarketDataRenderAt = 0;
     let realtimeHealthBarsReceived = 0;
     let realtimeHealthBarsApplied = 0;
+    let realtimeHealthBarsCoalesced = 0;
     let realtimeHealthRequestId = 0;
     let realtimeHealthLastArrivalAt = 0;
     let realtimeHealthMaxArrivalGapMs = 0;
@@ -243,7 +275,11 @@ const createRealtimeHarness = new Function(
         sequenceCalls,
         barsReceived: realtimeHealthBarsReceived,
         barsApplied: realtimeHealthBarsApplied,
-        pendingBar: pendingRealtimeBar,
+        barsCoalesced: realtimeHealthBarsCoalesced,
+        pendingBars: [...pendingRealtimeBars.values()].map(({ event }) => event),
+        scheduledIndicatorTimes,
+        historicalPrimaryUpdates,
+        historicalVolumeUpdates,
       }),
     };
   })();`,
@@ -269,7 +305,11 @@ const firstBar = {
 
 realtimeHarness.queueRealtimeBar(firstBar);
 assert.equal(realtimeHarness.state().barsReceived, 1, 'queue must record an accepted bar');
-assert.ok(realtimeHarness.state().pendingBar, 'queue must hold the accepted bar for the frame');
+assert.deepEqual(
+  realtimeHarness.state().pendingBars.map((event) => event.bar.time),
+  [200],
+  'queue must hold the accepted bar for the frame',
+);
 realtimeHarness.flushRealtimeFrame(1_000);
 let realtimeState = realtimeHarness.state();
 assert.equal(realtimeState.sequenceCalls, 1, 'queue -> flush -> apply must consume one bar sequence');
@@ -310,7 +350,207 @@ realtimeState = realtimeHarness.state();
 assert.equal(realtimeState.appliedBars.length, 2, 'the lower aggregate-trade sequence must apply after the kline sequence');
 assert.equal(realtimeState.barsApplied, 2, 'rejected bars must not inflate barsApplied');
 assert.equal(realtimeState.barsReceived, 3, 'only sequence-fresh, selection-matching bars reach the queue counter');
+assert.equal(realtimeState.barsCoalesced, 0, 'a stale bar rejected during apply is not a coalesced bar');
 assert.equal(realtimeState.sequenceCalls, 5, 'each selection-matching bar must pass the sequence gate exactly once');
-assert.equal(realtimeState.pendingBar, null, 'a rejected queue event must not remain pending');
+assert.deepEqual(realtimeState.pendingBars, [], 'a rejected queue event must not remain pending');
+
+const boundaryHarness = createRealtimeHarness(
+  matchesRealtimeSelection,
+  canApplyRealtimeBar,
+  isRealtimeSequenceFresh,
+  realtimeSequenceKey,
+);
+boundaryHarness.queueRealtimeBar({
+  ...firstBar,
+  sequence: 6_600_000_001,
+  closed: true,
+  bar: { ...firstBar.bar, time: 200, close: 12.5 },
+});
+boundaryHarness.queueRealtimeBar({
+  ...firstBar,
+  source: 'aggTrade',
+  sequence: 4_000_000_001,
+  closed: false,
+  bar: { ...firstBar.bar, time: 200, close: 12.55 },
+});
+boundaryHarness.queueRealtimeBar({
+  ...firstBar,
+  sequence: 6_600_000_002,
+  closed: false,
+  bar: { ...firstBar.bar, time: 201, close: 12.6 },
+});
+assert.equal(
+  boundaryHarness.state().pendingBars.find((event) => event.bar.time === 200)?.closed,
+  true,
+  'a weaker same-time update must not erase an accepted close confirmation',
+);
+boundaryHarness.flushRealtimeFrame(1_600);
+const boundaryState = boundaryHarness.state();
+assert.equal(boundaryState.barsCoalesced, 1, 'only the repeated same-time bar counts as coalesced');
+assert.deepEqual(
+  boundaryState.appliedBars.map((bar) => bar.time),
+  [200, 201],
+  'one frame must apply the closing bar before the next bar opens',
+);
+assert.deepEqual(
+  boundaryState.appliedBars.map((bar) => bar.close),
+  [12.5, 12.6],
+  'a weaker same-time update must not replace the accepted closing bar payload',
+);
+assert.deepEqual(
+  boundaryState.scheduledIndicatorTimes,
+  [200, 201],
+  'indicator refresh must retain every changed bar across a realtime boundary',
+);
+
+const crossFrameHarness = createRealtimeHarness(
+  matchesRealtimeSelection,
+  canApplyRealtimeBar,
+  isRealtimeSequenceFresh,
+  realtimeSequenceKey,
+);
+crossFrameHarness.queueRealtimeBar({
+  ...firstBar,
+  source: 'aggTrade',
+  sequence: 4_000_000_001,
+  closed: false,
+  bar: { ...firstBar.bar, time: 201, close: 12.6 },
+});
+crossFrameHarness.flushRealtimeFrame(1_700);
+crossFrameHarness.queueRealtimeBar({
+  ...firstBar,
+  source: 'kline',
+  sequence: 6_600_000_001,
+  closed: true,
+  bar: { ...firstBar.bar, time: 200, close: 12.9, volume: 9 },
+});
+crossFrameHarness.flushRealtimeFrame(1_800);
+const crossFrameState = crossFrameHarness.state();
+assert.deepEqual(
+  crossFrameState.currentBars.map((bar) => [bar.time, bar.close]),
+  [[100, 10], [200, 12.9], [201, 12.6]],
+  'a closing kline that arrives after the next bar must replace only the penultimate bar',
+);
+assert.deepEqual(
+  crossFrameState.scheduledIndicatorTimes,
+  [201, 200],
+  'a cross-frame late close must still refresh indicators for the closed bar',
+);
+assert.deepEqual(
+  crossFrameState.historicalPrimaryUpdates,
+  [false, true],
+  'only the late penultimate close may use Lightweight Charts historical update',
+);
+assert.deepEqual(
+  crossFrameState.historicalVolumeUpdates,
+  [false, true],
+  'the late penultimate volume must use the same historical update path',
+);
+
+const nonAuthoritativeCloseHarness = createRealtimeHarness(
+  matchesRealtimeSelection,
+  canApplyRealtimeBar,
+  isRealtimeSequenceFresh,
+  realtimeSequenceKey,
+);
+nonAuthoritativeCloseHarness.queueRealtimeBar({
+  ...firstBar,
+  source: 'aggTrade',
+  sequence: 4_000_000_001,
+  closed: false,
+  bar: { ...firstBar.bar, time: 201, close: 12.6 },
+});
+nonAuthoritativeCloseHarness.flushRealtimeFrame(1_900);
+nonAuthoritativeCloseHarness.queueRealtimeBar({
+  ...firstBar,
+  source: 'aggTrade',
+  sequence: 4_000_000_002,
+  closed: true,
+  bar: { ...firstBar.bar, time: 200, close: 13 },
+});
+nonAuthoritativeCloseHarness.flushRealtimeFrame(2_000);
+assert.deepEqual(
+  nonAuthoritativeCloseHarness.state().currentBars.map((bar) => [bar.time, bar.close]),
+  [[100, 10], [200, 11], [201, 12.6]],
+  'a non-kline source must not authorize a historical rewrite even if it claims closed=true',
+);
+
+const createIndicatorScheduleHarness = new Function(
+  `return (() => {
+    const activeIndicators = new Set(['ma']);
+    const pendingRealtimeIndicatorTimes = new Set();
+    const refreshCalls = [];
+    let pendingTimer;
+    let realtimeIndicatorTimerId;
+    const window = {
+      setTimeout(callback) {
+        pendingTimer = callback;
+        return 1;
+      },
+    };
+    function refreshIndicators(times) { refreshCalls.push(times); }
+    ${scheduleRealtimeIndicatorsSource}
+    return {
+      scheduleRealtimeIndicators,
+      flush: () => pendingTimer?.(),
+      refreshCalls,
+    };
+  })();`,
+);
+const indicatorScheduleHarness = createIndicatorScheduleHarness();
+indicatorScheduleHarness.scheduleRealtimeIndicators(201);
+indicatorScheduleHarness.scheduleRealtimeIndicators(200);
+indicatorScheduleHarness.scheduleRealtimeIndicators(201);
+indicatorScheduleHarness.flush();
+assert.deepEqual(
+  indicatorScheduleHarness.refreshCalls,
+  [[200, 201]],
+  'the 250ms indicator batch must retain, sort, and deduplicate every changed bar time',
+);
+
+const createHealthResetHarness = new Function(
+  `return (() => {
+    let realtimeHealthStartedAt = 1;
+    let realtimeHealthBarsReceived = 3;
+    let realtimeHealthBarsApplied = 2;
+    let realtimeHealthBarsCoalesced = 1;
+    let realtimeHealthDepthReceived = 4;
+    let realtimeHealthTradesReceived = 5;
+    let realtimeHealthMarketRenders = 6;
+    let realtimeHealthMaxQueueMs = 7;
+    let realtimeHealthMaxEventAgeMs = 8;
+    let realtimeHealthMaxFrameMs = 9;
+    let realtimeHealthMaxArrivalGapMs = 10;
+    let realtimeHealthMaxApplyGapMs = 11;
+    let realtimeHealthLastArrivalAt = 12;
+    let realtimeHealthLastApplyAt = 13;
+    let realtimeHealthRequestId = 14;
+    let realtimeHealthFallbackFlushes = 15;
+    ${resetRealtimeHealthWindowSource}
+    resetRealtimeHealthWindow(20, true);
+    return {
+      startedAt: realtimeHealthStartedAt,
+      barsReceived: realtimeHealthBarsReceived,
+      barsApplied: realtimeHealthBarsApplied,
+      barsCoalesced: realtimeHealthBarsCoalesced,
+      lastArrivalAt: realtimeHealthLastArrivalAt,
+      lastApplyAt: realtimeHealthLastApplyAt,
+      requestId: realtimeHealthRequestId,
+    };
+  })();`,
+);
+assert.deepEqual(
+  createHealthResetHarness(),
+  {
+    startedAt: 20,
+    barsReceived: 0,
+    barsApplied: 0,
+    barsCoalesced: 0,
+    lastArrivalAt: 0,
+    lastApplyAt: 0,
+    requestId: 0,
+  },
+  'selection reset must not carry realtime health counters into the next request',
+);
 
 console.log('Realtime market event contract OK');

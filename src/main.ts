@@ -1608,17 +1608,19 @@ function setPrimarySeriesData() {
   baselineSeries.setData(!isProbability && currentChartType === 'baseline' ? closes : []);
 }
 
-function updatePrimarySeries(bar: Bar) {
-  candleSeries.update(candlePoint(bar));
+function updatePrimarySeries(bar: Bar, historicalUpdate = false) {
+  candleSeries.update(candlePoint(bar), historicalUpdate);
   if (currentSeriesKind === 'probability') {
-    closeLineSeries.update({ time: bar.time as UTCTimestamp, value: bar.close });
+    closeLineSeries.update({ time: bar.time as UTCTimestamp, value: bar.close }, historicalUpdate);
     return;
   }
-  if (currentChartType === 'bars') barSeries.update({ ...bar, time: bar.time as UTCTimestamp });
+  if (currentChartType === 'bars') {
+    barSeries.update({ ...bar, time: bar.time as UTCTimestamp }, historicalUpdate);
+  }
   const close = { time: bar.time as UTCTimestamp, value: bar.close };
-  if (currentChartType === 'line') closeLineSeries.update(close);
-  if (currentChartType === 'area') areaSeries.update(close);
-  if (currentChartType === 'baseline') baselineSeries.update(close);
+  if (currentChartType === 'line') closeLineSeries.update(close, historicalUpdate);
+  if (currentChartType === 'area') areaSeries.update(close, historicalUpdate);
+  if (currentChartType === 'baseline') baselineSeries.update(close, historicalUpdate);
 }
 
 function applyChartType(chartType: ChartType, preserveRange = true, persist = true) {
@@ -2112,7 +2114,7 @@ function renderMarketDataPanel() {
 function resetMarketData() {
   latestDepth = null;
   recentTrades = [];
-  pendingRealtimeBar = null;
+  pendingRealtimeBars.clear();
   cancelRealtimeFrameSchedule();
   pendingRealtimeDepth = null;
   pendingRealtimeTrades = [];
@@ -2121,7 +2123,8 @@ function resetMarketData() {
   lastMarketDataRenderAt = 0;
   if (realtimeIndicatorTimerId !== undefined) window.clearTimeout(realtimeIndicatorTimerId);
   realtimeIndicatorTimerId = undefined;
-  pendingRealtimeIndicatorTime = undefined;
+  pendingRealtimeIndicatorTimes.clear();
+  resetRealtimeHealthWindow(performance.now(), true);
   renderMarketDataPanel();
 }
 
@@ -4042,7 +4045,8 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>): boolean {
     currentResolution,
     activeRealtimeProviderId,
   )) return false;
-  if (!canApplyRealtimeBar(currentBars, event.bar)) {
+  const authoritativeClose = event.closed && event.source === 'kline';
+  if (!canApplyRealtimeBar(currentBars, event.bar, authoritativeClose)) {
     console.warn('market.realtime.stale_bar', {
       symbol: event.symbol,
       resolution: event.resolution,
@@ -4052,13 +4056,28 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>): boolean {
     return false;
   }
 
-  if (updateLatestBarInPlace(currentBars, event.bar) === 'rejected') return false;
-  updatePrimarySeries(event.bar);
+  const latestTime = currentBars.at(-1)?.time;
+  const historicalClose = authoritativeClose
+    && latestTime !== undefined
+    && event.bar.time < latestTime
+    && currentBars.at(-2)?.time === event.bar.time;
+  if (historicalClose) {
+    currentBars[currentBars.length - 2] = event.bar;
+    console.debug('market.realtime.late_close_applied', {
+      symbol: event.symbol,
+      resolution: event.resolution,
+      closedBarTime: event.bar.time,
+      latestBarTime: latestTime,
+    });
+  } else if (updateLatestBarInPlace(currentBars, event.bar) === 'rejected') {
+    return false;
+  }
+  updatePrimarySeries(event.bar, historicalClose);
   volumeSeries.update({
     time: event.bar.time as UTCTimestamp,
     value: event.bar.volume,
     color: event.bar.close >= event.bar.open ? 'rgba(8, 153, 129, .48)' : 'rgba(242, 54, 69, .48)',
-  });
+  }, historicalClose);
   scheduleRealtimeIndicators(event.bar.time);
   currentQuote = null;
   showLatest(currentBars);
@@ -4076,18 +4095,21 @@ function applyRealtimeBar(event: RealtimeBarEvent<Bar>): boolean {
   return true;
 }
 
-let pendingRealtimeBar: RealtimeBarEvent<Bar> | null = null;
-let pendingRealtimeBarQueuedAt = 0;
+let pendingRealtimeBars = new Map<number, {
+  event: RealtimeBarEvent<Bar>;
+  queuedAt: number;
+}>();
 let realtimeFrameId: number | undefined;
 let realtimeFrameFallbackTimerId: number | undefined;
 let marketDataTimerId: number | undefined;
 let lastMarketDataRenderAt = 0;
 let lastRealtimeStatusRenderAt = 0;
 let realtimeIndicatorTimerId: number | undefined;
-let pendingRealtimeIndicatorTime: number | undefined;
+const pendingRealtimeIndicatorTimes = new Set<number>();
 let realtimeHealthStartedAt = performance.now();
 let realtimeHealthBarsReceived = 0;
 let realtimeHealthBarsApplied = 0;
+let realtimeHealthBarsCoalesced = 0;
 let realtimeHealthDepthReceived = 0;
 let realtimeHealthTradesReceived = 0;
 let realtimeHealthMarketRenders = 0;
@@ -4101,28 +4123,48 @@ let realtimeHealthLastApplyAt = 0;
 let realtimeHealthRequestId = 0;
 let realtimeHealthFallbackFlushes = 0;
 
+function resetRealtimeHealthWindow(now: number, resetContinuity = false) {
+  realtimeHealthStartedAt = now;
+  realtimeHealthBarsReceived = 0;
+  realtimeHealthBarsApplied = 0;
+  realtimeHealthBarsCoalesced = 0;
+  realtimeHealthDepthReceived = 0;
+  realtimeHealthTradesReceived = 0;
+  realtimeHealthMarketRenders = 0;
+  realtimeHealthMaxQueueMs = 0;
+  realtimeHealthMaxEventAgeMs = 0;
+  realtimeHealthMaxFrameMs = 0;
+  realtimeHealthMaxArrivalGapMs = 0;
+  realtimeHealthMaxApplyGapMs = 0;
+  realtimeHealthFallbackFlushes = 0;
+  if (resetContinuity) {
+    realtimeHealthLastArrivalAt = 0;
+    realtimeHealthLastApplyAt = 0;
+    realtimeHealthRequestId = 0;
+  }
+}
+
 function scheduleRealtimeIndicators(time: number) {
   if (activeIndicators.size === 0) return;
-  pendingRealtimeIndicatorTime = time;
+  pendingRealtimeIndicatorTimes.add(time);
   if (realtimeIndicatorTimerId !== undefined) return;
   realtimeIndicatorTimerId = window.setTimeout(() => {
     realtimeIndicatorTimerId = undefined;
-    const pendingTime = pendingRealtimeIndicatorTime;
-    pendingRealtimeIndicatorTime = undefined;
-    if (pendingTime !== undefined) refreshIndicators([pendingTime]);
+    const pendingTimes = [...pendingRealtimeIndicatorTimes].sort((left, right) => left - right);
+    pendingRealtimeIndicatorTimes.clear();
+    if (pendingTimes.length > 0) refreshIndicators(pendingTimes);
   }, 250);
 }
 
 function reportRealtimeRenderHealth(now: number) {
   if (now - realtimeHealthStartedAt < 10_000) return;
-  const barsCoalesced = Math.max(0, realtimeHealthBarsReceived - realtimeHealthBarsApplied);
   void invoke('report_realtime_render_health', {
     requestId: activeRealtimeRequestId,
     symbol: currentSymbol.symbol,
     resolution: currentResolution,
     barsReceived: realtimeHealthBarsReceived,
     barsApplied: realtimeHealthBarsApplied,
-    barsCoalesced,
+    barsCoalesced: realtimeHealthBarsCoalesced,
     depthReceived: realtimeHealthDepthReceived,
     tradesReceived: realtimeHealthTradesReceived,
     marketRenders: realtimeHealthMarketRenders,
@@ -4133,18 +4175,7 @@ function reportRealtimeRenderHealth(now: number) {
     maxApplyGapMs: Math.round(realtimeHealthMaxApplyGapMs),
     fallbackFlushes: realtimeHealthFallbackFlushes,
   }).catch((error) => console.warn('market.realtime.render_health_error', { error: String(error) }));
-  realtimeHealthStartedAt = now;
-  realtimeHealthBarsReceived = 0;
-  realtimeHealthBarsApplied = 0;
-  realtimeHealthDepthReceived = 0;
-  realtimeHealthTradesReceived = 0;
-  realtimeHealthMarketRenders = 0;
-  realtimeHealthMaxQueueMs = 0;
-  realtimeHealthMaxEventAgeMs = 0;
-  realtimeHealthMaxFrameMs = 0;
-  realtimeHealthMaxArrivalGapMs = 0;
-  realtimeHealthMaxApplyGapMs = 0;
-  realtimeHealthFallbackFlushes = 0;
+  resetRealtimeHealthWindow(now);
 }
 
 function flushMarketDataEvents(now: number) {
@@ -4181,10 +4212,13 @@ function flushRealtimeFrame(now: number, fallback = false) {
   cancelRealtimeFrameSchedule();
   if (fallback) realtimeHealthFallbackFlushes += 1;
   const frameStartedAt = performance.now();
-  const pendingBar = pendingRealtimeBar;
-  pendingRealtimeBar = null;
-  if (pendingBar) {
+  const pendingBars = [...pendingRealtimeBars.values()]
+    .sort((left, right) => left.event.bar.time - right.event.bar.time);
+  pendingRealtimeBars = new Map();
+  const appliedEvents: RealtimeBarEvent<Bar>[] = [];
+  for (const { event: pendingBar, queuedAt } of pendingBars) {
     if (applyRealtimeBar(pendingBar)) {
+      appliedEvents.push(pendingBar);
       if (realtimeHealthLastApplyAt > 0) {
         realtimeHealthMaxApplyGapMs = Math.max(
           realtimeHealthMaxApplyGapMs,
@@ -4193,9 +4227,22 @@ function flushRealtimeFrame(now: number, fallback = false) {
       }
       realtimeHealthLastApplyAt = frameStartedAt;
       realtimeHealthBarsApplied += 1;
-      realtimeHealthMaxQueueMs = Math.max(realtimeHealthMaxQueueMs, frameStartedAt - pendingRealtimeBarQueuedAt);
+      realtimeHealthMaxQueueMs = Math.max(realtimeHealthMaxQueueMs, frameStartedAt - queuedAt);
       realtimeHealthMaxEventAgeMs = Math.max(realtimeHealthMaxEventAgeMs, Date.now() - pendingBar.eventTimeMs);
     }
+  }
+  const lastAppliedEvent = appliedEvents.at(-1);
+  const closedBoundary = lastAppliedEvent
+    ? appliedEvents.find((event) => event.closed && event.bar.time < lastAppliedEvent.bar.time)
+    : undefined;
+  if (closedBoundary) {
+    console.debug('market.realtime.bar_boundary_applied', {
+      symbol: closedBoundary.symbol,
+      resolution: closedBoundary.resolution,
+      closedBarTime: closedBoundary.bar.time,
+      nextBarTime: lastAppliedEvent?.bar.time,
+      batchSize: appliedEvents.length,
+    });
   }
   if (pendingRealtimeDepth || pendingRealtimeTrades.length) {
     const delay = marketDataRenderDelay(now, lastMarketDataRenderAt);
@@ -4237,8 +4284,14 @@ function queueRealtimeBar(event: RealtimeBarEvent<Bar>) {
   }
   realtimeHealthLastArrivalAt = receivedAt;
   realtimeHealthBarsReceived += 1;
-  pendingRealtimeBar = event;
-  pendingRealtimeBarQueuedAt = receivedAt;
+  const existing = pendingRealtimeBars.get(event.bar.time);
+  if (existing) realtimeHealthBarsCoalesced += 1;
+  pendingRealtimeBars.set(event.bar.time, {
+    event: existing && existing.event.closed && !event.closed
+      ? existing.event
+      : event,
+    queuedAt: existing?.queuedAt ?? receivedAt,
+  });
   queueRealtimeFrame();
 }
 
