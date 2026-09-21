@@ -1,0 +1,118 @@
+// Appended only to the nonce-protected private acceptance bundle. Not a shipped entry.
+async function runUserTaskDesktopProbe(command) {
+  const get = id => document.getElementById(id);
+  const assert = (value, message) => { if (!value) throw Error(message); };
+  const wait = async (predicate, label) => {
+    const end = performance.now() + 25000;
+    while (!predicate()) { if (performance.now() > end) throw Error(`task ${label}: ${get('user-task-status').textContent}`); await new Promise(r => setTimeout(r, 25)); }
+  };
+  const click = node => { assert(node && !node.disabled, 'task control unavailable'); node.click(); };
+  // A failed acceptance action names its stage rather than losing evidence to the outer RPC timeout.
+  const stage = async (name, promise) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`task stage timeout: ${name}`)),8000);})]); }
+    finally { clearTimeout(timer); }
+  };
+  await stage('controller initialize',userTaskController.initialize());
+  const manager = getUserTaskManager(), library = getUserTaskLibrary(); await stage('library initialize',library.initialize());
+  const open = async () => {
+    await getCurrentWindow().show(); await getCurrentWindow().setFocus();
+    if (aiPanel.hidden || !widgetBar.classList.contains('open')) click(get('ai-toggle'));
+    click(get('ai-page-chat')); click(get('api-task-open')); await wait(() => !get('user-task-page').hidden, 'page visible');
+  };
+  const idle = () => wait(() => get('user-task-page').dataset.busy !== 'true', 'UI idle');
+  const card = id => document.querySelector(`[data-task-id="${id}"]`);
+  const task = () => { assert(/^[a-f0-9-]{36}$/.test(command.taskId), 'invalid fixture task'); return manager.status(command.taskId); };
+  const button = (id, action) => card(id)?.querySelector(`[data-action="${action}"]`);
+  const importTask = async source => {
+    await open(); await idle(); click(get('user-task-refresh-sources')); await idle();
+    const files = new DataTransfer(); files.items.add(new File([source], 'fixture.tft', {type:'text/plain'}));
+    get('user-task-file').files = files.files; get('user-task-file').dispatchEvent(new Event('change')); await idle();
+    assert(!get('user-task-setup').hidden, 'no task validation preview');
+    get('user-task-source').value = `user_data_${command.sourceId}`; get('user-task-source').dispatchEvent(new Event('change'));
+    assert(get('user-task-source').value === `user_data_${command.sourceId}`, 'connected local source absent');
+    get('user-task-universe').value = 'catalog'; get('user-task-universe').dispatchEvent(new Event('change'));
+  };
+  switch (command.op) {
+    case 'state': return {runs:manager.list(),library:library.list()};
+    case 'run': {
+      const before = readCurrentAiChartSelection(), previous = new Set(manager.list().map(r => r.taskId));
+      await importTask(command.source); assert(manager.list().length === previous.size, 'validation ran the task');
+      click(get('user-task-start')); await idle(); const run = manager.list().find(r => !previous.has(r.taskId)); assert(run, 'task not started');
+      await wait(() => ['completed','failed','cancelled'].includes(manager.status(run.taskId).state), 'completion');
+      const status = manager.status(run.taskId); assert(status.state === 'completed', `task failure ${JSON.stringify(status)}`);
+      assert(JSON.stringify(before) === JSON.stringify(readCurrentAiChartSelection()), 'background task changed foreground chart');
+      assert(get('user-task-result-body').querySelectorAll('tbody tr').length === 2, 'real task table did not render two CSV symbols');
+      assert(!get('user-task-result').hidden && status.processed === 2, 'ordinary task result unavailable');
+      return status;
+    }
+    case 'save': {
+      const run = task(); assert(run.complete, 'cannot save incomplete fixture');
+      await open(); click(button(run.taskId,'save')); await idle();
+      const saved = library.list().find(r => r.id === manager.manifest(run.taskId).id);
+      assert(saved?.status === 'ready' && describeAiChartTools().some(t => t.wireName === saved.toolName), 'saved tool not in common registry');
+      return saved;
+    }
+    case 'results': {
+      const run = task(); await open(); click(button(run.taskId,'view'));
+      get('user-task-filter').value = '600000'; click(get('user-task-apply-filter'));
+      assert(get('user-task-result-body').querySelectorAll('tbody tr').length === 1, 'table filtering failed');
+      get('user-task-filter').value = ''; click(get('user-task-apply-filter'));
+      const artifact = get('user-task-artifact'); artifact.value = 'series'; artifact.dispatchEvent(new Event('change'));
+      assert(get('user-task-result-body').querySelector('svg circle'), 'one-point series was invisible');
+      artifact.value = 'report'; artifact.dispatchEvent(new Event('change')); assert(get('user-task-result-body').querySelector('pre').textContent.includes('研究示例'), 'plain report missing');
+      artifact.value = 'table'; artifact.dispatchEvent(new Event('change'));
+      const table = JSON.parse(manager.export(run.taskId,'table','json')); assert(table.rows.length === 2, 'full JSON artifact missing');
+      const csv = manager.export(run.taskId,'table','csv'); assert(csv.includes('SH:600000') && csv.includes('SZ:000001'), 'CSV output mismatch');
+      const previous = get('api-prompt').value; get('api-prompt').value = ''; click(get('user-task-share'));
+      const prompt = get('api-prompt').value; assert(prompt.includes('tf.task.claim') && !prompt.includes('600000'), 'AI handoff leaked table instead of scoped token');
+      assert(!get('api-chat-page').hidden && get('user-task-page').hidden, 'handoff did not return to composer');
+      get('api-prompt').value = previous; get('api-prompt').dispatchEvent(new Event('input',{bubbles:true}));
+      return {tableRows:table.rows.length,series:true,report:true,drafted:true};
+    }
+    case 'format-results': {
+      const run=task();await open();click(button(run.taskId,'view'));
+      const manifest=manager.manifest(run.taskId),scan=manifest.id==='example.window-breakout';
+      const artifact=get('user-task-artifact');artifact.value=scan?'table':'summary';artifact.dispatchEvent(new Event('change'));
+      const table=JSON.parse(manager.export(run.taskId,artifact.value,'json'));
+      assert(table.rows.length===2 && get('user-task-result-body').querySelectorAll('tbody tr').length===2,'format task table missing');
+      assert(table.rows.every(r=>r[2]===1700000000 && r[3]===1700345600 && r[4]===5),'format task range differs from native data');
+      if(scan)assert(table.rows.every(r=>r[7]===true),'scan did not use all five rows');
+      else {
+        artifact.value='equity';artifact.dispatchEvent(new Event('change'));
+        assert(get('user-task-result-body').querySelector('svg'),'backtest equity not rendered');
+        assert(manager.page(run.taskId,'equity',{}).rows.length===5,'equity series incomplete');
+        artifact.value='summary';artifact.dispatchEvent(new Event('change'));
+      }
+      const route=get('user-task-result-body').querySelector('[data-action="open-symbol"]');assert(route,'corresponding chart action missing');click(route);await idle();
+      await wait(()=>readCurrentAiChartSelection().instrument==='SH:600000','corresponding chart opened');
+      assert(manager.status(run.taskId).state==='completed' && manager.status(run.taskId).providerId.startsWith('user_data_'),'chart navigation changed task data');
+      return {rows:table.rows.length,chartOpened:true,localSource:true};
+    }
+    case 'cancel': {
+      const previous = new Set(manager.list().map(r => r.taskId)); await importTask(command.source);
+      click(get('user-task-start')); await idle(); const run = manager.list().find(r => !previous.has(r.taskId)); assert(run, 'cancellable task absent');
+      click(button(run.taskId,'cancel')); await wait(() => manager.status(run.taskId).state === 'cancelled', 'cancel drain');
+      assert(!manager.status(run.taskId).complete, 'cancelled task claimed completeness'); return manager.status(run.taskId);
+    }
+    case 'layout': {
+      await open(); setWidgetPanelWidth(command.width ?? 440); if(command.toggleTheme)click(get('theme-toggle'));
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      assert(get('user-task-page').scrollWidth <= get('user-task-page').clientWidth + 1, 'task page horizontal overflow');
+      assert(get('api-chat-page').hidden && get('api-settings-page').hidden && get('user-data-page').hidden, 'task page overlaps another page');
+      if(command.taskId) {click(button(command.taskId,'view'));get('user-task-result').scrollIntoView({block:'start'});}
+      return {width:get('user-task-page').getBoundingClientRect().width};
+    }
+    case 'restored': {
+      assert(manager.list().length === 0, 'restart automatically ran a task or persisted result rows');
+      const saved = library.list().find(r => r.id === command.taskDefinitionId); assert(saved?.status==='ready', 'saved task not restored');
+      assert(describeAiChartTools().some(t=>t.wireName===saved.toolName), 'restored task absent from registry');
+      const signal = new AbortController().signal, tx = await stage('remove prepare',library.prepareRemove(saved.id,saved.revision,
+        {context:{scope:'app',appInstanceId:aiChartAppInstanceId},signal,session:{signal},checkpoint(){}}));
+      try {await stage('remove commit',tx.commit());}catch(error){await stage('remove rollback',tx.rollback());throw error;}finally{tx.dispose?.();}
+      assert(!library.list().some(r=>r.id===command.taskDefinitionId), 'removed saved definition survived'); return {restored:true,removed:true};
+    }
+    case 'deleted': assert(library.list().length===0 && manager.list().length===0,'removed task returned after restart'); return {empty:true};
+    default: throw Error('unknown private task probe');
+  }
+}

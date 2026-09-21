@@ -1,0 +1,296 @@
+// Injected into a PRIVATE production frontend by run-ai-desktop-smoke.mjs only.
+// This file is not imported by src/main.ts or any normal Vite build.
+void (async () => {
+  const settings = __TF_A3_SETTINGS__;
+  const endpoint = `/__tf_a3/${settings.nonce}`;
+  const phase = (await (await fetch(endpoint)).json()).phase;
+  const report = async (message) => {
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...message, runId: settings.runId, phase }) });
+    if (!response.ok) throw new Error('A3 report rejected');
+  };
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const errors = [];
+  window.addEventListener('unhandledrejection', event => errors.push(String(event.reason?.stack ?? event.reason)));
+  window.addEventListener('error', event => errors.push(String(event.error?.stack ?? event.message)));
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const wait = async (predicate, name, ms = 10000) => {
+    const deadline = performance.now() + ms;
+    while (!predicate()) { if (performance.now() > deadline) throw new Error(`timeout: ${name}`); await sleep(40); }
+  };
+  const frames = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`frame wait timed out; visibility=${document.visibilityState}`)), 5000);
+    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+  });
+  const smaMatchesChart = () => {
+    const series = indicatorChartHost.series('a3-sma')[0];
+    const point = series?.data().at(-1);
+    if (!point || currentBars.length < 20 || point.time !== currentBars.at(-1).time || typeof point.value !== 'number') return false;
+    const expected = currentBars.slice(-20).reduce((sum, row) => sum + row.close, 0) / 20;
+    return Math.abs(point.value - expected) < 1e-8;
+  };
+  const smaDiagnostic = () => {
+    const series = indicatorChartHost.series('a3-sma')[0];
+    const point = series?.data().at(-1);
+    const expected = currentBars.length >= 20 ? currentBars.slice(-20).reduce((sum, row) => sum + row.close, 0) / 20 : null;
+    return { expected, lastPoint: point ?? null, latestBar: currentBars.at(-1) ?? null,
+      difference: point && typeof point.value === 'number' && expected !== null ? point.value - expected : null,
+      seriesRows: series?.data().length ?? 0, controller: userIndicatorController.list(),
+      runtime: userIndicatorRuntime.get('a3-sma') };
+  };
+  const key = 'tradeflow.ai-a3.private-test';
+  let passed = 0;
+  const test = async (name, run) => {
+    const started = performance.now(); await run(); passed++;
+    await report({ kind: 'scenario', name, elapsedMs: Math.round((performance.now() - started) * 10) / 10 });
+  };
+  const names = ['tf.chart.snapshot', 'tf.dataset.page', 'tf.dataset.release', 'tf.compute.summary', 'tf.compute.sma',
+    'tf.drawings.types', 'tf.drawings.list', 'tf.drawings.propose', 'tf.drawings.apply', 'tf.drawings.apply_existing',
+    'tf.drawings.revert', 'tf.drawings.history', 'tf.drawings.revert_saved'];
+  const grants = Object.fromEntries(names.map(name => [name,
+    ['tf.drawings.apply', 'tf.drawings.apply_existing', 'tf.drawings.revert_saved'].includes(name) ? 'ask' : 'allow']));
+  const client = (permissions = grants) => {
+    const context = readCurrentAiChartSelection();
+    const session = openAiChartSession(permissions);
+    let sequence = 0;
+    const request = (toolId, input = {}, requestId = `a3-${++sequence}`) => JSON.stringify({
+      protocolVersion: 1, requestId, toolId, context, input,
+    });
+    const call = (toolId, input, requestId) => session.invoke(request(toolId, input, requestId));
+    const ok = async (toolId, input, requestId) => {
+      const reply = await call(toolId, input, requestId);
+      assert(reply.status === 'ok', `${toolId}: ${JSON.stringify(reply)}`); return reply.data;
+    };
+    const approve = async (toolId, input) => {
+      const pending = await call(toolId, input);
+      assert(pending.status === 'approval_required', 'trusted confirmation required');
+      const reply = await session.approve(pending.requestId);
+      assert(reply.status === 'ok', `${toolId} approve: ${JSON.stringify(reply)}`); return reply.data;
+    };
+    return { session, context, request, call, ok, approve };
+  };
+  const image = async name => { await frames(); await report({ kind: 'screenshot', name,
+    png: chart.takeScreenshot(true).toDataURL('image/png') }); };
+  try {
+    await report({ kind: 'started', userAgent: navigator.userAgent });
+    await test('real WebView receives the current production CSP as an enforced HTTP header', async () => {
+      const response = await fetch(location.href);
+      assert(response.headers.get('content-security-policy') === settings.policy, 'test does not enforce production CSP');
+      let jsRejected = false;
+      try { new Function('return 42')(); } catch { jsRejected = true; }
+      assert(jsRejected, 'CSP must still reject main-WebView JavaScript evaluation');
+    });
+    await wait(() => currentBars.length >= 50 && aiDisplayedHistoryGeneration === historyRequestGate.current()
+      && indicatorStateReady && userIndicatorLibrary !== null, 'real market and application startup', 65000);
+    assert(typeof window.__TAURI_INTERNALS__ === 'object', 'requires actual Tauri; browser mocks are not acceptance');
+    await frames();
+    if (phase === 'restart') {
+      const saved = JSON.parse(localStorage.getItem(key) ?? 'null');
+      await report({ kind: 'storage-diagnostic', origin: location.origin,
+        markerPresent: saved !== null, markerMatchesRun: saved?.runId === settings.runId,
+        earlyMarkerPresent: localStorage.getItem(`${key}.boot`) === settings.runId,
+        drawingCount: currentDrawingExports().length,
+        restoredIndicator: userIndicatorRuntime.get('a3-sma') !== null });
+      assert(saved?.runId === settings.runId, 'persistent data store did not survive process restart');
+      const c = client();
+      await test('process restart restores committed drawings and receipts, not permissions', async () => {
+        const history = await c.ok('tf.drawings.history');
+        assert(JSON.stringify(history).includes(saved.changeSetId), 'committed receipt missing after restart');
+        assert(currentDrawingExports().some(row => row.id === saved.drawingId), 'drawing missing after restart');
+        const blocked = await c.call('tf.drawings.revert', { changeSetId: saved.changeSetId });
+        assert(blocked.status === 'error', 'old session ownership must not transfer');
+      });
+      await test('restart undo requires new approval and preserves unrelated manual drawing', async () => {
+        await c.approve('tf.drawings.revert_saved', { changeSetId: saved.changeSetId });
+        assert(!currentDrawingExports().some(row => row.id === saved.drawingId), 'saved undo did not remove drawing');
+        assert(currentDrawingExports().some(row => row.id === saved.manualId), 'saved undo removed unrelated manual drawing');
+      });
+      await test('new process restores exact-hash indicator through actual Worker', async () => {
+        await wait(() => userIndicatorController.list().some(row => row.instanceId === saved.indicatorId && row.running && !row.inFlight && !row.failed),
+          'persisted user indicator Worker');
+        assert(userIndicatorRuntime.get(saved.indicatorId), 'saved indicator not restored');
+        await wait(smaMatchesChart, 'restored indicator rendered values');
+      });
+      await image('after-restart-undo'); c.session.close();
+    } else {
+      assert(localStorage.getItem(key) === null && currentDrawingExports().length === 0, 'profile is not fresh; do not touch user data');
+      localStorage.setItem(`${key}.boot`, settings.runId);
+      let c = client(); let snapshot; let rows; let plan;
+      const point = (offset, price) => ({ time: currentBars.at(offset).time, price });
+      const base = currentBars.at(-1).close;
+      const horizontal = price => ({ type: 'HorizontalLine', points: [point(-30, price)], style: { color: '#ff9900' } });
+      const propose = async operations => c.ok('tf.drawings.propose', { operations });
+      await test('read actual rendered chart snapshot and calculate summary/SMA', async () => {
+        snapshot = await c.ok('tf.chart.snapshot');
+        const page = await c.ok('tf.dataset.page', { snapshotId: snapshot.snapshotId, limit: 1000 }); rows = page.bars;
+        assert(rows.length === currentBars.length && rows.every((row, i) => row.time === currentBars[i].time && row.close === currentBars[i].close), 'snapshot/host mismatch');
+        const summary = await c.ok('tf.compute.summary', { snapshotId: snapshot.snapshotId, field: 'close' });
+        assert(Math.abs(summary.mean - rows.reduce((sum, bar) => sum + bar.close, 0) / rows.length) < 1e-8, 'summary mismatch');
+        const sma = await c.ok('tf.compute.sma', { snapshotId: snapshot.snapshotId, field: 'close', period: 20, offset: rows.length - 1 });
+        assert(Math.abs(sma.points[0].value - rows.slice(-20).reduce((sum, row) => sum + row.close, 0) / 20) < 1e-8, 'SMA mismatch');
+      });
+      await test('four native shapes preview, explicit approval, readback and idempotence', async () => {
+        plan = await propose([
+          { op: 'create', drawing: horizontal(base * 1.02) },
+          { op: 'create', drawing: { type: 'TrendLine', points: [point(-100, base * 0.95), point(-5, base * 1.01)], style: { color: '#2962ff', lineWidth: 2 } } },
+          { op: 'create', drawing: { type: 'Rectangle', points: [point(-65, base * 0.97), point(-20, base * 1.01)], style: { color: '#08aa81', fill: '#08aa8133' } } },
+          { op: 'create', drawing: { type: 'Text', points: [point(-75, base * 1.03)], style: { color: '#ffffff', fontSize: 16, text: 'AI A3 · 原生绘图验收' } } },
+        ]);
+        assert(currentDrawingExports().length === 0, 'proposal changed chart');
+        await c.approve('tf.drawings.apply', { changeSetId: plan.changeSetId });
+        assert(currentDrawingExports().length === 4, 'native shapes not created');
+        await c.approve('tf.drawings.apply', { changeSetId: plan.changeSetId });
+        assert(currentDrawingExports().length === 4, 'duplicate apply created duplicates');
+      });
+      await image('four-native-shapes');
+      await test('batch undo removes only the four AI objects', async () => {
+        await c.ok('tf.drawings.revert', { changeSetId: plan.changeSetId });
+        assert(currentDrawingExports().length === 0, 'batch undo failed');
+      });
+      await test('cancelled confirmation and forged approval cannot modify chart', async () => {
+        const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+        const pending = await c.call('tf.drawings.apply', { changeSetId: p.changeSetId });
+        c.session.cancel(pending.requestId);
+        assert((await c.session.approve(pending.requestId)).status === 'error', 'cancelled task approved');
+        const forged = JSON.parse(c.request('tf.drawings.apply', { changeSetId: p.changeSetId })); forged.approved = true;
+        assert((await c.session.invoke(JSON.stringify(forged))).status === 'error', 'forged approval accepted');
+        assert(currentDrawingExports().length === 0, 'cancelled proposal landed');
+      });
+      await test('manual edit while approval is pending rejects the stale proposal', async () => {
+        const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+        await c.approve('tf.drawings.apply', { changeSetId: p.changeSetId });
+        const item = (await c.ok('tf.drawings.list'))[0];
+        const change = await propose([{ op: 'update', id: item.id, version: item.version, drawing: horizontal(base * 1.01) }]);
+        const pending = await c.call('tf.drawings.apply', { changeSetId: change.changeSetId });
+        lineTools.applyLineToolOptions({ id: item.id, toolType: 'HorizontalLine', options: { line: { color: '#ee22cc' } } });
+        commitDrawingState([item.id]);
+        const reply = await c.session.approve(pending.requestId);
+        assert(reply.status === 'error' && reply.code === 'drawing_conflict', 'stale edit overwrote manual content');
+        lineTools.removeLineToolsById([item.id]); commitDrawingState();
+      });
+      await test('real Undo/Redo UI preserves version conflicts for earlier AI receipts', async () => {
+        const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+        await c.approve('tf.drawings.apply', { changeSetId: p.changeSetId });
+        undoDrawing.click(); assert(currentDrawingExports().length === 0, 'UI Undo failed');
+        redoDrawing.click(); assert(currentDrawingExports().length === 1, 'UI Redo failed');
+        const reply = await c.call('tf.drawings.revert', { changeSetId: p.changeSetId });
+        assert(reply.status === 'error' && reply.code === 'drawing_conflict', 'UI ABA did not invalidate old receipt');
+        lineTools.removeLineToolsById(currentDrawingExports().map(row => row.id)); commitDrawingState();
+      });
+      await test('real A-B-A market switches revoke pending drawing session', async () => {
+        const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+        const pending = await c.call('tf.drawings.apply', { changeSetId: p.changeSetId });
+        const other = marketSymbols.find(item => item.providerId === 'tdx' && item.symbol === 'SZ:000001');
+        assert(other, 'test comparison symbol unavailable');
+        await Promise.all([openHistory(other, '1D', 'none'), openHistory(defaultSymbol, '1D', 'none')]);
+        await wait(() => aiDisplayedHistoryGeneration === historyRequestGate.current(), 'A-B-A final chart');
+        const reply = await c.session.approve(pending.requestId);
+        assert(reply.status === 'error' && reply.code === 'session_closed', 'old A session survived');
+        assert(currentDrawingExports().length === 0, 'late proposal changed final A'); c = client();
+      });
+      await test('real Worker imports a generated indicator without blocking chart', async () => {
+        const fixture = settings.fixtures[0];
+        await prepareUserIndicatorFile(new File([fixture.source], `${fixture.name}.tfi`, { type: 'text/plain' }));
+        assert(pendingUserIndicatorImport && !userIndicatorImportLayer.hidden, 'import preview missing');
+        await confirmUserIndicatorLibraryChange();
+        const record = userIndicatorRecords.get('fixture.sma'); assert(record, 'validated indicator was not installed');
+        userIndicatorRuntime.add({ instanceId: 'a3-sma', indicatorId: record.id, sourceHash: record.sourceHash,
+          indicatorVersion: record.indicatorVersion, inputs: { period: 20 }, visible: true }, record);
+        indicatorInstanceOrder.push('a3-sma');
+        await wait(() => userIndicatorController.list().some(row => row.instanceId === 'a3-sma' && row.running && !row.inFlight && !row.failed), 'real Worker SMA');
+        await wait(smaMatchesChart, 'initial indicator rendered values');
+        persistIndicatorState();
+      });
+      await test('active pointer gesture and drawing lock reject writes through actual UI handlers', async () => {
+        const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+        const pending = await c.call('tf.drawings.apply', { changeSetId: p.changeSetId });
+        chartStage.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+        try {
+          const result = await c.session.approve(pending.requestId);
+          assert(result.status === 'error' && result.code === 'data_not_ready', 'pointer gesture did not block write');
+        } finally { window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 })); }
+        const lock = document.querySelector('#lock-drawings'); assert(lock, 'drawing lock UI missing');
+        lock.click();
+        try {
+          const waiting = await c.call('tf.drawings.apply', { changeSetId: p.changeSetId });
+          const result = await c.session.approve(waiting.requestId);
+          assert(result.status === 'error' && result.code === 'permission_denied', 'global lock did not block write');
+        } finally { lock.click(); }
+      });
+      await test('Worker deadline/terminate rejects an infinite user program, UI still responds', async () => {
+        const { validateUserIndicatorSourceIsolated } = await import('./user-indicator-runtime/validator-client');
+        await report({ kind: 'checkpoint', name: 'infinite-validator-begin', visibility: document.visibilityState });
+        const started = performance.now();
+        const result = await validateUserIndicatorSourceIsolated('while (true) {}');
+        await report({ kind: 'checkpoint', name: 'infinite-validator-ended', ok: result.ok,
+          code: result.error?.code, elapsedMs: performance.now() - started, visibility: document.visibilityState });
+        assert(!result.ok && ['execution_timeout', 'definition_timeout'].includes(result.error.code), `unexpected loop result: ${JSON.stringify(result)}`);
+        assert(performance.now() - started < 4000, 'Worker timeout hung WebView');
+        await frames();
+        const data = await c.ok('tf.chart.snapshot'); await c.ok('tf.dataset.release', { snapshotId: data.snapshotId });
+      });
+      await test('repeated native apply/revert releases drawing primitives alongside a running indicator', async () => {
+        const baseline = drawingAttachments.checkpoint().length;
+        for (let i = 0; i < 16; i++) {
+          const p = await propose([{ op: 'create', drawing: horizontal(base) }]);
+          await c.approve('tf.drawings.apply', { changeSetId: p.changeSetId });
+          await frames();
+          await c.ok('tf.drawings.revert', { changeSetId: p.changeSetId });
+          assert(drawingAttachments.checkpoint().length === baseline, 'drawing primitive leaked');
+        }
+        assert(userIndicatorController.list().some(row => row.instanceId === 'a3-sma' && row.running && !row.failed), 'AI edits broke indicator');
+      });
+      await test('actual Binance realtime bars, immutable AI snapshots and indicator updates coexist', async () => {
+        const symbol = marketSymbols.find(item => item.providerId === 'binance_spot' && item.symbol === 'BINANCE:BTCUSDT');
+        assert(symbol, 'Binance reference symbol missing');
+        await openHistory(symbol, '1', 'none');
+        await wait(() => currentSymbol.symbol === symbol.symbol && realtimeBarRequestId === activeRealtimeRequestId
+          && realtimeConnected && aiDisplayedHistoryGeneration === historyRequestGate.current(), 'Binance live stream', 30000);
+        const live = client();
+        try {
+          const snap = await live.ok('tf.chart.snapshot');
+          const before = await live.ok('tf.dataset.page', { snapshotId: snap.snapshotId, limit: 1000 });
+          const initialRevision = aiChartDataRevision;
+          await wait(() => aiChartDataRevision > initialRevision, 'next actual realtime update', 12000);
+          const after = await live.ok('tf.dataset.page', { snapshotId: snap.snapshotId, limit: 1000 });
+          assert(equal(before.bars, after.bars), 'live tick changed existing AI snapshot');
+          await wait(() => userIndicatorController.list().some(row => row.instanceId === 'a3-sma' && row.running && !row.failed && !row.inFlight), 'live indicator update');
+          await report({ kind: 'sma-check', ...smaDiagnostic() });
+          await wait(smaMatchesChart, 'live indicator rendered values');
+          await report({ kind: 'data-check', candleRows: candleSeries.data().length,
+            indicatorRows: indicatorChartHost.series('a3-sma')[0].data().length,
+            visibleRange: chart.timeScale().getVisibleLogicalRange(), latestTime: currentBars.at(-1).time });
+          chart.timeScale().fitContent();
+          await image('binance-live-indicator');
+        } finally { live.session.close(); }
+        await openHistory(defaultSymbol, '1D', 'none');
+        await wait(() => aiDisplayedHistoryGeneration === historyRequestGate.current(), 'return to original chart');
+        c = client();
+      });
+      await test('committed scene/receipt persist together for a new process', async () => {
+        const price = currentBars.at(-1).close;
+        const p = await c.ok('tf.drawings.propose', { operations: [{ op: 'create', drawing: horizontal(price * 1.01) }] });
+        await c.approve('tf.drawings.apply', { changeSetId: p.changeSetId });
+        const manualId = lineTools.addLineTool('HorizontalLine', [{ timestamp: currentBars.at(-20).time, price: price * 0.99 }],
+          { line: { color: '#ff00aa' }, text: { value: '手工对象：重启撤销必须保留' } });
+        commitDrawingState();
+        localStorage.setItem(key, JSON.stringify({ runId: settings.runId, changeSetId: p.changeSetId,
+          drawingId: p.operations[0].id, manualId, indicatorId: 'a3-sma' }));
+      });
+      await image('before-restart'); c.session.close();
+      await report({ kind: 'storage-diagnostic', origin: location.origin,
+        markerPresent: localStorage.getItem(key) !== null,
+        drawingCount: currentDrawingExports().length,
+        restoredIndicator: userIndicatorRuntime.get('a3-sma') !== null });
+    }
+    await report({ kind: 'complete', passed, bars: currentBars.length, drawings: currentDrawingExports().length });
+    await getCurrentWindow().close();
+  } catch (error) {
+    await report({ kind: 'failure', passed, message: String(error?.message ?? error), stack: String(error?.stack ?? '').slice(0, 2500),
+      diagnostics: { bars: currentBars.length, displayedGeneration: aiDisplayedHistoryGeneration,
+        currentGeneration: historyRequestGate.current(), indicatorStateReady, libraryReady: userIndicatorLibrary !== null,
+        chartError: errorLayer.textContent, errors: errors.slice(-5), sma: smaDiagnostic() } });
+    await getCurrentWindow().close();
+  }
+})();

@@ -1,0 +1,41 @@
+# TradeFlow Lite
+
+> A desktop market-charting workspace for A-shares, crypto and prediction markets, with AI-generated indicators, selected local data and MCP tools.
+
+TradeFlow Lite is independent of TradingView and uses Lightweight Charts, not Advanced Charts or a Pine Script engine. Built-in market adapters include TDX, Binance, OKX and Polymarket, subject to provider and regional availability. Release build scripts can enable Tauri bundling, but the current source tree has no selected project-wide license; verify actual GitHub Releases and signing notes before claiming download/platform availability.
+
+Official editions use the same codebase: Global leaves TDX disabled by default, Core enables no built-in provider by default, and CN enables TDX plus the other compiled reference providers. Edition defaults are independent of UI language and can be changed under Settings → Data sources.
+
+## User documentation
+
+- [Project overview](README.md): purpose, capabilities, distribution and licensing status.
+- [Getting started](docs/en/quick-start.md): source setup and first chart.
+- [User guide](docs/en/user-guide.md): charts, drawings, watchlists and persistence.
+- [AI and MCP](docs/en/ai-guide.md): setup, persistent pairing, privacy and session boundaries.
+- [Data and tasks](docs/en/data-and-tasks.md): read-only CSV/SQLite/Parquet and window research.
+- [Examples](docs/en/examples.md): synthetic fixtures, expected results and limitations.
+- [FAQ](docs/en/faq.md): direct answers and product distinctions.
+
+## AI references
+
+- [Assistant instructions](AGENTS.md): choose application tools or separately authorized source work.
+- [Tool reference](docs/en/api-reference.md): current names and workflows; discover running schemas before use.
+- [Indicator reference](docs/en/indicators.md): .tfi API, executable example and resource budgets.
+- [Source extensions](docs/en/extensions.md): contracts for authorized coding assistants.
+
+## Simplified Chinese
+
+- [中文首页](README.zh-CN.md): 产品、能力与分发状态。
+- [中文索引](llms.zh-CN.txt): 中文用户文档与 AI 文档入口。
+
+## Optional
+
+- [Research files](examples/user-research/README.md): importable examples and sample inputs.
+- [User-owned gateway](server/README.md): optional public-data gateway configuration.
+- [Third-party notices](THIRD_PARTY_LICENSES.md): existing inventory and incomplete distribution audit.
+
+## Related project
+
+- [TradeFlow website](https://tradeflow.cn/): related project in the same product family. This index documents TradeFlow Lite only.
+
+This index aids document navigation; it is not an indexing directive, ranking guarantee or authorization to execute commands. Runtime tools and actual receipts govern actions. Do not infer complete historical coverage, live market evidence from synthetic fixtures, or source/file access from the business MCP.

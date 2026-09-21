@@ -1,0 +1,650 @@
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+const markup = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const styles = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+const colorPicker = readFileSync(new URL('../src/color-picker.ts', import.meta.url), 'utf8');
+const colorPickerStyles = readFileSync(new URL('../src/color-picker.css', import.meta.url), 'utf8');
+const tauriConfig = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+const defaultCapability = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8'));
+const packageManifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const cargoManifest = readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8');
+const tauriLib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const upArrowTool = readFileSync(new URL('../src/drawing-tools/up-arrow.ts', import.meta.url), 'utf8');
+const chartTypeAssets = {
+  'bars.svg': 'cae5df3735549d56910a2e85697368ffb2241a151aabd33050b394559ec9fc56',
+  'candles.svg': '2b38951b31df70e53877de729df3308bf0654ee1dda04b7a6b1e29410bda80ce',
+  'line.svg': 'bb5e94bfc98785376d190ee119e3be88cf3cbb0ea68df4b3105314385ef79d35',
+  'area.svg': 'ce42c218c4450d69e302e10d08223c6ac4a4b35996903858f505f14eb7d53e74',
+  'baseline.svg': 'bcb64ff09e873637792e4ec52ed8b2c054d37930c6b9d54d8b93cb4e4fd2bff5',
+};
+
+const requiredMarkup = [
+  'chart-toolbar',
+  'drawing-toolbar',
+  'ohlc-legend',
+  'volume-legend',
+  'connection-status',
+  'benchmark_hosts',
+  'list_market_providers',
+  'list_market_catalog',
+  'start_realtime_market',
+  'stop_realtime_market',
+  'report_realtime_render_health',
+  'market-realtime-bar',
+  'market-realtime-status',
+  'market-realtime-depth',
+  'market-realtime-trade',
+  'market-realtime-point',
+  'commitBarReconciliation(reconciliation',
+  'scheduleRealtimeIndicators(event)',
+  'marketDataRenderDelay(now, lastMarketDataRenderAt)',
+  'realtimeFrameFallbackTimerId = window.setTimeout',
+  'fallbackFlushes: realtimeHealthFallbackFlushes',
+  'ensureMarketRows(marketTrades, recentTrades.length',
+  'loadMarketCatalogs',
+  'marketSymbolFromCatalog',
+  'providerId: symbol.providerId',
+  'if (!range || !deepHistoryNavigationReady) return;',
+  'providerDisplayName',
+  '正在测试 19 台主站',
+  'HistogramSeries',
+  'subscribeCrosshairMove',
+  'id="open"',
+  'id="refresh"',
+  'id="theme-toggle"',
+  'class="theme-moon" viewBox="0 0 28 28"',
+  'class="theme-sun" viewBox="0 0 28 28"',
+  'applyAppTheme(nextTheme)',
+  'saveAppTheme(workspaceStorage, appTheme)',
+  'id="toggle-fullscreen"',
+  'id="market-data-toggle"',
+  'id="market-data-panel"',
+  'data-market-data-tab="depth"',
+  'data-market-data-tab="trades"',
+  'id="open-chart-settings"',
+  'id="language-select"',
+  '<option value="zh-CN">简体中文</option><option value="en-US">English</option>',
+  'observeLocalizedUi(appRoot, appLocale)',
+  'saveAppLocale(workspaceStorage, nextLocale)',
+  'if (!marketProviderSelectionChanged(requested, activeMarketProviderIds)) return false;',
+  "confirmChartSettingsButton.setAttribute('aria-busy', 'true')",
+  "console.info('settings.confirm.completed'",
+  'id="chart-settings-layer"',
+  'id="chart-settings-dialog"',
+  'data-settings-tab="symbol"',
+  'data-settings-tab="status"',
+  'data-settings-tab="scales"',
+  'data-settings-tab="appearance"',
+  'data-settings-tab="about"',
+  'data-settings-panel="about"',
+  'https://tradeflow.cn',
+  'https://github.com/hongchanho93/tradeflow-lite',
+  'https://github.com/hongchanho93/tradeflow-lite/issues',
+  'data-external-url',
+  "import { openUrl } from '@tauri-apps/plugin-opener';",
+  'event.preventDefault();',
+  'app.external_link.open_failed',
+  'packageInfo.version',
+  'data-chart-appearance-color="backgroundColor"',
+  'data-chart-appearance-color="verticalGridColor"',
+  'data-chart-appearance-color="horizontalGridColor"',
+  'data-chart-appearance-color="paneSeparatorColor"',
+  'data-chart-appearance-color="crosshairColor"',
+  'data-chart-appearance-color="axisTextColor"',
+  'data-chart-appearance-color="axisLineColor"',
+  'data-chart-appearance-opacity="backgroundOpacity"',
+  'id="confirm-chart-settings"',
+  'id="cancel-chart-settings"',
+  'id="chart-settings-time-zone"',
+  'chartSettingsTimeZone.value = tradingTimeChoice',
+  'applyTradingTimeChoice(chartSettingsTimeZone.value as TradingTimeChoice)',
+  'openChartSettings',
+  'applyChartSettings',
+  'installTfColorPickers(appRoot)',
+  'refreshTfColorPicker',
+  'data-tf-color-opacity-target="drawing-opacity"',
+  'data-tf-color-opacity-target="chart-settings-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-down-opacity"',
+  'data-tf-color-opacity-target="chart-settings-border-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-border-down-opacity"',
+  'data-tf-color-opacity-target="chart-settings-wick-up-opacity"',
+  'data-tf-color-opacity-target="chart-settings-wick-down-opacity"',
+  'data-chart-setting="bodyVisible"',
+  '...candlestickColorOptions(settings)',
+  '...candlestickColorOptions(chartSettings)',
+  'visible: candlesVisible',
+  "console.info('chart.candlestick_appearance.reapplied'",
+  'id="chart-type-menu"',
+  'data-chart-type="candles"',
+  'data-chart-type="bars"',
+  'data-chart-type="line"',
+  'data-chart-type="area"',
+  'data-chart-type="baseline"',
+  "./assets/chart-types/bars.svg?raw",
+  "./assets/chart-types/candles.svg?raw",
+  "./assets/chart-types/line.svg?raw",
+  "./assets/chart-types/area.svg?raw",
+  "./assets/chart-types/baseline.svg?raw",
+  'id="price-scale-controls"',
+  './assets/settings-hex.svg?raw',
+  'class="price-scale-gear"',
+  'data-price-scale="normal"',
+  'data-price-scale="logarithmic"',
+  'data-price-scale="percentage"',
+  'data-price-scale="indexed"',
+  'id="price-scale-auto"',
+  'id="price-scale-invert"',
+  'id="price-scale-manual"',
+  'setAutoScale',
+  'setVisibleRange',
+  'invertScale',
+  'id="time-navigation"',
+  'data-time-range="5y"',
+  'data-time-range="1m"',
+  'data-time-range="5d"',
+  'data-time-range="1d"',
+  'id="go-to-date"',
+  'class="time-navigation-calendar"',
+  'id="go-to-dialog-layer"',
+  'id="go-to-calendar-grid"',
+  'id="confirm-go-to-date"',
+  'calendarMonthDays',
+  'id="marker-tool"',
+  'id="marker-editor"',
+  'id="marker-shape"',
+  'id="marker-position"',
+  'persistMarkers',
+  'markerScope',
+  'seriesMarkerApis',
+  'managed-series-row',
+  'setSeriesOrder',
+  'id="chart-settings-previous-close"',
+  'id="edit-cost-price"',
+  'renderPriceLines',
+  'id="price-line-editor"',
+  'id="price-line-input"',
+  'id="chart-capture-menu"',
+  'takeScreenshot(true, true)',
+  'id="copy-chart"',
+  'id="save-chart"',
+  'indicator-instance-row',
+  'indicatorInstanceAction',
+  'swapPanes',
+  'data-managed-indicator="volume"',
+  'id="watchlist-add"',
+  'id="watchlist-toggle"',
+  'id="widget-bar"',
+  'class="widget-bar-pages"',
+  'class="widget-bar-tabs"',
+  'role="tablist"',
+  'aria-controls="watchlist-panel"',
+  'aria-controls="market-data-panel"',
+  'id="data-window-toggle"',
+  'aria-controls="drawing-manager"',
+  'aria-controls="data-window-panel"',
+  'id="data-window-panel"',
+  'id="data-window-open"',
+  'id="data-window-high"',
+  'id="data-window-low"',
+  'id="data-window-close"',
+  'id="data-window-volume"',
+  './assets/widget-bar/watchlist.svg?raw',
+  './assets/widget-bar/market-depth.svg?raw',
+  './assets/widget-bar/data-window.svg?raw',
+  'setActiveWidgetPanel',
+  'renderDataWindow',
+  'watchlist-panel',
+  'class="watchlist-toolbar"',
+  'id="watchlist-refresh"',
+  'id="watchlist-panel-add"',
+  'id="widget-bar-resizer"',
+  'openSymbolDialog(\'watchlist\')',
+  'addSymbolToWatchlist',
+  'createWatchlistLogo',
+  'class="watchlist-columns"',
+  'role="columnheader">名称',
+  'role="columnheader">最新价',
+  'role="columnheader">涨跌',
+  'role="columnheader">涨跌%',
+  'role="table" aria-label="自选行情"',
+  './assets/widget-bar/add-symbol.svg?raw',
+  './assets/widget-bar/refresh.svg?raw',
+  'refreshWatchlistQuotes',
+  'watchlist.quotes.refresh',
+  'moveWatchlistSymbol',
+  'id="open-indicator-picker"',
+  'id="indicator-picker-layer"',
+  'id="indicator-picker-list"',
+  'new IndicatorRegistry(builtinIndicators)',
+  'indicatorRegistry.list()',
+  'indicatorRuntime.add',
+  'indicatorChartHost',
+  'id="symbol-results"',
+  'id="symbol-search-dialog"',
+  'id="symbol-dialog-input"',
+  'data-symbol-category="all"',
+  'data-symbol-category="stock"',
+  'data-symbol-category="index"',
+  'data-symbol-category="etf"',
+  'data-symbol-category="crypto"',
+  'data-symbol-category="prediction"',
+  'id="symbol-source-trigger"',
+  'id="symbol-source-menu"',
+  'id="symbol-dialog-close"',
+  'id="prediction-rules-tab"',
+  'id="prediction-rules-view"',
+  'id="prediction-yes"',
+  'id="prediction-no"',
+  'renderPredictionRules',
+  'normalizeProbabilityHistory',
+  'listMarketSymbols',
+  'appendNextSymbolResults',
+  "symbolResults.addEventListener('scroll'",
+  'createSymbolLogo',
+  'createExchangeBadge',
+  'IntersectionObserver',
+  "image.loading = 'lazy'",
+  "image.decoding = 'async'",
+  'symbol-logo-placeholder',
+  "kind: symbol.kind",
+  'RESOLUTION_OPTIONS',
+  'id="resolution-menu"',
+  'data-favorite-resolution="${option.value}"',
+  'id="trading-time-menu"',
+  'data-trading-time="${option.value}"',
+  'tickMarkFormatter: formatChartTick',
+  "resolution: requestedResolution",
+  'data-adjustment="none"',
+  'data-adjustment="qfq"',
+  "adjustment: requestedAdjustment",
+  'fetchHistoryResponse(symbol, resolution, adjustment, 2, true, generation)',
+  'pollLatestBars',
+  'reconcileBars',
+  'INITIAL_HISTORY_BARS',
+  'deepHistoryBars',
+  'HistoryMemoryCache',
+  'historyCacheKey',
+  'shouldLoadDeepHistory',
+  'getVisibleRange',
+  'setVisibleRange',
+  'market.history.deep_ready',
+  'initialVisibleLogicalRange',
+  'createLineToolsPlugin',
+  'data-drawing-tool="TrendLine"',
+  'data-drawing-tool="Rectangle"',
+  'data-drawing-tool="Circle"',
+  'data-drawing-tool="FibRetracement"',
+  'data-drawing-tool="Ray"',
+  'data-drawing-tool="Arrow"',
+  'data-drawing-tool="HorizontalLine"',
+  'data-drawing-tool="ParallelChannel"',
+  'data-drawing-tool="Brush"',
+  'data-drawing-tool="Text"',
+  'data-drawing-tool="PriceRange"',
+  'data-drawing-tool="LongShortPosition"',
+  'data-drawing-tool="UpArrow"',
+  'data-drawing-tool="ExtendedLine"',
+  'data-drawing-tool="HorizontalRay"',
+  'data-drawing-tool="VerticalLine"',
+  'data-drawing-tool="CrossLine"',
+  'data-drawing-tool="Callout"',
+  'data-drawing-tool="Highlighter"',
+  'data-drawing-tool="Triangle"',
+  'data-drawing-tool="Path"',
+  "registerLineTool('ExtendedLine', LineToolExtendedLine)",
+  "registerLineTool('HorizontalRay', LineToolHorizontalRay)",
+  "registerLineTool('VerticalLine', LineToolVerticalLine)",
+  "registerLineTool('CrossLine', LineToolCrossLine)",
+  "registerLineTool('Callout', LineToolCallout)",
+  "registerLineTool('Highlighter', LineToolHighlighter)",
+  "registerLineTool('Triangle', LineToolTriangle)",
+  "registerLineTool('Path', LineToolPath)",
+  'drawing-properties',
+  'id="undo-drawing"',
+  'id="redo-drawing"',
+  'id="drawing-manager-toggle"',
+  "from './assets/drawing-toolbar/zoom.svg?raw'",
+  "from './assets/drawing-toolbar/cursor.svg?raw'",
+  "from './assets/drawing-toolbar/magnet.svg?raw'",
+  "from './assets/drawing-toolbar/lock.svg?raw'",
+  "from './assets/drawing-toolbar/lock-active.svg?raw'",
+  "from './assets/drawing-toolbar/undo.svg?raw'",
+  "from './assets/drawing-toolbar/redo.svg?raw'",
+  "from './assets/drawing-toolbar/object-tree.svg?raw'",
+  "from './assets/drawing-toolbar/trash.svg?raw'",
+  'data-icon-state="unlocked"',
+  'data-icon-state="locked"',
+  'id="crosshair-tool" class="rail-button active" aria-label="鼠标指针" title="鼠标指针"',
+  'drawing-manager-items',
+  'commitDrawingState',
+  'restoreDrawingScope',
+  'createSeriesMarkers',
+  'IndicatorMainSeriesHost',
+  'renderSeriesMarkers',
+  'drawing-property-grip',
+  'drawing-property-popover',
+  'drawing-tool-menu-section',
+  'subscribeLineToolsSingleClick',
+  'applyLineToolOptions',
+  'drawing-tool-menu',
+  'drawing-text-editor',
+  'drawing-mode-hint',
+];
+
+if (packageManifest.dependencies?.['@tauri-apps/plugin-opener'] !== '2.5.5') {
+  throw new Error('Tauri opener frontend plugin must be pinned to 2.5.5');
+}
+if (!cargoManifest.includes('tauri-plugin-opener = "2.5.5"')) {
+  throw new Error('Tauri opener Rust plugin must be pinned to 2.5.5');
+}
+if (!tauriLib.includes('.plugin(tauri_plugin_opener::init())')) {
+  throw new Error('Tauri opener plugin must be registered');
+}
+if (defaultCapability.permissions.includes('opener:default')) {
+  throw new Error('Default capability must not expose the broad opener permission set');
+}
+for (const forbiddenOpenerPermission of [
+  'opener:allow-default-urls',
+  'opener:allow-open-path',
+  'opener:allow-reveal-item-in-dir',
+]) {
+  if (defaultCapability.permissions.includes(forbiddenOpenerPermission)) {
+    throw new Error(`Default capability must not expose ${forbiddenOpenerPermission}`);
+  }
+}
+const scopedOpener = defaultCapability.permissions.find((permission) => (
+  typeof permission === 'object'
+  && permission !== null
+  && permission.identifier === 'opener:allow-open-url'
+));
+if (!scopedOpener || JSON.stringify(scopedOpener.allow) !== JSON.stringify([{ url: 'https://*' }])) {
+  throw new Error('Opener capability must allow only scoped HTTPS URLs');
+}
+const productionCsp = tauriConfig.app?.security?.csp;
+if (!productionCsp || typeof productionCsp !== 'object') {
+  throw new Error('Production Tauri CSP must be enabled');
+}
+if (productionCsp['connect-src'] !== "'self' ipc: http://ipc.localhost") {
+  throw new Error('Production CSP connect-src must be restricted to app IPC/self');
+}
+for (const trustedImageSource of [
+  'https://s3-symbol-logo.tradingview.com',
+  'https://basic.10jqka.com.cn',
+]) {
+  if (!productionCsp['img-src']?.includes(trustedImageSource)) {
+    throw new Error(`Production CSP must allow trusted image source ${trustedImageSource}`);
+  }
+}
+if (productionCsp['object-src'] !== "'none'" || productionCsp['frame-src'] !== "'none'") {
+  throw new Error('Production CSP must block object and frame embedding');
+}
+if (/https:\/\/\*/.test(Object.values(productionCsp).join(' '))) {
+  throw new Error('Production CSP must not allow arbitrary HTTPS webview resources');
+}
+const devCsp = tauriConfig.app?.security?.devCsp;
+if (!devCsp?.['connect-src']?.includes('ws://127.0.0.1:5173')) {
+  throw new Error('Development CSP must preserve Vite HMR websocket access');
+}
+if (!markup.includes("return url.protocol === 'https:' ? url.href : null;")) {
+  throw new Error('External URL handling must reject non-HTTPS links');
+}
+if (!markup.includes("document.querySelectorAll<HTMLAnchorElement>('[data-external-url]')")) {
+  throw new Error('All external links, including prediction resolution sources, must use scoped opener handling');
+}
+const forbiddenMarkup = [
+  'app-titlebar',
+  'workspace-tab',
+  'title-home',
+  '尚未接入',
+  'right-toolbar',
+  'range-toolbar',
+  'price-badges',
+  'market-closed',
+  'createTextWatermark',
+  'chart-brand',
+  'watermarkVisible',
+  'watermarkColor',
+  'watermarkOpacity',
+  'status-tab',
+  'ticker',
+  '卖出',
+  '买入',
+  '模拟账户',
+  '信号',
+  '快讯',
+];
+const requiredStyles = [
+  '--tv-bg: #000000',
+  '--tv-toolbar-bg: #000000',
+  '--tv-border',
+  '--tf-shell-toolbar-height: 48px',
+  '--tf-shell-drawing-width: 52px',
+  'width: 260px',
+  'height: 40px',
+  '.workspace',
+  '.symbol-results',
+  '.symbol-dialog-layer',
+  '.symbol-search-dialog',
+  '.symbol-category-tabs',
+  '.symbol-source-menu',
+  '.symbol-dialog-footer',
+  '.symbol-result-name',
+  '.symbol-result-exchange',
+  '.resolution-switcher',
+  '.adjustment-switcher',
+  '.indicator-picker-layer',
+  '.indicator-picker-dialog',
+  '.chart-control-menu',
+  '.chart-control-menu-panel',
+  'font: 14px/18px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif',
+  '.price-line-menu-item',
+  '.price-line-editor-popover',
+  '.price-scale-controls',
+  '.price-scale-menu',
+  '.price-range-editor',
+  '.time-navigation',
+  '--tf-chart-controls-height: 39px',
+  '.chart-stage { --tf-chart-content-bottom: var(--tf-chart-controls-height);',
+  '.chart-stage.time-navigation-hidden { --tf-chart-content-bottom: 0px; }',
+  '#chart { position: absolute; inset: 0 0 var(--tf-chart-content-bottom); }',
+  '.time-navigation { position: absolute; z-index: 4; left: 0; right: 0; bottom: 0; height: var(--tf-chart-controls-height);',
+  'border-top: 1px solid var(--tv-border);',
+  '.time-navigation-calendar svg { width: 20px; height: 20px;',
+  '.go-to-dialog-layer { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center;',
+  '.go-to-dialog { width: min(266px, calc(100vw - 40px)); height: min(496px, calc(100vh - 40px));',
+  '.go-to-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr);',
+  '.marker-editor-popover',
+  '.managed-series-row',
+  '.marker-object-row',
+  '.drawing-manager-section',
+  '.chart-toast',
+  '.chart-settings-appearance-colors',
+  '.watchlist-panel',
+  '.watchlist-toolbar',
+  '.watchlist-columns',
+  '.watchlist-row',
+  '.watchlist-logo',
+  '.widget-bar-resizer',
+  '.symbol-result-row.watchlist-add-mode',
+  '.watchlist-row.current',
+  '.watchlist-last',
+  '.watchlist-change',
+  '.watchlist-change-percent',
+  '.watchlist-row .positive',
+  '.watchlist-row .negative',
+  '.widget-bar',
+  '.widget-bar-pages',
+  '.widget-bar-tabs',
+  '.widget-bar-tab',
+  '.widget-bar-tab svg',
+  '.data-window-panel',
+  '.data-window-values',
+  '.market-data-panel',
+  '.market-depth-row',
+  '.market-trade-row',
+  '.prediction-rules-view',
+  '.prediction-outcomes',
+  '.drawing-toolbar',
+  '.drawing-mode-hint',
+  '.drawing-tool-menu',
+  '.drawing-text-editor',
+  '.drawing-properties',
+  '.drawing-manager',
+  '.drawing-manager-row',
+  '.rail-button[data-drawing-tool].active',
+  '.connection-status',
+  '.chart-settings-layer',
+  '.chart-settings-dialog',
+  '.chart-settings-tabs',
+  '.chart-settings-panel',
+  '.chart-settings-about',
+  '.chart-settings-footer',
+  '.time-navigation[hidden], .instrument-logo[hidden] { display: none;',
+  ':focus-visible',
+];
+
+for (const contract of requiredMarkup) {
+  if (!markup.includes(contract)) throw new Error(`missing UI contract: ${contract}`);
+}
+for (const contract of forbiddenMarkup) {
+  if (markup.includes(contract)) throw new Error(`forbidden UI contract: ${contract}`);
+}
+if (markup.includes("item.name.slice(0, 1)")) throw new Error('search result still uses first-character avatar');
+if (!markup.includes('kind.replaceChildren(createExchangeBadge(item.exchange));')) {
+  throw new Error('search result right column must contain only the exchange logo and concise exchange name');
+}
+if (markup.includes("candles: icon('<path") || markup.includes("bars: icon('<path")) {
+  throw new Error('chart type menu still uses recreated inline icons');
+}
+if (markup.includes('id="price-scale-label"')) throw new Error('price scale trigger still exposes mode text instead of the Trade Flow gear');
+if (markup.includes('id="previous-close-toggle"')) throw new Error('previous close still appears in the drawing line menu');
+if (markup.includes('id="volume-toggle"')) throw new Error('volume still appears as a standalone toolbar action');
+if (markup.includes("chart.timeScale().fitContent()")) throw new Error('fullscreen control still fits chart data instead of toggling the window');
+if (!markup.includes("await getCurrentWindow().setFullscreen(nextFullscreen)")) {
+  throw new Error('fullscreen control does not toggle the native app window');
+}
+if (!markup.includes("historyCache.delete(marketHistoryCacheKey(currentSymbol, currentResolution, currentAdjustment))")) {
+  throw new Error('manual refresh still reuses the in-memory K-line cache');
+}
+if (!markup.includes('market.history.manual_refresh')) throw new Error('manual refresh has no observable diagnostic event');
+if (markup.includes('`${symbol.providerDisplayName} · ${response.diagnostics.host}')) {
+  throw new Error('TDX provider branding still occupies the toolbar connection status');
+}
+if (markup.includes('id="time-pan-left"') || markup.includes('id="time-pan-right"') || markup.includes('id="go-to-latest"')) {
+  throw new Error('time controls must use the flat Trade Flow bottom bar instead of the former centered navigator');
+}
+if (markup.includes('goToDateInput.showPicker()')) throw new Error('go-to date must use the in-app dialog instead of the native system calendar');
+if (styles.includes('left: 50%; bottom: 6px; height: 25px') || styles.includes('transform: translateX(-50%); padding: 0 3px')) {
+  throw new Error('time controls must not return to a floating centered overlay');
+}
+if (markup.includes('title="自选">自选</button>') || markup.includes('title="盘口">盘口</button>')) {
+  throw new Error('widget bar still exposes text labels instead of original icon assets');
+}
+if (markup.includes('image.src = exchangeLogoUrl(exchange)')) throw new Error('exchange logos are still eagerly loaded');
+const mainWindow = tauriConfig.app?.windows?.[0];
+if (mainWindow?.decorations !== true) throw new Error('native window title bar is not enabled');
+if (mainWindow?.resizable !== true) throw new Error('native window resizing is not enabled');
+if (!defaultCapability.permissions?.includes('core:event:allow-listen')) {
+  throw new Error('Tauri main window cannot listen for realtime market events');
+}
+if (!defaultCapability.permissions?.includes('core:window:allow-is-fullscreen')
+  || !defaultCapability.permissions?.includes('core:window:allow-set-fullscreen')) {
+  throw new Error('Tauri main window cannot read and toggle native fullscreen state');
+}
+if (markup.includes('data-tauri-drag-region') || markup.includes('window-drag-region')) {
+  throw new Error('custom drag region remains after restoring native window chrome');
+}
+if (markup.includes('currentBars = mergeLatestBars(currentBars, [event.bar])')) {
+  throw new Error('realtime still rebuilds and sorts the complete history on every forming-bar update');
+}
+if (markup.includes('marketDepthAsks.replaceChildren();') || markup.includes('marketDepthBids.replaceChildren();')) {
+  throw new Error('realtime depth still destroys every DOM row before each update');
+}
+const openHistoryBody = markup.slice(markup.indexOf('async function openHistory('), markup.indexOf('async function pollLatestBars('));
+if (openHistoryBody.includes('scheduleDeepHistory(')) {
+  throw new Error('opening a symbol still schedules an automatic deep-history replacement over realtime');
+}
+const primarySeriesBody = markup.slice(markup.indexOf('function setPrimarySeriesData()'), markup.indexOf('function updatePrimarySeries('));
+if (primarySeriesBody.includes('candlesVisible ? chartSettings.upColor')
+  || primarySeriesBody.includes('borderUpColor: candlesVisible ? chartSettings.upColor')) {
+  throw new Error('period and symbol reloads must not overwrite saved candle opacity or independent border/wick colors');
+}
+if (markup.includes('candlestickColorOptions(settings, candlesVisible)')
+  || markup.includes('candlestickColorOptions(chartSettings, candlesVisible)')
+  || markup.includes("const hidden = 'rgba(0, 0, 0, 0)'")) {
+  throw new Error('candle visibility must use the series visible option instead of replacing saved colors with transparency');
+}
+if (!markup.includes('shouldLoadDeepHistory(range.from') || !markup.includes('scheduleDeepHistory(\n      currentSymbol,')) {
+  throw new Error('deep history must remain available when the user reaches the left history edge');
+}
+for (const contract of [
+  '#chart-type-menu > summary { width: 40px; min-width: 40px; height: 40px;',
+  '.chart-type-options { width: 156px;',
+  '.chart-type-options > button { min-height: 40px;',
+  '.chart-type-options svg, #chart-type-menu > summary svg { width: 28px; height: 28px; flex: 0 0 28px;',
+  '.chart-type-options > button.active { color: #1f1f1f; background: #f2f2f2;',
+]) {
+  if (!styles.includes(contract)) throw new Error(`chart type menu scale differs from Trade Flow: ${contract}`);
+}
+if (!colorPickerStyles.includes('.chart-settings-row .tf-color-trigger { width: 30px; height: 30px;')) {
+  throw new Error('settings color swatches must match the TF 30px square control');
+}
+for (const contract of [
+  '.price-scale-controls > summary { width: 28px; height: 28px;',
+  '.price-scale-controls > summary svg { width: 18px; height: 18px;',
+]) {
+  if (!styles.includes(contract)) throw new Error(`price scale gear differs from Trade Flow: ${contract}`);
+}
+if (styles.includes('border: 1px solid rgba(255, 255, 255, .12); border-radius: 50%; background: #f2f3f5;')) {
+  throw new Error('symbol logos still have a forced white circular frame');
+}
+if (!styles.includes('overflow: hidden; border-radius: 50%;')) {
+  throw new Error('symbol logos are not consistently circular');
+}
+for (const contract of requiredStyles) {
+  if (!styles.includes(contract)) throw new Error(`missing style contract: ${contract}`);
+}
+for (const contract of [
+  ':root.theme-light',
+  '#theme-toggle { width: 38px; height: 38px;',
+  '#theme-toggle svg { width: 28px; height: 28px;',
+  '#theme-toggle[data-mode="light"] .theme-sun',
+  'body.theme-light .chart-settings-dialog',
+  '.chart-settings-layer { position: fixed; z-index: 110; inset: 0; display: grid; place-items: center; padding: 20px; background: transparent;',
+  '.chart-settings-dialog { width: min(540px, calc(100vw - 40px)); height: min(494px, calc(100vh - 40px));',
+  'grid-template-rows: 58px minmax(0, 1fr) 58px;',
+  '.chart-settings-row { min-height: 44px; display: flex; align-items: center; justify-content: flex-start; gap: 12px;',
+  '.chart-settings-style-toggle { flex: 0 0 76px;',
+  '.chart-settings-row > span:not(.chart-settings-color-pair) { flex: 1 1 auto; white-space: nowrap; }',
+  '.chart-settings-row > input[type="checkbox"] { margin-left: auto; }',
+  'appearance: none;',
+  'body.theme-light .chart-settings-tabs button[aria-selected="true"] { color: #131722; background: #f0f3fa; }',
+  'body.theme-light .rail-button.active',
+  'background: #e8eaed;',
+  'body.theme-light .time-navigation { background: var(--tv-toolbar-bg);',
+]) {
+  if (!styles.includes(contract)) throw new Error(`missing light theme contract: ${contract}`);
+}
+for (const contract of [
+  'TF_COLOR_PALETTE',
+  'grid-template-columns: repeat(10, 16px)',
+  '.tf-color-popover',
+  '.tf-color-cell[aria-checked="true"]',
+  '.tf-color-custom-toggle',
+  '.tf-color-opacity',
+  "wrappingLabel.addEventListener('click', (event) => event.preventDefault())",
+]) {
+  if (!`${colorPicker}\n${colorPickerStyles}`.includes(contract)) throw new Error(`missing TF color picker contract: ${contract}`);
+}
+if (colorPicker.includes('showPicker(')) throw new Error('TF color picker must not open the native system color panel');
+for (const [file, expectedHash] of Object.entries(chartTypeAssets)) {
+  const content = readFileSync(new URL(`../src/assets/chart-types/${file}`, import.meta.url));
+  const actualHash = createHash('sha256').update(content).digest('hex');
+  if (actualHash !== expectedHash) throw new Error(`chart type asset differs from UI extract: ${file}`);
+}
+for (const contract of ['class LineToolUpArrow', 'class LineToolUpArrowPaneView', 'PolygonRenderer', "toolType = 'UpArrow'"]) {
+  if (!upArrowTool.includes(contract)) throw new Error(`missing up-arrow contract: ${contract}`);
+}
+
+console.log(`UI contract OK (${requiredMarkup.length + requiredStyles.length + forbiddenMarkup.length + 20 + Object.keys(chartTypeAssets).length} assertions)`);

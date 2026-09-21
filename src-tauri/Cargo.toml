@@ -1,0 +1,50 @@
+[package]
+name = "tradeflow-lite"
+version = "0.1.0"
+description = "TradeFlow Lite desktop market chart"
+edition = "2024"
+license = "MPL-2.0"
+
+[lib]
+name = "tradeflow_lite_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["provider-binance", "provider-okx", "provider-polymarket"]
+provider-binance = ["dep:tradeflow-binance-market-data"]
+provider-okx = ["dep:tungstenite"]
+provider-polymarket = []
+provider-tdx = ["dep:tradeflow-tdx"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+flate2 = "1.1.10"
+getrandom = "=0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-dialog = "=2.7.3"
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+rusqlite = { version = "=0.40.2", features = ["bundled", "hooks", "limits", "extra_check"] }
+sqlite-vfs = "=0.2.0"
+parquet = { version = "=58.1.0", default-features = false, features = ["snap", "flate2-rust_backened", "lz4", "zstd", "brotli"] }
+bytes = "1"
+snap = "1"
+zstd = "0.13"
+lz4_flex = "0.13"
+brotli = "8"
+tradeflow-binance-market-data = { path = "crates/binance-market-data", optional = true }
+tradeflow-tdx = { git = "https://github.com/hongchanho93/tradeflow-tdx.git", rev = "8b2b01905369c795e0c434288c038fe037ef519f", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "query", "rustls"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+zeroize = "1"
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native"] }
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

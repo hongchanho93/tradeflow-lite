@@ -1,0 +1,253 @@
+// This probe exists only in the private test build, never in the production app.
+void (async()=>{
+  const settings=__TF_API_TEST__;
+  const endpoint=`/__tf_api_test/${settings.nonce}`;
+  const send=async value=>{const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:settings.runId,...value})});if(!r.ok)throw Error('report failed');};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  const wait=async(fn,label,ms=20000)=>{const until=performance.now()+ms;while(!fn()){if(performance.now()>until)throw Error(`timeout: ${label}: ${document.querySelector('#api-config-status')?.textContent} / ${document.querySelector('#api-run-status')?.textContent}`);await sleep(30);}};
+  const el=id=>document.getElementById(id);
+  const click=id=>{if(!el(id)||el(id).disabled)throw Error(`disabled ${id}`);el(id).click();};
+  const input=(id,value)=>{el(id).value=value;el(id).dispatchEvent(new Event('input',{bubbles:true}));};
+  const checked=(id,value)=>{el(id).checked=value;el(id).dispatchEvent(new Event('input',{bubbles:true}));el(id).dispatchEvent(new Event('change',{bubbles:true}));};
+  const assert=(yes,msg)=>{if(!yes)throw Error(msg);};
+  let done=false, clearBrowserWorkspaceOnClose=false;
+  // Registered after the production beforeunload handler. The persistence
+  // acceptance case intentionally removes origin-scoped browser copies only
+  // after production has flushed them, proving the next process can restore
+  // from the native workspace mirror.
+  window.addEventListener('beforeunload',()=>{
+    if(!clearBrowserWorkspaceOnClose)return;
+    localStorage.removeItem(WATCHLIST_STORAGE_KEY);
+    localStorage.removeItem(INDICATOR_STATE_STORAGE_KEY);
+  });
+  try{
+    assert(window.__TAURI_INTERNALS__,'real Tauri required');
+    await wait(()=>currentBars.length>20&&aiDisplayedHistoryGeneration===historyRequestGate.current(),'chart',65000);
+    await send({kind:'ready'});
+    while(!done){const command=await (await fetch(endpoint)).json();if(!command){await sleep(30);continue;}
+      let result={};
+      try{
+        switch(command.action){
+          case 'user-data': result = await runUserDataDesktopProbe(command); break;
+          case 'user-task': result = await runUserTaskDesktopProbe(command); break;
+          case 'open':await wait(()=>!el('api-save').disabled&&el('api-config-status').textContent!=='正在恢复已保存连接','automatic connection restore');click('ai-toggle');assert(!el('ai-api-root').hidden&&el('api-settings-page').hidden,'default chat view');assert(el('api-send').disabled,'no unconfigured send');break;
+          case 'configure':{
+            click('api-new-chat');click('api-settings-open');el('api-settings').open=true;
+            input('api-protocol',command.protocol);input('api-endpoint',`${location.origin}/fixture-api/${command.protocol}/${command.mode??'ok'}`);
+            input('api-model','fixture');input('api-key','tf-test-only-key');checked('api-no-key',false);
+            checked('api-local-http',true);checked('api-stream',command.stream??true);input('api-token-field','max_tokens');
+            el('api-config-form').requestSubmit();await wait(()=>!el('api-save').disabled&&!el('api-settings').open,'apply configuration');
+            assert(el('api-key').value==='','password not cleared');assert(el('api-settings-page').hidden,'save did not return to chat');
+            assert(el('api-connect').hidden,'saved configuration did not become active');break;
+          }
+          case 'probe':result={removed:true};break;
+          case 'persist-connection':{
+            assert(el('api-config-status').textContent==='已配置','secure persistence failed');
+            assert(el('api-key').value==='','saved Key returned to input');result={persisted:true};break;
+          }
+          case 'restored-connection':{
+            await wait(()=>!el('api-save').disabled&&el('api-config-status').textContent!=='正在恢复已保存连接','startup restore');
+            assert(el('api-config-status').textContent==='已配置','connection did not restore automatically');
+            assert(el('api-model').value==='fixture'&&el('api-endpoint').value===`${location.origin}/fixture-api/chat/ok`,'restored destination mismatch');
+            assert(el('api-key').value===''&&el('api-key').placeholder.includes('已保留'),'restored key was exposed or discarded');
+            assert(!el('api-messages').textContent,'old conversation restored unexpectedly');
+            if(aiPanel.hidden||!widgetBar.classList.contains('open'))click('ai-toggle');
+            assert(el('api-connect').hidden,'restored connection still requires another click');
+            assert(el('api-settings-page').hidden,'restored profile did not stay in chat');result={restored:true};break;
+          }
+          case 'forget-connection':{
+            await invoke('ai_api_forget');result={forgotten:true};break;
+          }
+          case 'empty-connection':{
+            await wait(()=>!el('api-save').disabled&&el('api-config-status').textContent!=='正在恢复已保存连接','startup after deletion');
+            assert(el('api-config-status').textContent==='尚未配置 API','deleted credential was resurrected');
+            assert(el('api-key').value===''&&el('api-send').disabled,'deleted connection usable');break;
+          }
+          case 'storage-attempt':{
+            click('api-new-chat');click('api-settings-open');el('api-settings').open=true;input('api-key','tf-test-only-key');
+            el('api-config-form').requestSubmit();await wait(()=>!el('api-save').disabled&&!el('api-config-status').textContent.includes('正在保存'),'secure storage attempt');
+            const status=el('api-config-status').textContent;result={saved:status==='已配置',status};
+            assert(el('api-key').value==='','key not cleared after storage attempt');
+            if(!result.saved){assert(status.includes('系统凭证库'),'unexpected storage failure');assert(el('api-send').disabled,'failed persistence silently enabled a config');}
+            break;
+          }
+          case 'business-state': result = { selection: readCurrentAiChartSelection(), watchlist: [...watchlistSymbols],
+            indicators: allIndicatorInstances().map(item => ({ instanceId: item.instanceId, indicatorId: item.indicatorId })),
+            library: [...userIndicatorRecords.keys()] }; break;
+          case 'workspace-seed':{
+            await wait(()=>indicatorStateReady,'indicator state ready');
+            const item=marketSymbols.find(symbol=>symbol.providerId==='tdx'&&symbol.symbol==='SZ:000001');
+            assert(item,'workspace fixture symbol missing');
+            addSymbolToWatchlist(item);
+            setIndicatorActive('ma',true);
+            persistIndicatorState(true);
+            await workspaceStorage.flush();
+            const native=await invoke('workspace_state_load');
+            const key=watchlistSymbolKey(item.providerId,item.symbol);
+            assert(watchlistSymbols.includes(key),'watchlist seed missing');
+            assert(allIndicatorInstances().some(row=>row.indicatorId==='builtin.ma'),'indicator seed missing');
+            assert(typeof native[WATCHLIST_STORAGE_KEY]==='string'&&typeof native[INDICATOR_STATE_STORAGE_KEY]==='string','native workspace seed missing');
+            clearBrowserWorkspaceOnClose=true;
+            result={key};break;
+          }
+          case 'workspace-verify':{
+            await wait(()=>indicatorStateReady,'restored indicator state');
+            assert(command.key&&watchlistSymbols.includes(command.key),'watchlist did not restore from native workspace');
+            assert(allIndicatorInstances().some(row=>row.indicatorId==='builtin.ma'),'indicator did not restore from native workspace');
+            assert(localStorage.getItem(WATCHLIST_STORAGE_KEY)!==null,'watchlist native restore did not hydrate browser facade');
+            assert(localStorage.getItem(INDICATOR_STATE_STORAGE_KEY)!==null,'indicator native restore did not hydrate browser facade');
+            result={watchlist:true,indicator:true};break;
+          }
+          case 'send':{
+            assert(!el('api-mode')&&!el('api-tools'),'obsolete mode or tool switch');
+            const userCount=document.querySelectorAll('#api-messages [data-role="user"]').length;
+            input('api-prompt',command.text??'DESKTOP_FLOW');click('api-send');
+            // The controller coalesces renders for 40ms. A previous turn's
+            // completed state is not evidence that this new send has started.
+            await wait(()=>el('ai-api-root').dataset.runFailed==='true'||(
+              document.querySelectorAll('#api-messages [data-role="user"]').length===userCount+1&&(
+              !el('api-cancel').disabled||el('ai-api-root').dataset.runState==='completed')),'new task start');break;
+          }
+          case 'single-mode':{
+            assert(!el('api-mode')&&!el('api-mode-hint')&&!el('api-tools'),'obsolete permission controls');
+            assert(!el('api-chat-page').querySelector('select'),'chat page contains a hidden mode selector');
+            assert(!el('api-consent')&&!el('api-remember'),'obsolete consent/persistence controls');
+            assert(!document.body.textContent.includes('连接管理与测试')&&!document.body.textContent.includes('权限与会话说明'),'obsolete management layers visible');
+            assert(!document.querySelector('[data-api-action="approve"]'),'chart task required a mode-specific approval');break;
+          }
+          case 'task-entry-hidden':{
+            assert(el('api-task-open').hidden,'standalone task entry is visible in ordinary chat');
+            result={hidden:true};break;
+          }
+          case 'result-file-save':{
+            const session=openAiChartSession({'tf.result.save_file':'allow'});
+            try{
+              const reply=await session.invoke(JSON.stringify({protocolVersion:1,requestId:'desktop-result-file',toolId:'tf.result.save_file',context:{scope:'app',appInstanceId:aiChartAppInstanceId},input:{source:'text',destination:'desktop',folder:'研究结果',filename:'AI测试报告',format:'markdown',content:'# AI测试报告\n真实桌面写文件验证'}}));
+              assert(reply.status==='ok',`result file save failed: ${JSON.stringify(reply)}`);
+              result=reply.data;
+            }finally{session.close();}
+            break;
+          }
+          case 'tool-text-notice':{
+            await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','text-only tool reply');
+            assert(el('api-run-status').textContent.includes('没有实际执行'),'missing text-only tool warning');
+            assert(!document.querySelector('#api-messages [data-role="tool"]'),'text-only markup was executed');
+            input('api-prompt','后续问题');assert(!el('api-send').disabled,'text-only reply locked the conversation');input('api-prompt','');result={drawings:currentDrawingExports().length};break;
+          }
+          case 'tool-loop-stopped':{
+            await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','tool loop stopped');
+            assert(el('api-run-status').textContent.includes('重复执行相同工具'),'missing tool loop warning');
+            input('api-prompt','LOOP_RECOVER');assert(!el('api-send').disabled,'tool loop stop locked the conversation');input('api-prompt','');
+            result={status:el('api-run-status').textContent};break;
+          }
+          case 'tool-repair-complete':{
+            await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','tool repair complete');
+            const text=el('api-transcript').textContent;
+            assert(text.includes('请求参数未通过校验'),'invalid tool attempt was not surfaced as a readable tool result');
+            assert(text.includes('工具参数自动修复完成'),'model did not finish after repairing its tool arguments');
+            assert(el('ai-api-root').dataset.runFailed==='false','tool argument repair marked the chat failed');
+            input('api-prompt','还能继续');assert(!el('api-send').disabled,'repaired tool turn locked the conversation');input('api-prompt','');
+            result={text};break;
+          }
+          case 'complete':await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','complete');assert(el('api-transcript').textContent.includes(command.text??'合成验证完成'),`missing expected reply: ${command.text??'合成验证完成'}`);result={drawings:currentDrawingExports().length,text:el('api-transcript').textContent};break;
+          case 'large-output-complete':{
+            await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','large output complete',90000);
+            const text=el('api-transcript').textContent;
+            assert(text.includes('LARGE_OUTPUT_BEGIN')&&text.includes('LARGE_OUTPUT_END'),'large output was truncated by Lite');
+            result={length:text.length};break;
+          }
+          case 'cancel':click('api-cancel');await wait(()=>el('api-cancel').disabled,'cancel');result={status:el('api-run-status').textContent,drawings:currentDrawingExports().length};break;
+          case 'error':await wait(()=>el('ai-api-root').dataset.runFailed==='true'&&el('ai-api-root').dataset.runBusy==='false','error');result={text:el('api-run-status').textContent};break;
+          case 'dynamic-registry':result=await runDynamicRegistryProbe(command);break;
+          case 'status':result={drawings:currentDrawingExports().length,sendDisabled:el('api-send').disabled,configuration:el('api-config-status').textContent,text:el('api-transcript').textContent};break;
+          case 'manual-switch':{
+            await openHistory(marketSymbols.find(s=>s.providerId==='tdx'&&s.symbol==='SZ:000001'),'1D','none');
+            await wait(()=>el('ai-api-root').dataset.runBusy==='false','manual chart switch settle');
+            assert(el('ai-api-root').dataset.runFailed==='false','manual chart switch incorrectly failed the conversation');
+            assert(el('api-run-status').textContent.includes('当前对话已保留'),'manual switch did not preserve chat');
+            result={state:el('ai-api-root').dataset.runState,status:el('api-run-status').textContent};break;
+          }
+          case 'switch-resolution-while-busy':{
+            assert(el('ai-api-root').dataset.runBusy==='true','model turn was not busy before manual period switch');
+            const before=readCurrentAiChartSelection();
+            const symbol=marketSymbols.find(s=>s.providerId===before.provider&&s.symbol===before.instrument);
+            assert(symbol,'current symbol missing for manual period switch');
+            const nextResolution=before.resolution==='1W'?'1D':'1W';
+            await openHistory(symbol,nextResolution,before.adjustment);
+            await wait(()=>readCurrentAiChartSelection().resolution===nextResolution&&aiDisplayedHistoryGeneration===historyRequestGate.current(),'manual period switch');
+            assert(el('ai-api-root').dataset.runBusy==='true','manual period switch aborted the in-flight model turn');
+            assert(el('ai-api-root').dataset.runFailed==='false','manual period switch failed the conversation');
+            result={before:before.resolution,after:nextResolution,busy:true};break;
+          }
+          case 'new-chat':click('api-new-chat');await wait(()=>el('api-messages').children.length===0,'new chat');break;
+          case 'history-open-first':{
+            click('api-history-open');await wait(()=>!el('api-history-page').hidden&&el('api-history-list').children.length>0,'history list');
+            const count=el('api-history-list').children.length;
+            el('api-history-list').children[0].click();
+            await wait(()=>!el('api-chat-page').hidden&&el('api-messages').children.length>0,'history reopen');
+            result={count,text:el('api-transcript').textContent};break;
+          }
+          case 'usability':{
+            const history=el('api-messages').textContent;input('api-prompt','保留这份草稿');
+            click('api-settings-open');assert(el('api-chat-page').hidden&&!el('api-settings-page').hidden,'settings is not a separate page');
+            click('api-settings-back');assert(el('api-prompt').value==='保留这份草稿'&&el('api-messages').textContent===history,'navigation lost draft or history');
+            for(const modifiers of [{shiftKey:true},{isComposing:true}]){
+              const key=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true,...modifiers});el('api-prompt').dispatchEvent(key);
+              assert(!key.defaultPrevented&&el('api-prompt').value==='保留这份草稿','newline or composition Enter sent the draft');
+            }
+            const promptBottom=el('api-prompt').getBoundingClientRect().bottom;
+            const long=document.createElement('div');long.textContent='用于滚动测试的回复。\n'.repeat(500);long.style.whiteSpace='pre-wrap';el('api-messages').append(long);
+            assert(Math.abs(el('api-prompt').getBoundingClientRect().bottom-promptBottom)<1,'long history displaced composer');long.remove();
+            input('api-prompt','');break;
+          }
+          case 'resume':{
+            await wait(()=>el('ai-api-root').dataset.runFailed==='true'&&el('ai-api-root').dataset.runBusy==='false','resumable failure');
+            assert(!el('api-resume').hidden&&!el('api-resume').disabled,'missing explicit resume');
+            result.before=currentDrawingExports().length;click('api-resume');
+            await wait(()=>el('ai-api-root').dataset.runState==='completed'&&el('ai-api-root').dataset.runBusy==='false','resumed answer');
+            result.after=currentDrawingExports().length;assert(result.after===result.before,'resume duplicated a drawing');break;
+          }
+          case 'change-endpoint-without-key':
+            click('api-new-chat');click('api-settings-open');el('api-settings').open=true;input('api-endpoint',`${location.origin}/fixture-api/chat/401`);input('api-key','');el('api-config-form').requestSubmit();
+            await wait(()=>el('api-config-status').textContent.includes('重新输入 Key'),'key binding');assert(el('api-send').disabled,'failed save was usable');break;
+          case 'switch':await openHistory(marketSymbols.find(s=>s.providerId==='tdx'&&s.symbol==='SZ:000001'),'1D','none');break;
+          case 'mcp-owner':{
+            click('api-settings-open');el('api-mcp-settings').open=true;click('ai-mcp-start');await wait(()=>!el('ai-mcp-configuration').hidden,'MCP listener');
+            let copied;const before=Object.getOwnPropertyDescriptor(navigator,'clipboard');Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{copied=text;}}});
+            try{el('ai-mcp-client-format').value='json';click('ai-mcp-copy');await wait(()=>copied,'copy');result={port:Number(JSON.parse(copied).mcpServers.tradeflow_lite.env.TRADEFLOW_MCP_PORT)};}
+            finally{if(before)Object.defineProperty(navigator,'clipboard',before);else delete navigator.clipboard;}
+            click('api-settings-back');break;
+          }
+          case 'screenshot':
+            await getCurrentWindow().show();await getCurrentWindow().setFocus();
+            await wait(()=>document.visibilityState==='visible','test window visibility');
+            setWidgetPanelWidth(command.width??440);if(command.light)click('theme-toggle');
+            click(command.config?'api-settings-open':'api-settings-back');el('api-settings').open=false;
+            el(command.config?'api-settings-page':'api-transcript').scrollTop=0;
+            try {
+              await wait(()=>Math.abs(widgetBar.getBoundingClientRect().width-45-Number.parseFloat(widgetBar.style.getPropertyValue('--tf-widget-panel-width')))<0.5,'sidebar resize completion');
+            } catch(error) {
+              throw Error(`${error.message} ${JSON.stringify({open:widgetBar.className,visibility:document.visibilityState,
+                width:widgetBar.getBoundingClientRect().width,target:widgetBar.style.getPropertyValue('--tf-widget-panel-width'),
+                tabs:widgetBar.querySelector('.widget-bar-tabs').getBoundingClientRect().width,
+                innerWidth:window.innerWidth,grid:getComputedStyle(widgetBar.parentElement).gridTemplateColumns})}`);
+            }
+            await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('layout frames unavailable')),5000);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve();}));});
+            assert(el('ai-api-root').scrollWidth<=el('ai-api-root').clientWidth+1,`API page horizontal overflow: ${JSON.stringify({
+              client:el('ai-api-root').clientWidth,scroll:el('ai-api-root').scrollWidth,
+              outside:[...el('ai-api-root').querySelectorAll('*')].filter(node=>node.getBoundingClientRect().right>el('ai-api-root').getBoundingClientRect().right+1)
+                .map(node=>({id:node.id,tag:node.tagName,width:node.getBoundingClientRect().width,right:node.getBoundingClientRect().right})).slice(0,12)
+            })}`);
+            if(!command.config){const root=el('ai-api-root').getBoundingClientRect(),prompt=el('api-prompt').getBoundingClientRect(),transcript=el('api-transcript').getBoundingClientRect();
+              assert(prompt.bottom<=root.bottom&&prompt.top>transcript.top,'composer outside panel');assert(transcript.height>root.height*.4,'message area is too small');}
+            break;
+          case 'finish':
+            click('api-new-chat');if(!el('ai-mcp-stop').hidden){click('ai-mcp-stop');await wait(()=>!el('ai-mcp-start').hidden,'MCP stop');}done=true;break;
+          default:throw Error('unknown private command');
+        }
+        await send({kind:'answer',id:command.id,result});
+      }catch(e){await send({kind:'answer',id:command.id,error:e.message});throw e;}
+    }
+    await getCurrentWindow().close();
+  }catch(e){await send({kind:'failure',message:e.message}).catch(()=>{});await getCurrentWindow().close();}
+})();

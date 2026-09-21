@@ -1,0 +1,16 @@
+defineIndicator({
+  formatVersion: 1,
+  apiVersion: 1,
+  id: 'fixture.range-pane',
+  indicatorVersion: 1,
+  name: 'Range Fixture',
+  inputs: {},
+  supports: { seriesKinds: ['ohlcv'] },
+  create(context) {
+    const pane = context.panes.create({ key: 'range', defaultHeight: 120 });
+    const histogram = context.layers.createSeries({ key: 'range', type: 'histogram', pane: pane.key, options: { color: '#787b86' } });
+    return { update(event) {
+      histogram.setValues(event.bars.map((bar) => bar.high - bar.low), { dirtyFrom: event.changedFrom });
+    } };
+  },
+});

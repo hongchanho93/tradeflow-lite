@@ -1,0 +1,97 @@
+// 教学用单品种独立账户模型，不是交易执行器或正式回测产品。
+defineTask({
+  formatVersion: 1, apiVersion: 1, id: 'example.sma-window-backtest', version: 1,
+  name: '示例：SMA窗口简化回测',
+  description: '前一根收盘信号、下一根开盘执行；逐品种独立账户、费用与滑点、末尾持仓估值。不能直接模拟A股真实成交。',
+  inputSchema: { type: 'object', properties: {
+    '均线根数': { type: 'integer', minimum: 2, maximum: 119 },
+    '初始资金': { type: 'number', minimum: 1, maximum: 1000000000 },
+    '单边费用基点': { type: 'number', minimum: 0, maximum: 100 },
+    '单边滑点基点': { type: 'number', minimum: 0, maximum: 100 },
+    '净值品种': { type: 'string', maxLength: 160 }
+  }, required: ['均线根数', '初始资金', '单边费用基点', '单边滑点基点', '净值品种'], additionalProperties: false },
+  defaults: { '均线根数': 3, '初始资金': 1000, '单边费用基点': 10, '单边滑点基点': 5, '净值品种': 'SH:600000' },
+  history: [{ id: 'daily', resolution: '1D', count: 120, adjustment: 'none' }],
+  outputs: [
+    { id: 'summary', type: 'table', title: '逐品种独立账户', columns: [
+      { id: 'symbol', title: '品种', type: 'symbol' }, { id: 'status', title: '状态', type: 'string' },
+      { id: 'start', title: '窗口起点（Unix秒）', type: 'number' }, { id: 'end', title: '窗口终点（Unix秒）', type: 'number' },
+      { id: 'bars', title: '实际根数', type: 'number' }, { id: 'final_equity', title: '期末估值', type: 'number' },
+      { id: 'return_pct', title: '窗口收益百分比', type: 'number' }, { id: 'drawdown_pct', title: '最大收盘回撤百分比', type: 'number' },
+      { id: 'buys', title: '买入次数', type: 'number' }, { id: 'sells', title: '卖出次数', type: 'number' },
+      { id: 'holding', title: '期末仍持仓', type: 'boolean' }, { id: 'shortfall', title: '短窗口', type: 'boolean' },
+      { id: 'more', title: '源有后续页', type: 'boolean' }, { id: 'finality', title: '收盘确认状态', type: 'string' }
+    ] },
+    { id: 'fills', type: 'table', title: '假设成交明细', columns: [
+      { id: 'symbol', title: '品种', type: 'symbol' }, { id: 'signal_time', title: '信号时间（Unix秒）', type: 'number' },
+      { id: 'fill_time', title: '执行时间（Unix秒）', type: 'number' }, { id: 'action', title: '方向', type: 'string' },
+      { id: 'price', title: '含滑点价格', type: 'number' }, { id: 'quantity', title: '分数数量', type: 'number' },
+      { id: 'fee', title: '费用', type: 'number' }
+    ] },
+    { id: 'equity', type: 'series', title: '指定品种净值（独立账户）' },
+    { id: 'report', type: 'report', title: '假设与限制' }
+  ],
+  create(parameters) {
+    const period = parameters['均线根数'], initial = parameters['初始资金'];
+    const feeRate = parameters['单边费用基点'] / 10000, slip = parameters['单边滑点基点'] / 10000;
+    let processed = 0, calculated = 0, equityWritten = false;
+    return {
+      onSymbol(batch) {
+        const window = batch.history.daily, rows = window.rows;
+        let status = '已计算', finalEquity = null, returnPct = null, drawdownPct = null;
+        let cash = initial, quantity = 0, sum = 0, peak = initial, drawdown = 0, buys = 0, sells = 0;
+        const fills = [], equity = [];
+        processed++;
+        if (window.seriesKind !== 'ohlcv') status = '非OHLCV';
+        else if (rows.length < period + 1) status = '数据不足';
+        else if (rows.some(row => !Number.isFinite(row.open) || row.open <= 0 || !Number.isFinite(row.close) || row.close <= 0)) status = '价格无效';
+        else {
+          calculated++;
+          for (let i = 0; i < rows.length; i++) {
+            // 此时sum只包含本行之前的period个收盘值。严禁用本行close决定本行开盘成交。
+            if (i >= period) {
+              const targetLong = rows[i - 1].close > sum / period;
+              if (targetLong && quantity === 0) {
+                const price = rows[i].open * (1 + slip);
+                quantity = cash / (price * (1 + feeRate));
+                const fee = quantity * price * feeRate;
+                cash = 0; buys++;
+                fills.push([batch.symbol, rows[i - 1].time, rows[i].time, '买入', price, quantity, fee]);
+              } else if (!targetLong && quantity > 0) {
+                const price = rows[i].open * (1 - slip), fee = quantity * price * feeRate;
+                cash = quantity * price - fee;
+                fills.push([batch.symbol, rows[i - 1].time, rows[i].time, '卖出', price, quantity, fee]);
+                quantity = 0; sells++;
+              }
+            }
+            const value = cash + quantity * rows[i].close;
+            peak = Math.max(peak, value); drawdown = Math.max(drawdown, 1 - value / peak);
+            equity.push({ time: rows[i].time, value });
+            sum += rows[i].close;
+            if (i >= period) sum -= rows[i - period].close;
+          }
+          finalEquity = equity[equity.length - 1].value;
+          returnPct = (finalEquity / initial - 1) * 100; drawdownPct = drawdown * 100;
+        }
+        const output = [{ artifactId: 'summary', rows: [[batch.symbol, status,
+          rows.length ? rows[0].time : null, rows.length ? rows[rows.length - 1].time : null, rows.length,
+          finalEquity, returnPct, drawdownPct, buys, sells, quantity > 0, Boolean(window.shortfall), Boolean(window.nextCursor),
+          typeof window.finality === 'string' ? window.finality : 'unknown']] }, { artifactId: 'fills', rows: fills }];
+        // Series的时间在整个Artifact内必须递增；不把不同品种同一天的数据拼在一起。
+        if (batch.symbol.symbol === parameters['净值品种'] && equity.length) {
+          equityWritten = true; output.push({ artifactId: 'equity', rows: equity });
+        }
+        return output;
+      },
+      finish() {
+        return [{ artifactId: 'report', text: '处理 ' + processed + ' 个品种，实际计算 ' + calculated + ' 个；每个品种从相同初始资金单独开始，不是组合收益。\n'
+          + '信号：前一根收盘值严格高于包含它的N根SMA时持有，否则空仓；下一根开盘执行。末行信号没有下一根，不执行。\n'
+          + '费用与滑点各按买卖两侧计入；1基点=0.01%。使用分数数量、全仓或空仓、不借贷。\n'
+          + '期末按末行收盘估值，不强制平仓，不扣尚未发生的平仓成本；回撤只按收盘估值且包含初始资金高点。\n'
+          + '只使用实际返回窗口，不保证最新或完整历史。shortfall与后续页须检查；unknown不能视为已确认收盘。\n'
+          + '不模拟整手、T+1、涨跌停、停牌、成交量限制、分红复权、不同交易费用或日历；因此不能直接作为A股真实收益。\n'
+          + (equityWritten ? '净值序列仅属于指定品种。' : '指定净值品种未得到可计算数据，序列为空；不会偷偷改用其他品种。') }];
+      }
+    };
+  }
+});

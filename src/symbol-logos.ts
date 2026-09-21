@@ -1,0 +1,44 @@
+import logoManifest from './symbol-logos.json' with { type: 'json' };
+import type { MarketSymbol } from './market-universe';
+
+const LOGO_CDN = 'https://s3-symbol-logo.tradingview.com';
+// Official source: https://www.bse.cn/uploads/6/file/public/202509/20250916143055_4sxt0kkec4.pdf
+// Keeping this crop local avoids the ambiguous TradingView `source/BSE` asset.
+const BJSE_LOGO = new URL('./assets/bjse-logo.svg', import.meta.url).href;
+const CRYPTO_MARKET_LOGO = new URL('./assets/crypto-market.svg', import.meta.url).href;
+const OKX_MARKET_LOGO = `${LOGO_CDN}/source/OKX.svg`;
+const buildEdition = import.meta.env?.VITE_TRADEFLOW_LITE_EDITION || 'cn';
+const manifest = (buildEdition === 'cn' ? logoManifest : { providers: {}, logos: {} }) as {
+  providers: Record<string, string>;
+  logos: Record<string, string>;
+};
+
+export type SymbolLogoUrls = {
+  primary: string;
+  fallback: string;
+  hasIndividual: boolean;
+};
+
+export function exchangeDisplayName(exchange: MarketSymbol['exchange']): string {
+  if (exchange === 'BINANCE_USDM') return 'BINANCE';
+  if (exchange === 'OKX_SWAP') return 'OKX';
+  return exchange;
+}
+
+export function exchangeLogoUrl(exchange: MarketSymbol['exchange']): string {
+  if (exchange === 'BINANCE' || exchange === 'BINANCE_USDM') return CRYPTO_MARKET_LOGO;
+  if (exchange === 'OKX' || exchange === 'OKX_SWAP') return OKX_MARKET_LOGO;
+  if (exchange === 'BJ') return BJSE_LOGO;
+  const provider = manifest.providers[exchange];
+  return provider ? `${LOGO_CDN}/${provider}.svg` : CRYPTO_MARKET_LOGO;
+}
+
+export function symbolLogoUrls(item: MarketSymbol): SymbolLogoUrls {
+  const fallback = exchangeLogoUrl(item.exchange);
+  const logoid = manifest.logos[`${item.symbol}:${item.kind}`];
+  return {
+    primary: logoid?.startsWith('https://') ? logoid : logoid ? `${LOGO_CDN}/${logoid}--big.svg` : fallback,
+    fallback,
+    hasIndividual: Boolean(logoid),
+  };
+}

@@ -1,0 +1,186 @@
+defineIndicator({
+  formatVersion: 1,
+  apiVersion: 1,
+  id: 'user.crypto-orderflow-cvd',
+  indicatorVersion: 2,
+  name: { 'zh-CN': '数字货币订单流 CVD（User Runtime）', 'en-US': 'Crypto Order Flow CVD (User Runtime)' },
+  description: {
+    'zh-CN': '历史 CVD 使用 OHLCV 估算；实时面板使用宿主递送的逐笔成交、盘口快照和连接状态。',
+    'en-US': 'Historical CVD uses an OHLCV estimate; the live panel uses host-delivered trades, depth snapshots and market status.',
+  },
+  author: 'TradeFlow SDK test',
+  supports: {
+    seriesKinds: ['ohlcv'],
+    marketKinds: ['crypto'],
+    requires: { trades: ['trade', 'aggregate-trade'], depth: true },
+  },
+  inputs: {
+    resetMode: {
+      type: 'select', title: 'CVD 重置', default: 'day', group: '历史 CVD（估算）',
+      tooltip: '按 UTC 自然日重置，或从已加载历史的第一根开始连续累计。',
+      options: [{ value: 'day', label: '每日（UTC）' }, { value: 'none', label: '不重置' }],
+    },
+    signalLength: {
+      type: 'number', title: '信号线周期', default: 9, min: 1, max: 100, step: 1,
+      group: '历史 CVD（估算）', inline: 'signal',
+    },
+    showSignal: {
+      type: 'boolean', title: '显示信号线', default: true,
+      group: '历史 CVD（估算）', inline: 'signal',
+    },
+    buyColor: { type: 'color', title: '买方颜色', default: '#26A69A', group: '样式', inline: 'flow-colors' },
+    sellColor: { type: 'color', title: '卖方颜色', default: '#EF5350', group: '样式', inline: 'flow-colors' },
+    signalColor: {
+      type: 'color', title: '信号线颜色', default: '#FFB74D', group: '样式',
+      activeWhen: { field: 'showSignal', equals: true },
+    },
+    depthLevels: {
+      type: 'number', title: '盘口统计档数', default: 10, min: 1, max: 50, step: 1,
+      group: '实时订单流', tooltip: '统计最优买卖价向外的盘口数量；这是当前快照，不是历史委托簿。',
+    },
+    panelPosition: {
+      type: 'select', title: '实时面板位置', default: 'top-right', group: '实时订单流',
+      options: [
+        { value: 'top-left', label: '左上' }, { value: 'top-right', label: '右上' },
+        { value: 'middle-left', label: '左中' }, { value: 'middle-right', label: '右中' },
+        { value: 'bottom-left', label: '左下' }, { value: 'bottom-right', label: '右下' },
+      ],
+    },
+  },
+  create(context, inputs) {
+    const pane = context.panes.create({ key: 'cvd', defaultHeight: 190 });
+    const deltaSeries = context.layers.createSeries({
+      key: 'delta', type: 'histogram', pane: pane.key,
+      options: { priceLineVisible: false, lastValueVisible: false },
+    });
+    const cvdSeries = context.layers.createSeries({
+      key: 'cvd', type: 'line', pane: pane.key,
+      options: { color: '#B0BEC5', lineWidth: 2, priceLineVisible: false },
+    });
+    const signalSeries = context.layers.createSeries({
+      key: 'signal', type: 'line', pane: pane.key,
+      options: { color: inputs.signalColor, lineWidth: 1, priceLineVisible: false, visible: inputs.showSignal },
+    });
+    const panel = context.layers.createPanel({
+      key: 'live-orderflow', paneKey: 'main', position: inputs.panelPosition,
+    });
+
+    let buyQuantity = 0;
+    let sellQuantity = 0;
+    let unclassifiedTrades = 0;
+    let tradeCount = 0;
+    let streamEpoch = '';
+    let complete = true;
+    let dropped = 0;
+    let marketState = 'connecting';
+    let depth = null;
+
+    const fixed = (value, digits) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+      const absolute = Math.abs(value);
+      if (absolute >= 1000000000) return (value / 1000000000).toFixed(2) + 'B';
+      if (absolute >= 1000000) return (value / 1000000).toFixed(2) + 'M';
+      if (absolute >= 1000) return (value / 1000).toFixed(2) + 'K';
+      return value.toFixed(digits === undefined ? 3 : digits);
+    };
+    const estimatedDelta = (bar) => {
+      const range = bar.high - bar.low;
+      if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(bar.volume)) return 0;
+      return bar.volume * (bar.close - bar.open) / range;
+    };
+    const renderPanel = () => {
+      const levels = Math.max(1, Math.min(50, Math.round(inputs.depthLevels)));
+      let bid = 0;
+      let ask = 0;
+      if (depth) {
+        for (let index = 0; index < Math.min(levels, depth.bids.length); index += 1) bid += depth.bids[index].quantity;
+        for (let index = 0; index < Math.min(levels, depth.asks.length); index += 1) ask += depth.asks[index].quantity;
+      }
+      const bookTotal = bid + ask;
+      const imbalance = bookTotal > 0 ? (bid - ask) / bookTotal * 100 : 0;
+      const bestBid = depth && depth.bids.length ? depth.bids[0].price : null;
+      const bestAsk = depth && depth.asks.length ? depth.asks[0].price : null;
+      const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+      const delta = buyQuantity - sellQuantity;
+      const classified = buyQuantity + sellQuantity;
+      const buyShare = classified > 0 ? buyQuantity / classified * 100 : 0;
+      panel.set({
+        title: '实时订单流（订阅后）',
+        columns: [{ key: 'name', title: '项目', align: 'left' }, { key: 'value', title: '值', align: 'right' }],
+        rows: [
+          { cells: [{ text: '连接' }, { text: marketState, color: marketState === 'available' ? inputs.buyColor : inputs.signalColor }] },
+          { cells: [{ text: '主动买 / 卖' }, { text: fixed(buyQuantity) + ' / ' + fixed(sellQuantity) }] },
+          { cells: [{ text: '实时 Delta' }, { text: fixed(delta), color: delta >= 0 ? inputs.buyColor : inputs.sellColor }] },
+          { cells: [{ text: '买方占比' }, { text: buyShare.toFixed(1) + '%' }] },
+          { cells: [{ text: '盘口买卖失衡' }, { text: imbalance.toFixed(1) + '%', color: imbalance >= 0 ? inputs.buyColor : inputs.sellColor }] },
+          { cells: [{ text: '最优买 / 卖' }, { text: fixed(bestBid) + ' / ' + fixed(bestAsk) }] },
+          { cells: [{ text: '价差' }, { text: fixed(spread) }] },
+          { cells: [{ text: '样本' }, { text: String(tradeCount) + ' 笔' + (unclassifiedTrades ? ' · ' + unclassifiedTrades + ' 未分类' : '') }] },
+          { cells: [{ text: '完整性' }, { text: complete ? '连续' : '不完整 · 丢失 ' + dropped, color: complete ? undefined : inputs.signalColor }] },
+          { cells: [{ text: '历史副图' }, { text: 'OHLCV 估算' }] },
+        ],
+      });
+    };
+    const renderHistory = (event) => {
+      const deltas = new Array(event.bars.length);
+      const cvd = new Array(event.bars.length);
+      const signal = new Array(event.bars.length);
+      let accumulated = 0;
+      let currentDay = Number.NaN;
+      let rollingSum = 0;
+      let signalStart = 0;
+      const signalLength = Math.max(1, Math.round(inputs.signalLength));
+      for (let index = 0; index < event.bars.length; index += 1) {
+        const bar = event.bars[index];
+        const day = Math.floor(bar.time / 86400);
+        if (inputs.resetMode === 'day' && day !== currentDay) {
+          accumulated = 0;
+          rollingSum = 0;
+          signalStart = index;
+        }
+        currentDay = day;
+        const delta = estimatedDelta(bar);
+        accumulated += delta;
+        deltas[index] = { time: bar.time, value: delta, color: delta >= 0 ? inputs.buyColor : inputs.sellColor };
+        cvd[index] = { time: bar.time, value: accumulated };
+        rollingSum += accumulated;
+        if (index - signalStart >= signalLength) rollingSum -= cvd[index - signalLength].value;
+        signal[index] = { time: bar.time, value: rollingSum / Math.min(index - signalStart + 1, signalLength) };
+      }
+      deltaSeries.setData(deltas);
+      cvdSeries.setData(cvd);
+      signalSeries.setData(signal);
+      signalSeries.setVisible(inputs.showSignal);
+    };
+
+    return {
+      update(event) {
+        if (event.marketStatus) marketState = event.marketStatus.state;
+        if (event.depth) depth = event.depth;
+        if (event.trades) {
+          if (streamEpoch !== event.trades.streamEpoch) {
+            streamEpoch = event.trades.streamEpoch;
+            buyQuantity = 0;
+            sellQuantity = 0;
+            unclassifiedTrades = 0;
+            tradeCount = 0;
+          }
+          complete = event.trades.completeSinceSubscriptionStart;
+          dropped = event.trades.droppedSinceSubscriptionStart;
+          for (const trade of event.trades.events) {
+            tradeCount += 1;
+            if (!trade.quantityKnown || trade.quantity === undefined || trade.aggressorSide === null || trade.aggressorSide === undefined) {
+              unclassifiedTrades += 1;
+            } else if (trade.aggressorSide === 'buy') buyQuantity += trade.quantity;
+            else sellQuantity += trade.quantity;
+          }
+        }
+        const orderFlowOnly = event.reason === 'realtime'
+          && event.changedFrom >= event.bars.length
+          && (event.depth || event.trades || event.marketStatus);
+        if (!orderFlowOnly) renderHistory(event);
+        renderPanel();
+      },
+    };
+  },
+});

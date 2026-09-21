@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+src-tauri/target/
+src-tauri/crates/*/target/
+src-tauri/gen/
+*.log
+.DS_Store
+.impeccable/review/
+.playwright-cli/
+ui-design-extract/
+output/
+
+# Local-only notes and archived development documents; never publish these.
+/.local/

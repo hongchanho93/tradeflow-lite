@@ -1,0 +1,165 @@
+// Appended only to the private MCP test frontend, never imported by production.
+void (async () => {
+  const settings = __TF_MCP_TEST__;
+  const endpoint = `/__tf_mcp_test/${settings.nonce}`;
+  const send = async payload => {
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: settings.runId, ...payload }) });
+    if (!response.ok) throw Error('private test reporter failed');
+  };
+  const assert = (condition, message) => { if (!condition) throw Error(message); };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const wait = async (test, label, ms = 10000) => {
+    const until = performance.now() + ms;
+    while (!test()) { if (performance.now() > until) throw Error(`timeout: ${label}`); await sleep(30); }
+  };
+  async function prepareTestCapture() {
+    const window = getCurrentWindow();
+    await window.show(); await window.setFocus();
+    await wait(() => document.visibilityState === 'visible', 'private test window visible');
+    let painted = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => { painted = true; }));
+    await wait(() => painted, 'private test window paint');
+  }
+  const click = selector => {
+    const button = document.querySelector(selector); assert(button && !button.disabled, `button not ready: ${selector}`);
+    button.click();
+  };
+  const connection = () => document.querySelector('.ai-connection');
+  let finished = false;
+  try {
+    assert(window.__TAURI_INTERNALS__, 'real Tauri required');
+    await wait(() => currentBars.length > 20 && aiDisplayedHistoryGeneration === historyRequestGate.current(), 'actual chart startup', 65000);
+    await send({ kind: 'ready' });
+    while (!finished) {
+      const response = await fetch(endpoint);
+      const command = await response.json();
+      if (!command) { await sleep(40); continue; }
+      let result = {};
+      try {
+        switch (command.action) {
+          case 'user-data': result = await runUserDataDesktopProbe(command); break;
+          case 'prepare-capture': await prepareTestCapture(); break;
+          case 'open': {
+            await prepareTestCapture();
+            click('#ai-toggle');
+            click('#api-settings-open');
+            document.querySelector('#api-mcp-settings').open = true;
+            await wait(() => Math.abs(widgetBar.getBoundingClientRect().width - 45
+              - Number.parseFloat(widgetBar.style.getPropertyValue('--tf-widget-panel-width'))) < 1, 'sidebar transition');
+            assert(!aiPanel.hidden && watchlistPanel.hidden && marketDataPanel.hidden && drawingManager.hidden && dataWindowPanel.hidden, 'AI is not the sole page');
+            assert(aiToggle.getAttribute('aria-selected') === 'true', 'AI tab is not selected');
+            const width = aiPanel.getBoundingClientRect().width;
+            assert(width >= 279 && width <= 520, `sidebar sizing changed: ${JSON.stringify({ width,
+              bar: widgetBar.getBoundingClientRect().width, pages: widgetBarPages.getBoundingClientRect().width,
+              columns: getComputedStyle(widgetBar).gridTemplateColumns, display: getComputedStyle(aiPanel).display,
+              configured: widgetBar.style.getPropertyValue('--tf-widget-panel-width'), body: window.innerWidth })}`);
+            assert(aiPanel.scrollWidth <= width + 1, 'AI page overflows horizontally');
+            result = { width, tab: aiToggle.textContent, chartWidth: chartStage.getBoundingClientRect().width }; break;
+          }
+          case 'start':
+            click('#ai-mcp-start'); await wait(() => !document.querySelector('#ai-mcp-configuration').hidden, 'listener start'); break;
+          case 'config': {
+            // Exercise the actual copy button without touching the user's clipboard.
+            let copied;
+            const before = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+            Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { copied = text; } } });
+            try {
+              await wait(() => !document.querySelector('#ai-mcp-copy').disabled, 'MCP config ready');
+              document.querySelector('#ai-mcp-client-format').value = 'json'; click('#ai-mcp-copy');
+              await wait(() => typeof copied === 'string', 'actual config copy');
+              result = JSON.parse(copied).mcpServers.tradeflow_lite;
+            } finally {
+              if (before) Object.defineProperty(navigator, 'clipboard', before); else delete navigator.clipboard;
+            }
+            break;
+          }
+          case 'authorize': {
+            // Historical private command name. Production no longer has an
+            // authorization button; authenticated MCP initialization is enough.
+            await wait(() => connection()?.textContent.includes('已连接'), 'paired client automatic access');
+            assert(!connection().querySelector('[data-action="authorize"]'),'obsolete authorization button is visible');
+            await sleep(0); break;
+          }
+          case 'revoke': click('[data-action="revoke"]'); await sleep(0); break;
+          case 'status': result = { drawings: currentDrawingExports().length, approvals: document.querySelectorAll('.ai-approval').length,
+            connections: document.querySelectorAll('.ai-connection').length, pageHidden: aiPanel.hidden }; break;
+          case 'dynamic-registry': result = await runDynamicRegistryProbe(command); break;
+          case 'workspace-state': result = {
+            tools: describeAiChartTools().map(tool => tool.wireName ?? tool.id.replaceAll('.', '_')),
+            context: readCurrentAiChartSelection(), watchlist: [...watchlistSymbols],
+            indicatorIds: allIndicatorInstances().map(item => item.instanceId),
+            userLibraryIds: [...userIndicatorRecords.keys()],
+          }; break;
+          case 'indicator-ready': {
+            await wait(() => {
+              const instance = allIndicatorInstances().find(item => item.instanceId === command.instanceId);
+              assert(!instance?.failed, `indicator failed: ${command.instanceId}`);
+              return instance && (instance.runtimeKind === 'trusted' || userIndicatorController.list().some(item => item.instanceId === command.instanceId && item.ready));
+            }, 'user indicator ready', 12000);
+            result = { instance: allIndicatorInstances().find(item => item.instanceId === command.instanceId), panes: indicatorChartHost.paneStates(command.instanceId) }; break;
+          }
+          case 'import-and-add': {
+            const instanceId = nextIndicatorInstanceId(command.indicatorId);
+            await prepareUserIndicatorFile(new File([command.source], 'platform.tfi', { type: 'text/plain' }));
+            assert(!confirmUserIndicatorAddButton.hidden && !confirmUserIndicatorAddButton.disabled, 'import-and-add action unavailable');
+            confirmUserIndicatorAddButton.click();
+            await wait(() => {
+              assert(userIndicatorImportError.hidden, userIndicatorImportError.textContent);
+              const instance = userIndicatorRuntime.get(instanceId); assert(!instance?.failed, 'imported indicator failed');
+              return userIndicatorImportLayer.hidden && indicatorPickerLayer.hidden && userIndicatorController.list().some(item => item.instanceId === instanceId && item.ready);
+            }, 'ordinary import and add', 12000);
+            result = { instance: userIndicatorRuntime.get(instanceId), panes: indicatorChartHost.paneStates(instanceId) }; break;
+          }
+          case 'cancel-query-before-execute': {
+            const queryId = await invoke('market_query_begin', { input: { operation: 'history', providerId: 'tdx', symbol: 'SZ:000001', kind: 'stock', resolution: '1D', adjustment: 'none', count: 300 } });
+            await invoke('market_query_cancel', { queryId });
+            let rejected = false;
+            try { await invoke('market_query_execute', { queryId }); } catch (error) { rejected = String(error) === 'request_closed'; }
+            assert(rejected, 'cancelled native ticket was executed'); result = { rejected }; break;
+          }
+          case 'wait-connections':
+            try { await wait(() => document.querySelectorAll('.ai-connection').length === command.count, 'connection cleanup'); }
+            catch (error) {
+              const cards = [...document.querySelectorAll('.ai-connection')].map(card => card.textContent);
+              throw Error(`${error.message}; expected=${command.count}; actual=${cards.length}; cards=${JSON.stringify(cards)}`);
+            }
+            break;
+          case 'theme':
+            if ((document.documentElement.classList.contains('theme-light') ? 'light' : 'dark') !== command.theme) click('#theme-toggle');
+            await wait(() => document.documentElement.classList.contains('theme-light') === (command.theme === 'light'), 'theme change');
+            result = { background: getComputedStyle(aiPanel).backgroundColor }; break;
+          case 'close-page':
+            click('#ai-close'); assert(aiPanel.hidden && widgetBarPages.hidden, 'close did not collapse sidebar'); break;
+          case 'switch-aba': {
+            const other = marketSymbols.find(s => s.providerId === 'tdx' && s.symbol === 'SZ:000001'); assert(other, 'test symbol missing');
+            await openHistory(other, '1D', 'none'); await openHistory(defaultSymbol, '1D', 'none');
+            await wait(() => aiDisplayedHistoryGeneration === historyRequestGate.current(), 'chart ABA'); break;
+          }
+          case 'stop':
+            click('#ai-mcp-stop'); await wait(() => !document.querySelector('#ai-mcp-start').hidden, 'listener stop'); break;
+          case 'reset-mcp':
+            click('#ai-mcp-reset'); await wait(() => !document.querySelector('#ai-mcp-configuration').hidden, 'credential reset restart'); break;
+          case 'wait-mcp-running':
+            await wait(() => !document.querySelector('#ai-mcp-configuration').hidden, 'MCP automatic restore', 15000);
+            result = { status: document.querySelector('#ai-mcp-status').textContent }; break;
+          case 'reload':
+            setTimeout(() => location.reload(), 0); break;
+          case 'layout':
+            setWidgetPanelWidth(command.width); await sleep(180);
+            assert(aiPanel.scrollWidth <= aiPanel.getBoundingClientRect().width + 1, 'resized panel overflow');
+            result = { width: widgetBar.getBoundingClientRect().width - 45, height: aiPanel.getBoundingClientRect().height }; break;
+          case 'finish': finished = true; break;
+          default: throw Error('unsupported private test command');
+        }
+        await send({ kind: 'answer', id: command.id, result });
+      } catch (error) {
+        await send({ kind: 'answer', id: command.id, error: String(error.message ?? error) }); throw error;
+      }
+    }
+    await getCurrentWindow().close();
+  } catch (error) {
+    await send({ kind: 'failure', message: String(error.message ?? error) }).catch(() => {});
+    await getCurrentWindow().close();
+  }
+})();

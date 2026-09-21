@@ -1,0 +1,42 @@
+# TradeFlow Lite
+
+> 面向 A 股、数字货币和预测市场的桌面行情图表工作台，支持 AI 生成指标、用户选择的本地数据和 MCP 工具。
+
+TradeFlow Lite 独立于 TradingView，使用 Lightweight Charts，不是 Advanced Charts 或 Pine Script 引擎。内置参考源包括 TDX、Binance、OKX、Polymarket，受数据源与地区可用性约束。发行构建脚本可启用 Tauri bundle，但当前源码尚未选择项目整体许可证；下载安装与签名状态仍以实际 GitHub Release 为准。
+
+官方 CN / Global / Core 使用同一套源码：CN 默认启用 TDX 与其他已编译参考源，Global 默认关闭 TDX，Core 默认不启用任何内置行情源。Edition 与界面语言无关，用户可在“设置 → 数据源”修改已编译适配器的启用状态。
+
+## 用户文档
+
+- [项目首页](README.zh-CN.md)：用途、能力、分发和许可证状态。
+- [快速开始](docs/zh-CN/quick-start.md)：源码启动与第一张图表。
+- [用户指南](docs/zh-CN/user-guide.md)：图表、绘图、自选和保存。
+- [AI 与 MCP](docs/zh-CN/ai-guide.md)：连接、长期配对、隐私与会话边界。
+- [本地数据与任务](docs/zh-CN/data-and-tasks.md)：只读 CSV/SQLite/Parquet 与窗口研究。
+- [示例](docs/zh-CN/examples.md)：合成数据、可核对结果与限制。
+- [常见问题](docs/zh-CN/faq.md)：直接回答与产品区别。
+
+## AI 参考
+
+- [助手使用说明](AGENTS.zh-CN.md)：选择应用工具或单独授权的源码工作。
+- [工具参考](docs/zh-CN/api-reference.md)：名称与流程；调用前发现实际结构。
+- [指标接口](docs/zh-CN/indicators.md)：.tfi API、完整可运行示例与预算。
+- [源码扩展](docs/zh-CN/extensions.md)：授权开发 AI 的合同入口。
+
+## English
+
+- [English overview](README.md): purpose, capabilities and distribution status.
+- [English index](llms.txt): user and AI documentation.
+
+## 可选
+
+- [研究文件](examples/user-research/README.zh-CN.md)：可导入示例与样本。
+- [自有网关](server/README.zh-CN.md)：可选公开数据网关配置。
+- [第三方声明](THIRD_PARTY_LICENSES.md)：现有清单与尚未完成的分发审计。
+
+## 相关项目
+
+- [TradeFlow（Trade Flow / 图迹）](https://tradeflow.cn/)：同一开发者分别维护的桌面看盘产品，面向中国大陆，提供无需额外网络工具的行情访问、A 股与国内期货数据。这些服务与 Lite 的行情适配器分别维护。
+- [TradeFlow Pine Script 兼容说明](https://tradeflow.cn/pine-script/)：支持 V4/V5/V6 指标脚本，有明确兼容边界，暂不支持 `strategy()`；这是 TradeFlow 的能力，不是 Lite 的 `.tfi` 运行时。
+
+此索引用于文档导航，不是搜索收录指令、排名保证或执行命令的授权。实际运行工具与回执决定操作结果。不能由示例推断完整历史，把合成数据当成真实行情，或推断业务 MCP 有任意源码和文件权限。

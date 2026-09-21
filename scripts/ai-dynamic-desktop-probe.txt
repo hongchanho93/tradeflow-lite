@@ -1,0 +1,53 @@
+// Injected ONLY by isolated desktop runners. Never included in production builds.
+let dynamicProbeOwner;
+let dynamicProbeVersion = 1;
+const dynamicProbeState = { calls: 0, value: 0, retired: false, rollbackStarted: false, error: '' };
+let dynamicProbeRelease;
+let dynamicProbeRollback;
+const dynamicProbeId = 'user.desktop_dynamic.value';
+function dynamicProbeDefinition(version, write = false) {
+  const empty = { type: 'object', properties: {}, additionalProperties: false };
+  return { id: dynamicProbeId, version, title: '我的动态测试工具', scope: 'app', effect: write ? 'write' : 'read',
+    description: `Private synthetic dynamic tool, version ${version}. No market, file or network operations.`,
+    inputSchema: empty, outputSchema: { type: 'number' },
+    run() { dynamicProbeState.calls++; return version; },
+    ...(write ? { prepare() { const previous = dynamicProbeState.value; return { result: version,
+      commit() { dynamicProbeState.value = version; }, rollback() { dynamicProbeState.value = previous; } }; } } : {}),
+  };
+}
+async function runDynamicRegistryProbe(command) {
+  const op = command.op;
+  if (op === 'register') {
+    dynamicProbeOwner = createAiCapabilityOwner('desktop_dynamic');
+    dynamicProbeVersion = command.version ?? 1;
+    dynamicProbeOwner.register(dynamicProbeDefinition(dynamicProbeVersion));
+  } else if (op === 'update') {
+    dynamicProbeVersion = command.version ?? dynamicProbeVersion + 1;
+    await dynamicProbeOwner.update(dynamicProbeDefinition(dynamicProbeVersion, command.write === true));
+  } else if (op === 'long') {
+    const id = `user.desktop_dynamic.${'long_name_'.repeat(8)}`;
+    dynamicProbeOwner.register({ ...dynamicProbeDefinition(1), id });
+    return { id, ...dynamicProbeState };
+  } else if (op === 'stall') {
+    const gate = new Promise(resolve => { dynamicProbeRelease = resolve; });
+    const compensation = new Promise(resolve => { dynamicProbeRollback = resolve; });
+    dynamicProbeState.retired = false; dynamicProbeState.rollbackStarted = false;
+    await dynamicProbeOwner.update({ ...dynamicProbeDefinition(5), effect: 'write',
+      prepareAsync: async () => { const previous = dynamicProbeState.value; return { result: 5,
+        async commit() { dynamicProbeState.value = 5; await gate; },
+        async rollback() { dynamicProbeState.rollbackStarted = true; await compensation; dynamicProbeState.value = previous; },
+      }; },
+    });
+  } else if (op === 'retire-running') {
+    // Do not await in the private UI command loop: later commands release this fixture's gate.
+    void dynamicProbeOwner.update(dynamicProbeDefinition(6)).then(() => { dynamicProbeState.retired = true; },
+      error => { dynamicProbeState.error = String(error); });
+  } else if (op === 'release') dynamicProbeRelease?.();
+  else if (op === 'release-rollback') dynamicProbeRollback?.();
+  else if (op === 'remove') await dynamicProbeOwner.unregister(dynamicProbeId);
+  else if (op === 'dispose') {
+    dynamicProbeRelease?.(); dynamicProbeRollback?.();
+    await dynamicProbeOwner?.dispose(); dynamicProbeOwner = undefined;
+  } else if (op !== 'state') throw Error('unsupported dynamic fixture operation');
+  return { ...dynamicProbeState, tools: describeAiChartTools().filter(t => t.ownerId === 'desktop_dynamic').map(t => ({ id: t.id, name: t.wireName, version: t.version })) };
+}

@@ -1,0 +1,25 @@
+defineIndicator({
+  formatVersion: 1,
+  apiVersion: 1,
+  id: 'fixture.marker-style',
+  indicatorVersion: 1,
+  name: 'Marker Style Fixture',
+  inputs: {},
+  supports: { seriesKinds: ['ohlcv'] },
+  create(context) {
+    const markers = context.mainSeries.createMarkerContribution({ key: 'signals', priority: 100 });
+    const styles = context.mainSeries.createBarStyleContribution({ key: 'bars', priority: 50, chartKinds: ['candles', 'bars'] });
+    return { update(event) {
+      const outputMarkers = [];
+      const outputStyles = [];
+      for (let index = 1; index < event.bars.length; index += 1) {
+        const bar = event.bars[index];
+        const previous = event.bars[index - 1];
+        if (bar.close > previous.high) outputMarkers.push({ time: bar.time, position: 'aboveBar', shape: 'circle', color: '#2962ff', text: 'B' });
+        if (bar.close > bar.open) outputStyles.push({ time: bar.time, color: '#089981', borderColor: '#089981', wickColor: '#089981' });
+      }
+      markers.set(outputMarkers);
+      styles.set(outputStyles);
+    } };
+  },
+});

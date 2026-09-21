@@ -1,0 +1,21 @@
+defineIndicator({
+  formatVersion: 1,
+  apiVersion: 1,
+  id: 'fixture.sma',
+  indicatorVersion: 1,
+  name: 'SMA Fixture',
+  inputs: { period: { type: 'number', title: 'Period', default: 3, min: 1, max: 50, step: 1 } },
+  supports: { seriesKinds: ['ohlcv'] },
+  create(context, inputs) {
+    const line = context.layers.createSeries({ key: 'sma', type: 'line', pane: 'main', options: { color: '#2962ff' } });
+    return { update(event) {
+      const values = event.bars.map((_, index) => {
+        if (index + 1 < inputs.period) return null;
+        let sum = 0;
+        for (let cursor = index + 1 - inputs.period; cursor <= index; cursor += 1) sum += event.bars[cursor].close;
+        return sum / inputs.period;
+      });
+      line.setValues(values, { dirtyFrom: Math.max(0, event.changedFrom - inputs.period) });
+    } };
+  },
+});

@@ -1,0 +1,23 @@
+defineIndicator({
+  formatVersion: 1,
+  apiVersion: 1,
+  id: 'fixture.panel',
+  indicatorVersion: 1,
+  name: 'Panel Fixture',
+  inputs: {},
+  supports: { seriesKinds: ['ohlcv'] },
+  create(context) {
+    const panel = context.layers.createPanel({ key: 'summary', paneKey: 'main', position: 'top-right' });
+    return { update(event) {
+      const last = event.bars[event.bars.length - 1];
+      panel.set({
+        title: 'Summary',
+        columns: [{ key: 'name', title: 'Field', align: 'left' }, { key: 'value', title: 'Value', align: 'right' }],
+        rows: last ? [
+          { cells: [{ text: 'Close' }, { text: String(last.close), color: '#2962ff' }] },
+          { cells: [{ text: 'Volume' }, { text: String(last.volume) }] },
+        ] : [],
+      });
+    } };
+  },
+});

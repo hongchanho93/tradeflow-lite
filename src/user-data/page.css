@@ -1,0 +1,10 @@
+/* Reuse the existing settings page; My Data is an inline advanced section. */
+.user-data-page { padding: 8px 0 2px; }
+.user-data-settings[open] > summary { margin-bottom: 8px; }
+.user-data-card, .user-data-preview { border: 1px solid var(--tv-border); border-radius: 8px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.user-data-card > strong { display: block; font-size: 13px; font-weight: 500; }
+#ai-api-root .user-data-card details { margin: 10px 0 0; }
+.user-data-card .ai-actions { flex-wrap: wrap; }
+#user-data-add { width: 100%; }
+#user-data-preview-text { white-space: pre-wrap; user-select: text; line-height: 1.7; }
+#user-data-status:empty { display: none; }

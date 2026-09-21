@@ -1,0 +1,61 @@
+// 用户研究示例：窗口末行收盘 > 前 N 行收盘最高值。不是最新行情扫描承诺。
+defineTask({
+  formatVersion: 1, apiVersion: 1, id: 'example.window-breakout', version: 1,
+  name: '示例：窗口收盘新高扫描',
+  description: '只计算数据源实际返回窗口，列出时间范围、短窗口、后续页与收盘状态；不是买卖建议。',
+  inputSchema: { type: 'object', properties: { '回看根数': { type: 'integer', minimum: 2, maximum: 119 } },
+    required: ['回看根数'], additionalProperties: false },
+  defaults: { '回看根数': 3 },
+  history: [{ id: 'daily', resolution: '1D', count: 120, adjustment: 'none' }],
+  outputs: [
+    { id: 'table', type: 'table', title: '窗口检查结果', columns: [
+      { id: 'symbol', title: '品种', type: 'symbol' },
+      { id: 'status', title: '检查状态', type: 'string' },
+      { id: 'start', title: '窗口起点（Unix秒）', type: 'number' },
+      { id: 'end', title: '窗口终点（Unix秒）', type: 'number' },
+      { id: 'bars', title: '实际根数', type: 'number' },
+      { id: 'previous_high', title: '前N根收盘最高值', type: 'number' },
+      { id: 'last_close', title: '末行收盘值', type: 'number' },
+      { id: 'matched', title: '严格突破', type: 'boolean' },
+      { id: 'shortfall', title: '短窗口', type: 'boolean' },
+      { id: 'more', title: '源有后续页', type: 'boolean' },
+      { id: 'finality', title: '收盘确认状态', type: 'string' }
+    ] },
+    { id: 'selected', type: 'symbol_list', title: '符合条件的品种' },
+    { id: 'report', type: 'report', title: '范围与使用说明' }
+  ],
+  create(parameters) {
+    let processed = 0, matchedCount = 0, skipped = 0;
+    return {
+      onSymbol(batch) {
+        const window = batch.history.daily, rows = window.rows, n = parameters['回看根数'];
+        let status = '已计算', previousHigh = null, lastClose = null, matched = false;
+        processed++;
+        if (window.seriesKind !== 'ohlcv') status = '非OHLCV';
+        else if (rows.length < n + 1) status = '数据不足';
+        else if (rows.some(row => !Number.isFinite(row.close) || row.close <= 0)) status = '价格无效';
+        else {
+          lastClose = rows[rows.length - 1].close;
+          // 前高不包含末行；等于前高不算突破。
+          previousHigh = Math.max(...rows.slice(-n - 1, -1).map(row => row.close));
+          matched = lastClose > previousHigh;
+        }
+        if (status !== '已计算') skipped++;
+        if (matched) matchedCount++;
+        const output = [{ artifactId: 'table', rows: [[batch.symbol, status,
+          rows.length ? rows[0].time : null, rows.length ? rows[rows.length - 1].time : null, rows.length,
+          previousHigh, lastClose, matched, Boolean(window.shortfall), Boolean(window.nextCursor),
+          typeof window.finality === 'string' ? window.finality : 'unknown']] }];
+        if (matched) output.push({ artifactId: 'selected', rows: [batch.symbol] });
+        return output;
+      },
+      finish() {
+        return [{ artifactId: 'report', text: '已处理 ' + processed + ' 个品种，符合条件 ' + matchedCount + ' 个，未计算 ' + skipped + ' 个。\n'
+          + '只检查实际返回窗口的末行收盘值是否严格大于前N行收盘最高值；不是影线突破，不包含末行计算前高。\n'
+          + '短窗口不一定不能计算，但需要至少N+1行。CSV首窗口可能是最早的数据；后续页未自动读取。\n'
+          + 'unknown表示末行未得到收盘确认，不能把结果称为已收盘信号、最新行情或全市场覆盖。\n'
+          + '结果中的完整品种身份由宿主处理；打开对应图表可能使用另一内置行情源，不会改写本次数据。' }];
+      }
+    };
+  }
+});

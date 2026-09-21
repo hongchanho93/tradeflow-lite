@@ -1,0 +1,2933 @@
+use std::fmt;
+use std::future::Future;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use hickory_resolver::TokioResolver;
+use serde_json::{Value, json};
+use tungstenite::client::{IntoClientRequest, uri_mode};
+use tungstenite::protocol::WebSocketConfig;
+use tungstenite::stream::{MaybeTlsStream, Mode, NoDelay};
+use tungstenite::{Message, WebSocket, client_tls_with_config};
+
+#[cfg(test)]
+use std::net::ToSocketAddrs;
+
+const MAX_PAGE_SIZE: usize = 1_000;
+const MAX_HISTORY_COUNT: usize = 12_000;
+const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_EXCHANGE_INFO_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_STREAM_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_STREAM_CONNECT_ADDRESSES: usize = 8;
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const STREAM_CONNECT_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+const STREAM_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(2);
+const STREAM_IO_TIMEOUT: Duration = Duration::from_millis(200);
+const STREAM_RESOLVER_POLL_TIMEOUT: Duration = Duration::from_millis(20);
+
+type CancellationCheck = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+const STREAM_RESOLVER_RUNTIME_THREADS: usize = 2;
+const STREAM_RESOLVER_MAX_CONCURRENCY: usize = 8;
+
+struct ResolverService {
+    runtime: tokio::runtime::Runtime,
+    resolver: TokioResolver,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl ResolverService {
+    fn new() -> io::Result<Self> {
+        let resolver = TokioResolver::builder_tokio()
+            .map_err(|error| {
+                io::Error::other(format!("failed to read system DNS configuration: {error}"))
+            })?
+            .build()
+            .map_err(|error| {
+                io::Error::other(format!("failed to build system DNS resolver: {error}"))
+            })?;
+        Self::with_resolver(resolver)
+    }
+
+    fn with_resolver(resolver: TokioResolver) -> io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(STREAM_RESOLVER_RUNTIME_THREADS)
+            .max_blocking_threads(STREAM_RESOLVER_RUNTIME_THREADS)
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| {
+                io::Error::other(format!("failed to start Binance DNS runtime: {error}"))
+            })?;
+        Ok(Self {
+            runtime,
+            resolver,
+            permits: Arc::new(tokio::sync::Semaphore::new(STREAM_RESOLVER_MAX_CONCURRENCY)),
+        })
+    }
+
+    fn resolve(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+        is_cancelled: &CancellationCheck,
+    ) -> io::Result<Vec<SocketAddr>> {
+        let resolver = self.resolver.clone();
+        let host = host.to_owned();
+        self.resolve_with_future(timeout, is_cancelled, async move {
+            let lookup = resolver.lookup_ip(host).await.map_err(|error| {
+                io::Error::other(format!("Binance WebSocket DNS lookup failed: {error}"))
+            })?;
+            let addresses = lookup
+                .into_iter()
+                .take(MAX_STREAM_CONNECT_ADDRESSES)
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Binance WebSocket DNS lookup returned no addresses",
+                ));
+            }
+            Ok(addresses)
+        })
+    }
+
+    fn resolve_with_future<F>(
+        &self,
+        timeout: Duration,
+        is_cancelled: &CancellationCheck,
+        future: F,
+    ) -> io::Result<Vec<SocketAddr>>
+    where
+        F: Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'static,
+    {
+        if is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Binance WebSocket DNS lookup cancelled",
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Binance WebSocket DNS lookup deadline exceeded",
+            ));
+        }
+        let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Binance WebSocket DNS resolver concurrency limit reached",
+            )
+        })?;
+        let (response, result) = mpsc::sync_channel(1);
+        let task = self.runtime.spawn(async move {
+            let _permit = permit;
+            let result = tokio::time::timeout(timeout, future)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Binance WebSocket DNS lookup deadline exceeded",
+                    ))
+                });
+            let _ = response.send(result);
+        });
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
+        loop {
+            if is_cancelled() {
+                task.abort();
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Binance WebSocket DNS lookup cancelled",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Binance WebSocket DNS lookup deadline exceeded",
+                ));
+            }
+            match result.recv_timeout(remaining.min(STREAM_RESOLVER_POLL_TIMEOUT)) {
+                Ok(result) => {
+                    if is_cancelled() {
+                        task.abort();
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "Binance WebSocket DNS lookup cancelled",
+                        ));
+                    }
+                    if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                        task.abort();
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Binance WebSocket DNS lookup deadline exceeded",
+                        ));
+                    }
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "Binance WebSocket DNS resolver task stopped",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+static SYSTEM_RESOLVER: OnceLock<Result<ResolverService, String>> = OnceLock::new();
+
+fn system_resolver() -> io::Result<&'static ResolverService> {
+    match SYSTEM_RESOLVER.get_or_init(|| ResolverService::new().map_err(|error| error.to_string()))
+    {
+        Ok(service) => Ok(service),
+        Err(error) => Err(io::Error::other(error.clone())),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Market {
+    Spot,
+    UsdMarginedFutures,
+}
+
+impl Market {
+    fn rest_base_url(self) -> &'static str {
+        match self {
+            Self::Spot => "https://data-api.binance.vision",
+            Self::UsdMarginedFutures => "https://fapi.binance.com",
+        }
+    }
+
+    fn websocket_base_url(self) -> &'static str {
+        match self {
+            Self::Spot => "wss://data-stream.binance.vision",
+            Self::UsdMarginedFutures => "wss://fstream.binance.com",
+        }
+    }
+
+    fn api_path(self, spot: &'static str, usdm: &'static str) -> &'static str {
+        match self {
+            Self::Spot => spot,
+            Self::UsdMarginedFutures => usdm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interval {
+    Minute1,
+    Minute5,
+    Minute15,
+    Minute30,
+    Hour1,
+    Hour2,
+    Hour4,
+    Day1,
+    Week1,
+    Month1,
+}
+
+impl Interval {
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Minute1 => "1m",
+            Self::Minute5 => "5m",
+            Self::Minute15 => "15m",
+            Self::Minute30 => "30m",
+            Self::Hour1 => "1h",
+            Self::Hour2 => "2h",
+            Self::Hour4 => "4h",
+            Self::Day1 => "1d",
+            Self::Week1 => "1w",
+            Self::Month1 => "1M",
+        }
+    }
+
+    fn from_api_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "1m" => Self::Minute1,
+            "5m" => Self::Minute5,
+            "15m" => Self::Minute15,
+            "30m" => Self::Minute30,
+            "1h" => Self::Hour1,
+            "2h" => Self::Hour2,
+            "4h" => Self::Hour4,
+            "1d" => Self::Day1,
+            "1w" => Self::Week1,
+            "1M" => Self::Month1,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kline {
+    pub open_time_ms: i64,
+    pub close_time_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub quote_volume: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ticker24h {
+    pub last: f64,
+    pub previous_close: f64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub volume: f64,
+    pub quote_volume: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KlineEvent {
+    pub event_time_ms: i64,
+    pub symbol: String,
+    pub interval: Interval,
+    pub kline: Kline,
+    pub first_trade_id: i64,
+    pub last_trade_id: i64,
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregateTradeEvent {
+    pub event_time_ms: i64,
+    pub trade_time_ms: i64,
+    pub symbol: String,
+    pub aggregate_trade_id: i64,
+    pub first_trade_id: i64,
+    pub last_trade_id: i64,
+    pub price: f64,
+    pub quantity: f64,
+    pub buyer_is_maker: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PriceLevel {
+    pub price: f64,
+    pub quantity: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DepthEvent {
+    pub symbol: String,
+    pub last_update_id: i64,
+    pub bids: Vec<PriceLevel>,
+    pub asks: Vec<PriceLevel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpotSymbol {
+    pub symbol: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsdMarginedSymbol {
+    pub symbol: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealtimeEvent {
+    AggregateTrade(AggregateTradeEvent),
+    Kline(KlineEvent),
+    Depth(DepthEvent),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RealtimeUpdateSource {
+    AggregateTrade,
+    Kline,
+}
+
+impl RealtimeUpdateSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AggregateTrade => "aggTrade",
+            Self::Kline => "kline",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealtimeKlineUpdate {
+    pub event_time_ms: i64,
+    pub kline: Kline,
+    pub closed: bool,
+    pub source: RealtimeUpdateSource,
+}
+
+#[derive(Default)]
+pub struct RealtimeKlineState {
+    current: Option<Kline>,
+    last_kline_event_time_ms: Option<i64>,
+    last_aggregate_trade_id: Option<i64>,
+    awaiting_calibration: bool,
+}
+
+impl RealtimeKlineState {
+    pub fn awaiting_calibration(&self) -> bool {
+        self.awaiting_calibration
+    }
+
+    pub fn apply(&mut self, event: &RealtimeEvent) -> Result<Option<RealtimeKlineUpdate>, Error> {
+        match event {
+            RealtimeEvent::Kline(event) => self.apply_kline(event),
+            RealtimeEvent::AggregateTrade(event) => self.apply_aggregate_trade(event),
+            RealtimeEvent::Depth(_) => Ok(None),
+        }
+    }
+
+    fn apply_kline(&mut self, event: &KlineEvent) -> Result<Option<RealtimeKlineUpdate>, Error> {
+        if self.current.as_ref().is_some_and(|current| {
+            current.open_time_ms == event.kline.open_time_ms
+                && self
+                    .last_kline_event_time_ms
+                    .is_some_and(|event_time_ms| event.event_time_ms < event_time_ms)
+        }) {
+            return Ok(None);
+        }
+        let advances_current = self
+            .current
+            .as_ref()
+            .is_none_or(|current| event.kline.open_time_ms >= current.open_time_ms);
+        if advances_current {
+            self.current = Some(event.kline.clone());
+            self.awaiting_calibration = false;
+        }
+        self.last_kline_event_time_ms = Some(
+            self.last_kline_event_time_ms
+                .map_or(event.event_time_ms, |current| current.max(event.event_time_ms)),
+        );
+        Ok(Some(RealtimeKlineUpdate {
+            event_time_ms: event.event_time_ms,
+            kline: event.kline.clone(),
+            closed: event.closed,
+            source: RealtimeUpdateSource::Kline,
+        }))
+    }
+
+    fn apply_aggregate_trade(
+        &mut self,
+        event: &AggregateTradeEvent,
+    ) -> Result<Option<RealtimeKlineUpdate>, Error> {
+        if self
+            .last_aggregate_trade_id
+            .is_some_and(|aggregate_trade_id| event.aggregate_trade_id <= aggregate_trade_id)
+        {
+            return Ok(None);
+        }
+        self.last_aggregate_trade_id = Some(event.aggregate_trade_id);
+        if self.awaiting_calibration {
+            return Ok(None);
+        }
+        let Some(current) = self.current.as_ref() else {
+            return Ok(None);
+        };
+        if self
+            .last_kline_event_time_ms
+            .is_some_and(|event_time_ms| event.event_time_ms < event_time_ms)
+        {
+            return Ok(None);
+        }
+        if event.trade_time_ms < current.open_time_ms {
+            return Ok(None);
+        }
+        if event.trade_time_ms > current.close_time_ms {
+            let interval_ms = current
+                .close_time_ms
+                .saturating_sub(current.open_time_ms)
+                .saturating_add(1);
+            let next_open_time_ms = current.close_time_ms.saturating_add(1);
+            let next_close_time_ms = next_open_time_ms
+                .saturating_add(interval_ms)
+                .saturating_sub(1);
+            if interval_ms <= 7 * 24 * 60 * 60 * 1_000 && event.trade_time_ms <= next_close_time_ms
+            {
+                let provisional = Kline {
+                    open_time_ms: next_open_time_ms,
+                    close_time_ms: next_close_time_ms,
+                    open: event.price,
+                    high: event.price,
+                    low: event.price,
+                    close: event.price,
+                    volume: 0.0,
+                    quote_volume: 0.0,
+                };
+                validate_klines(std::slice::from_ref(&provisional))?;
+                self.current = Some(provisional.clone());
+                return Ok(Some(RealtimeKlineUpdate {
+                    event_time_ms: event.event_time_ms,
+                    kline: provisional,
+                    closed: false,
+                    source: RealtimeUpdateSource::AggregateTrade,
+                }));
+            }
+            self.awaiting_calibration = true;
+            return Ok(None);
+        }
+
+        let current = self.current.as_mut().expect("current kline checked above");
+        current.high = current.high.max(event.price);
+        current.low = current.low.min(event.price);
+        current.close = event.price;
+        validate_klines(std::slice::from_ref(current))?;
+        Ok(Some(RealtimeKlineUpdate {
+            event_time_ms: event.event_time_ms,
+            kline: current.clone(),
+            closed: false,
+            source: RealtimeUpdateSource::AggregateTrade,
+        }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error {
+    message: String,
+}
+
+impl Error {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub struct Client {
+    base_url: String,
+    http: reqwest::blocking::Client,
+    market: Market,
+}
+
+pub struct RealtimeStream {
+    socket: WebSocket<MaybeTlsStream<CancellableTcpStream>>,
+    symbol: String,
+    interval: Interval,
+    kind: RealtimeStreamKind,
+    subscribed: bool,
+    control_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RealtimeStreamKind {
+    Spot,
+    UsdMarginedMarket,
+    UsdMarginedDepth,
+}
+
+impl RealtimeStreamKind {
+    fn streams(self, symbol: &str, interval: Interval) -> Vec<String> {
+        let symbol = symbol.to_ascii_lowercase();
+        match self {
+            Self::Spot => vec![
+                format!("{symbol}@aggTrade"),
+                format!("{symbol}@kline_{}", interval.as_api_str()),
+                format!("{symbol}@depth20@100ms"),
+            ],
+            Self::UsdMarginedMarket => vec![
+                format!("{symbol}@aggTrade"),
+                format!("{symbol}@kline_{}", interval.as_api_str()),
+            ],
+            Self::UsdMarginedDepth => vec![format!("{symbol}@depth20@100ms")],
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ConnectControl {
+    deadline: Instant,
+    cancelled: CancellationCheck,
+}
+
+impl ConnectControl {
+    fn new(timeout: Duration, cancelled: CancellationCheck) -> Self {
+        Self {
+            deadline: Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(Instant::now),
+            cancelled,
+        }
+    }
+
+    fn remaining(&self) -> io::Result<Duration> {
+        if (self.cancelled)() {
+            return Err(io::Error::new(
+                // rustls treats Interrupted like EINTR and retries it internally. Cancellation
+                // must therefore be a terminal I/O error or a cancelled TLS handshake can spin
+                // forever after the owning realtime request has already been replaced.
+                io::ErrorKind::ConnectionAborted,
+                "Binance WebSocket connection cancelled",
+            ));
+        }
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Binance WebSocket connection deadline exceeded",
+            ));
+        }
+        Ok(remaining)
+    }
+
+    fn poll_timeout(&self) -> io::Result<Duration> {
+        self.remaining()
+            .map(|remaining| remaining.min(STREAM_CONNECT_POLL_TIMEOUT))
+    }
+}
+
+struct CancellableTcpStream {
+    stream: TcpStream,
+    control: ConnectControl,
+    handshake: bool,
+    io_timeout: Duration,
+}
+
+impl CancellableTcpStream {
+    fn new(stream: TcpStream, control: ConnectControl) -> Self {
+        Self {
+            stream,
+            control,
+            handshake: true,
+            io_timeout: STREAM_IO_TIMEOUT,
+        }
+    }
+
+    fn set_established_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.handshake = false;
+        self.io_timeout = timeout;
+        set_tcp_stream_timeout(&self.stream, timeout)
+    }
+}
+
+impl fmt::Debug for CancellableTcpStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancellableTcpStream")
+            .field("stream", &self.stream)
+            .field("handshake", &self.handshake)
+            .finish()
+    }
+}
+
+impl Read for CancellableTcpStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if !self.handshake {
+            self.stream.set_read_timeout(Some(self.io_timeout))?;
+            return self.stream.read(buffer);
+        }
+        loop {
+            self.stream
+                .set_read_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.read(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for CancellableTcpStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if !self.handshake {
+            self.stream.set_write_timeout(Some(self.io_timeout))?;
+            return self.stream.write(buffer);
+        }
+        loop {
+            self.stream
+                .set_write_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.write(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.handshake {
+            self.stream.set_write_timeout(Some(self.io_timeout))?;
+            return self.stream.flush();
+        }
+        loop {
+            self.stream
+                .set_write_timeout(Some(self.control.poll_timeout()?))?;
+            match self.stream.flush() {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(&self.control)?;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+impl NoDelay for CancellableTcpStream {
+    fn set_nodelay(&mut self, nodelay: bool) -> io::Result<()> {
+        self.stream.set_nodelay(nodelay)
+    }
+}
+
+fn wait_before_retry(control: &ConnectControl) -> io::Result<()> {
+    let delay = control.remaining()?.min(STREAM_CONNECT_RETRY_DELAY);
+    if !delay.is_zero() {
+        thread::sleep(delay);
+    }
+    control.remaining().map(|_| ())
+}
+
+impl RealtimeStream {
+    pub fn connect(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_with_cancellation<F>(
+        symbol: &str,
+        interval: Interval,
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let symbol = normalize_symbol(symbol)?;
+        let url = spot_stream_url(&symbol, interval);
+        Self::connect_url(
+            symbol,
+            interval,
+            RealtimeStreamKind::Spot,
+            url,
+            Arc::new(is_cancelled),
+        )
+    }
+
+    pub fn connect_usd_margined_market(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_usd_margined_market_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_usd_margined_market_with_cancellation<F>(
+        symbol: &str,
+        interval: Interval,
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let symbol = normalize_symbol(symbol)?;
+        let url = usd_margined_market_stream_url(&symbol, interval);
+        Self::connect_url(
+            symbol,
+            interval,
+            RealtimeStreamKind::UsdMarginedMarket,
+            url,
+            Arc::new(is_cancelled),
+        )
+    }
+
+    pub fn connect_usd_margined_depth(symbol: &str, interval: Interval) -> Result<Self, Error> {
+        Self::connect_usd_margined_depth_with_cancellation(symbol, interval, || false)
+    }
+
+    pub fn connect_usd_margined_depth_with_cancellation<F>(
+        symbol: &str,
+        interval: Interval,
+        is_cancelled: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        let symbol = normalize_symbol(symbol)?;
+        let url = usd_margined_depth_stream_url(&symbol);
+        Self::connect_url(
+            symbol,
+            interval,
+            RealtimeStreamKind::UsdMarginedDepth,
+            url,
+            Arc::new(is_cancelled),
+        )
+    }
+
+    fn connect_url(
+        symbol: String,
+        interval: Interval,
+        kind: RealtimeStreamKind,
+        url: String,
+        is_cancelled: CancellationCheck,
+    ) -> Result<Self, Error> {
+        let resolver_cancelled = Arc::clone(&is_cancelled);
+        let socket = connect_stream_socket_with_resolver(
+            url,
+            STREAM_CONNECT_TIMEOUT,
+            STREAM_IO_TIMEOUT,
+            is_cancelled,
+            move |host, port, timeout| {
+                system_resolver()?.resolve(host, port, timeout, &resolver_cancelled)
+            },
+        )?;
+        Ok(Self {
+            socket,
+            symbol,
+            interval,
+            kind,
+            subscribed: true,
+            control_id: 0,
+        })
+    }
+
+    pub fn replace_subscription(&mut self, symbol: &str, interval: Interval) -> Result<(), Error> {
+        let symbol = normalize_symbol(symbol)?;
+        if self.subscribed && self.symbol == symbol && self.interval == interval {
+            return Ok(());
+        }
+        if self.subscribed {
+            self.send_subscription("UNSUBSCRIBE", self.kind.streams(&self.symbol, self.interval))?;
+        }
+        self.send_subscription("SUBSCRIBE", self.kind.streams(&symbol, interval))?;
+        self.symbol = symbol;
+        self.interval = interval;
+        self.subscribed = true;
+        Ok(())
+    }
+
+    pub fn unsubscribe(&mut self) -> Result<(), Error> {
+        if !self.subscribed {
+            return Ok(());
+        }
+        self.send_subscription("UNSUBSCRIBE", self.kind.streams(&self.symbol, self.interval))?;
+        self.subscribed = false;
+        Ok(())
+    }
+
+    fn send_subscription(&mut self, method: &'static str, params: Vec<String>) -> Result<(), Error> {
+        self.control_id = self.control_id.saturating_add(1);
+        self.socket
+            .send(Message::Text(
+                json!({ "method": method, "params": params, "id": self.control_id })
+                    .to_string()
+                    .into(),
+            ))
+            .map_err(|error| {
+                Error::new(format!("Binance WebSocket {method} failed: {error}"))
+            })
+    }
+
+    pub fn read_event(&mut self) -> Result<RealtimeEvent, Error> {
+        loop {
+            if let Some(event) = self.poll_event()? {
+                return Ok(event);
+            }
+        }
+    }
+
+    pub fn poll_event(&mut self) -> Result<Option<RealtimeEvent>, Error> {
+        loop {
+            let message = match self.socket.read() {
+                Ok(message) => message,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => {
+                    return Err(Error::new(format!(
+                        "Binance WebSocket read failed: {error}"
+                    )));
+                }
+            };
+            match message {
+                Message::Text(text) => {
+                    let payload = serde_json::from_str::<Value>(text.as_str()).map_err(|error| {
+                        Error::new(format!("Binance WebSocket returned invalid JSON: {error}"))
+                    })?;
+                    if payload.get("id").is_some() {
+                        if let Some(code) = payload.get("code") {
+                            return Err(Error::new(format!(
+                                "Binance WebSocket subscription failed code={code} message={}",
+                                payload.get("msg").and_then(Value::as_str).unwrap_or("unknown")
+                            )));
+                        }
+                        continue;
+                    }
+                    if !self.subscribed
+                        || !payload_matches_subscription(&payload, &self.symbol, self.interval)
+                    {
+                        continue;
+                    }
+                    return parse_realtime_payload(&payload, &self.symbol, self.interval).map(Some);
+                }
+                Message::Ping(_) => self.socket.flush().map_err(|error| {
+                    Error::new(format!("Binance WebSocket pong failed: {error}"))
+                })?,
+                Message::Close(frame) => {
+                    let detail = frame
+                        .map(|frame| frame.reason.to_string())
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or_else(|| "server closed connection".to_string());
+                    return Err(Error::new(format!("Binance WebSocket closed: {detail}")));
+                }
+                Message::Binary(_) => {
+                    return Err(Error::new(
+                        "Binance WebSocket returned unexpected binary data",
+                    ));
+                }
+                Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+    }
+}
+
+fn spot_stream_url(symbol: &str, interval: Interval) -> String {
+    let symbol = symbol.to_ascii_lowercase();
+    format!(
+        "{}/stream?streams={symbol}@aggTrade/{symbol}@kline_{}/{symbol}@depth20@100ms",
+        Market::Spot.websocket_base_url(),
+        interval.as_api_str()
+    )
+}
+
+fn usd_margined_market_stream_url(symbol: &str, interval: Interval) -> String {
+    let symbol = symbol.to_ascii_lowercase();
+    format!(
+        "{}/market/stream?streams={symbol}@aggTrade/{symbol}@kline_{}",
+        Market::UsdMarginedFutures.websocket_base_url(),
+        interval.as_api_str()
+    )
+}
+
+fn usd_margined_depth_stream_url(symbol: &str) -> String {
+    let symbol = symbol.to_ascii_lowercase();
+    format!(
+        "{}/public/stream?streams={symbol}@depth20@100ms",
+        Market::UsdMarginedFutures.websocket_base_url()
+    )
+}
+
+#[cfg(test)]
+fn connect_stream_socket(
+    url: String,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+) -> Result<WebSocket<MaybeTlsStream<CancellableTcpStream>>, Error> {
+    connect_stream_socket_with_resolver(
+        url,
+        connect_timeout,
+        io_timeout,
+        Arc::new(|| false),
+        |host, port, _timeout| {
+            (host, port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect())
+        },
+    )
+}
+
+fn connect_stream_socket_with_resolver<F>(
+    url: String,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+    is_cancelled: CancellationCheck,
+    mut resolve: F,
+) -> Result<WebSocket<MaybeTlsStream<CancellableTcpStream>>, Error>
+where
+    F: FnMut(&str, u16, Duration) -> io::Result<Vec<SocketAddr>>,
+{
+    let control = ConnectControl::new(connect_timeout, is_cancelled);
+    let request = url
+        .into_client_request()
+        .map_err(|error| Error::new(format!("Binance WebSocket URL is invalid: {error}")))?;
+    let uri = request.uri();
+    let mode = uri_mode(uri)
+        .map_err(|error| Error::new(format!("Binance WebSocket URL is invalid: {error}")))?;
+    let host = uri
+        .host()
+        .ok_or_else(|| Error::new("Binance WebSocket URL is missing a host"))?;
+    let host = if host.starts_with('[') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    };
+    let port = uri.port_u16().unwrap_or(match mode {
+        Mode::Plain => 80,
+        Mode::Tls => 443,
+    });
+    let addresses = resolve_socket_addresses(host, port, &control, &mut resolve)?;
+    let stream = connect_tcp_stream_with_control(&addresses, &control, |address, timeout| {
+        TcpStream::connect_timeout(address, timeout)
+    })?;
+    let mut stream = CancellableTcpStream::new(stream, control.clone());
+    NoDelay::set_nodelay(&mut stream, true)
+        .map_err(|error| Error::new(format!("failed to configure Binance WebSocket: {error}")))?;
+
+    let config = WebSocketConfig::default()
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(0)
+        .max_write_buffer_size(MAX_STREAM_MESSAGE_BYTES)
+        .max_message_size(Some(MAX_STREAM_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_STREAM_MESSAGE_BYTES));
+    let (mut socket, response) = match client_tls_with_config(request, stream, Some(config), None) {
+        Ok(result) => result,
+        Err(error) => {
+            if let Err(control_error) = control.remaining() {
+                return Err(Error::new(format!(
+                    "Binance WebSocket handshake stopped: {control_error}"
+                )));
+            }
+            return Err(Error::new(format!(
+                "Binance WebSocket handshake failed: {error}"
+            )));
+        }
+    };
+    control.remaining().map_err(|error| {
+        Error::new(format!(
+            "Binance WebSocket handshake exceeded deadline: {error}"
+        ))
+    })?;
+    if response.status().as_u16() != 101 {
+        return Err(Error::new(format!(
+            "Binance WebSocket handshake returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    set_stream_timeout(socket.get_mut(), io_timeout)?;
+    Ok(socket)
+}
+
+fn resolve_socket_addresses<F>(
+    host: &str,
+    port: u16,
+    control: &ConnectControl,
+    resolve: &mut F,
+) -> Result<Vec<SocketAddr>, Error>
+where
+    F: FnMut(&str, u16, Duration) -> io::Result<Vec<SocketAddr>>,
+{
+    let timeout = control.remaining().map_err(|error| {
+        Error::new(format!("Binance WebSocket DNS lookup unavailable: {error}"))
+    })?;
+    let addresses = resolve(host, port, timeout)
+        .map_err(|error| Error::new(format!("Binance WebSocket DNS lookup failed: {error}")))?;
+    control.remaining().map_err(|error| {
+        Error::new(format!(
+            "Binance WebSocket DNS lookup exceeded deadline: {error}"
+        ))
+    })?;
+    let addresses = addresses
+        .into_iter()
+        .take(MAX_STREAM_CONNECT_ADDRESSES)
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(Error::new(
+            "Binance WebSocket DNS lookup returned no addresses",
+        ));
+    }
+    Ok(addresses)
+}
+
+fn connect_tcp_stream_with_control<F>(
+    addresses: &[SocketAddr],
+    control: &ConnectControl,
+    mut connect: F,
+) -> Result<TcpStream, Error>
+where
+    F: FnMut(&SocketAddr, Duration) -> io::Result<TcpStream>,
+{
+    let mut attempts = 0;
+    let mut last_error = None;
+    for address in addresses.iter().take(MAX_STREAM_CONNECT_ADDRESSES) {
+        loop {
+            let timeout = control.remaining().map_err(|error| {
+                Error::new(format!("Binance WebSocket TCP connect stopped: {error}"))
+            })?;
+            attempts += 1;
+            match connect(address, timeout.min(STREAM_CONNECT_POLL_TIMEOUT)) {
+                Ok(stream) => return Ok(stream),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_before_retry(control).map_err(|error| {
+                        Error::new(format!("Binance WebSocket TCP connect stopped: {error}"))
+                    })?;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    Err(Error::new(format!(
+        "Binance WebSocket TCP connect failed attempts={attempts}: {}",
+        last_error.unwrap_or_else(|| "connection timeout or no addresses".to_string())
+    )))
+}
+
+fn set_stream_timeout(
+    stream: &mut MaybeTlsStream<CancellableTcpStream>,
+    timeout: Duration,
+) -> Result<(), Error> {
+    let result = match stream {
+        MaybeTlsStream::Plain(stream) => stream.set_established_timeout(timeout),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_established_timeout(timeout),
+        _ => return Err(Error::new("unsupported Binance WebSocket TLS transport")),
+    };
+    result.map_err(|error| Error::new(format!("failed to configure Binance WebSocket: {error}")))
+}
+
+fn set_tcp_stream_timeout(stream: &TcpStream, timeout: Duration) -> io::Result<()> {
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))
+}
+
+impl Client {
+    pub fn public_market_data() -> Result<Self, Error> {
+        Self::new_for_market(
+            Market::Spot,
+            Market::Spot.rest_base_url(),
+            Duration::from_secs(8),
+        )
+    }
+
+    pub fn public_usd_margined_market_data() -> Result<Self, Error> {
+        Self::new_for_market(
+            Market::UsdMarginedFutures,
+            Market::UsdMarginedFutures.rest_base_url(),
+            Duration::from_secs(8),
+        )
+    }
+
+    pub fn new(base_url: &str, timeout: Duration) -> Result<Self, Error> {
+        Self::new_for_market(Market::Spot, base_url, timeout)
+    }
+
+    fn new_for_market(market: Market, base_url: &str, timeout: Duration) -> Result<Self, Error> {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        if !base_url.starts_with("https://") && !base_url.starts_with("http://127.0.0.1:") {
+            return Err(Error::new("Binance base URL must use HTTPS"));
+        }
+        let http = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("TradeFlow-Lite/0.1")
+            .build()
+            .map_err(|error| Error::new(format!("failed to build Binance HTTP client: {error}")))?;
+        Ok(Self {
+            base_url,
+            http,
+            market,
+        })
+    }
+
+    pub fn fetch_klines(
+        &self,
+        symbol: &str,
+        interval: Interval,
+        count: usize,
+    ) -> Result<Vec<Kline>, Error> {
+        self.fetch_klines_with_cancellation(symbol, interval, count, || true)
+    }
+
+    /// Stops between pages without abandoning a partially read HTTP response.
+    pub fn fetch_klines_with_cancellation(
+        &self, symbol: &str, interval: Interval, count: usize, active: impl Fn() -> bool,
+    ) -> Result<Vec<Kline>, Error> {
+        let symbol = normalize_symbol(symbol)?;
+        let requested = count.clamp(1, MAX_HISTORY_COUNT);
+        let mut remaining = requested;
+        let mut end_time_ms: Option<i64> = None;
+        let mut pages = Vec::new();
+
+        while remaining > 0 {
+            if !active() { return Err(Error::new("history request cancelled")); }
+            let limit = remaining.min(MAX_PAGE_SIZE);
+            let mut query = vec![
+                ("symbol", symbol.clone()),
+                ("interval", interval.as_api_str().to_string()),
+                ("limit", limit.to_string()),
+            ];
+            if let Some(end_time_ms) = end_time_ms {
+                query.push(("endTime", end_time_ms.to_string()));
+            }
+            let payload = self.get_json(
+                self.market.api_path("/api/v3/klines", "/fapi/v1/klines"),
+                &query,
+            )?;
+            let rows = payload
+                .as_array()
+                .ok_or_else(|| Error::new("Binance klines response must be an array"))?;
+            if rows.is_empty() {
+                break;
+            }
+            let page = rows
+                .iter()
+                .map(parse_kline)
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_klines(&page)?;
+            let oldest_open_time = page[0].open_time_ms;
+            let received = page.len();
+            pages.push(page);
+            remaining = remaining.saturating_sub(received);
+            if received < limit {
+                break;
+            }
+            end_time_ms = Some(
+                oldest_open_time
+                    .checked_sub(1)
+                    .ok_or_else(|| Error::new("Binance kline timestamp underflow"))?,
+            );
+        }
+
+        if !active() { return Err(Error::new("history request cancelled")); }
+        let klines = merge_pages(pages, requested)?;
+        if klines.is_empty() {
+            return Err(Error::new(format!(
+                "Binance returned no klines for {symbol}"
+            )));
+        }
+        Ok(klines)
+    }
+
+    pub fn fetch_ticker_24h(&self, symbol: &str) -> Result<Ticker24h, Error> {
+        let symbol = normalize_symbol(symbol)?;
+        let mut query = vec![("symbol", symbol)];
+        if self.market == Market::Spot {
+            query.push(("type", "FULL".to_string()));
+        }
+        let payload = self.get_json(
+            self.market
+                .api_path("/api/v3/ticker/24hr", "/fapi/v1/ticker/24hr"),
+            &query,
+        )?;
+        let ticker = Ticker24h {
+            last: object_number(&payload, "lastPrice")?,
+            previous_close: if self.market == Market::Spot {
+                object_number(&payload, "prevClosePrice")?
+            } else {
+                object_number(&payload, "openPrice")?
+            },
+            open: object_number(&payload, "openPrice")?,
+            high: object_number(&payload, "highPrice")?,
+            low: object_number(&payload, "lowPrice")?,
+            volume: object_number(&payload, "volume")?,
+            quote_volume: object_number(&payload, "quoteVolume")?,
+        };
+        validate_ticker(&ticker)?;
+        Ok(ticker)
+    }
+
+    pub fn fetch_spot_symbols(&self) -> Result<Vec<SpotSymbol>, Error> {
+        if self.market != Market::Spot {
+            return Err(Error::new("client is not configured for Binance Spot"));
+        }
+        let payload = self.get_json_with_limit(
+            "/api/v3/exchangeInfo",
+            &[
+                ("permissions", "SPOT".to_string()),
+                ("symbolStatus", "TRADING".to_string()),
+                ("showPermissionSets", "false".to_string()),
+            ],
+            MAX_EXCHANGE_INFO_RESPONSE_BYTES,
+        )?;
+        let rows = payload
+            .get("symbols")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::new("Binance exchange info is missing symbols"))?;
+        let mut symbols = rows
+            .iter()
+            .filter_map(|row| parse_spot_symbol(row).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        symbols.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+        symbols.dedup_by(|left, right| left.symbol == right.symbol);
+        if symbols.is_empty() {
+            return Err(Error::new("Binance returned no active Spot symbols"));
+        }
+        Ok(symbols)
+    }
+
+    pub fn fetch_usd_margined_perpetual_symbols(&self) -> Result<Vec<UsdMarginedSymbol>, Error> {
+        if self.market != Market::UsdMarginedFutures {
+            return Err(Error::new(
+                "client is not configured for Binance USD-M Futures",
+            ));
+        }
+        let payload = self.get_json_with_limit(
+            "/fapi/v1/exchangeInfo",
+            &[],
+            MAX_EXCHANGE_INFO_RESPONSE_BYTES,
+        )?;
+        let rows = payload
+            .get("symbols")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::new("Binance USD-M exchange info is missing symbols"))?;
+        let mut symbols = rows
+            .iter()
+            .filter_map(|row| parse_usd_margined_symbol(row).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        symbols.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+        symbols.dedup_by(|left, right| left.symbol == right.symbol);
+        if symbols.is_empty() {
+            return Err(Error::new(
+                "Binance returned no active USD-M perpetual symbols",
+            ));
+        }
+        Ok(symbols)
+    }
+
+    fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value, Error> {
+        self.get_json_with_limit(path, query, MAX_RESPONSE_BYTES)
+    }
+
+    fn get_json_with_limit(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        max_response_bytes: u64,
+    ) -> Result<Value, Error> {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base_url))
+            .query(query)
+            .send()
+            .map_err(|error| Error::new(format!("Binance request failed: {error}")))?;
+        let status = response.status();
+        let mut body = String::new();
+        response
+            .take(max_response_bytes + 1)
+            .read_to_string(&mut body)
+            .map_err(|error| Error::new(format!("Binance response read failed: {error}")))?;
+        if body.len() as u64 > max_response_bytes {
+            return Err(Error::new(format!(
+                "Binance response exceeded {} MiB limit",
+                max_response_bytes / 1024 / 1024
+            )));
+        }
+        if !status.is_success() {
+            let detail = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| value.get("msg").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| {
+                    status
+                        .canonical_reason()
+                        .unwrap_or("request failed")
+                        .to_string()
+                });
+            return Err(Error::new(format!(
+                "Binance HTTP {}: {detail}",
+                status.as_u16()
+            )));
+        }
+        serde_json::from_str(&body)
+            .map_err(|error| Error::new(format!("Binance returned invalid JSON: {error}")))
+    }
+}
+
+fn normalize_symbol(symbol: &str) -> Result<String, Error> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let char_count = symbol.chars().count();
+    if !(2..=32).contains(&char_count)
+        || symbol.len() > 96
+        || !symbol
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(Error::new("invalid Binance Spot symbol"));
+    }
+    Ok(symbol)
+}
+
+fn parse_kline(value: &Value) -> Result<Kline, Error> {
+    let row = value
+        .as_array()
+        .filter(|row| row.len() >= 8)
+        .ok_or_else(|| Error::new("Binance kline row must contain at least 8 fields"))?;
+    Ok(Kline {
+        open_time_ms: json_i64(&row[0], "open time")?,
+        open: json_number(&row[1], "open")?,
+        high: json_number(&row[2], "high")?,
+        low: json_number(&row[3], "low")?,
+        close: json_number(&row[4], "close")?,
+        volume: json_number(&row[5], "volume")?,
+        close_time_ms: json_i64(&row[6], "close time")?,
+        quote_volume: json_number(&row[7], "quote volume")?,
+    })
+}
+
+#[cfg(test)]
+fn parse_kline_event(text: &str) -> Result<KlineEvent, Error> {
+    let payload = serde_json::from_str::<Value>(text)
+        .map_err(|error| Error::new(format!("Binance WebSocket returned invalid JSON: {error}")))?;
+    parse_kline_event_value(&payload)
+}
+
+#[cfg(test)]
+fn parse_realtime_event(
+    text: &str,
+    expected_symbol: &str,
+    expected_interval: Interval,
+) -> Result<RealtimeEvent, Error> {
+    let payload = serde_json::from_str::<Value>(text)
+        .map_err(|error| Error::new(format!("Binance WebSocket returned invalid JSON: {error}")))?;
+    parse_realtime_payload(&payload, expected_symbol, expected_interval)
+}
+
+fn payload_matches_subscription(
+    payload: &Value,
+    expected_symbol: &str,
+    expected_interval: Interval,
+) -> bool {
+    let Some(stream) = payload.get("stream").and_then(Value::as_str) else {
+        return false;
+    };
+    let lower_symbol = expected_symbol.to_ascii_lowercase();
+    stream == format!("{lower_symbol}@aggTrade")
+        || stream == format!("{lower_symbol}@kline_{}", expected_interval.as_api_str())
+        || stream == format!("{lower_symbol}@depth20@100ms")
+}
+
+fn parse_realtime_payload(
+    payload: &Value,
+    expected_symbol: &str,
+    expected_interval: Interval,
+) -> Result<RealtimeEvent, Error> {
+    let stream = payload
+        .get("stream")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance combined stream is missing stream name"))?;
+    let data = payload
+        .get("data")
+        .ok_or_else(|| Error::new("Binance combined stream is missing event data"))?;
+    let lower_symbol = expected_symbol.to_ascii_lowercase();
+    let event = if stream == format!("{lower_symbol}@aggTrade") {
+        RealtimeEvent::AggregateTrade(parse_aggregate_trade_event(data)?)
+    } else if stream == format!("{lower_symbol}@kline_{}", expected_interval.as_api_str()) {
+        RealtimeEvent::Kline(parse_kline_event_value(data)?)
+    } else if stream == format!("{lower_symbol}@depth20@100ms") {
+        RealtimeEvent::Depth(parse_depth_event(data, expected_symbol)?)
+    } else {
+        return Err(Error::new(
+            "Binance WebSocket event does not match subscription",
+        ));
+    };
+    let matches = match &event {
+        RealtimeEvent::AggregateTrade(event) => event.symbol == expected_symbol,
+        RealtimeEvent::Kline(event) => {
+            event.symbol == expected_symbol && event.interval == expected_interval
+        }
+        RealtimeEvent::Depth(event) => event.symbol == expected_symbol,
+    };
+    if !matches {
+        return Err(Error::new(
+            "Binance WebSocket event does not match subscription",
+        ));
+    }
+    Ok(event)
+}
+
+fn parse_spot_symbol(payload: &Value) -> Result<Option<SpotSymbol>, Error> {
+    if payload.get("status").and_then(Value::as_str) != Some("TRADING")
+        || payload.get("isSpotTradingAllowed").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(None);
+    }
+    let symbol = payload
+        .get("symbol")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance Spot symbol is missing symbol"))?;
+    let base_asset = payload
+        .get("baseAsset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance Spot symbol is missing base asset"))?;
+    let quote_asset = payload
+        .get("quoteAsset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance Spot symbol is missing quote asset"))?;
+    // Binance may publish active symbols whose asset names contain Unicode. They are
+    // valid upstream entries but cannot become Lite's ASCII-stable `VENUE:CODE` identity;
+    // omit those rows from the provider-neutral catalog instead of failing the whole list.
+    let Ok(symbol) = normalize_symbol(symbol) else {
+        return Ok(None);
+    };
+    let Ok(base_asset) = normalize_asset(base_asset) else {
+        return Ok(None);
+    };
+    let Ok(quote_asset) = normalize_asset(quote_asset) else {
+        return Ok(None);
+    };
+    Ok(Some(SpotSymbol {
+        symbol,
+        base_asset,
+        quote_asset,
+    }))
+}
+
+fn parse_usd_margined_symbol(payload: &Value) -> Result<Option<UsdMarginedSymbol>, Error> {
+    if payload.get("status").and_then(Value::as_str) != Some("TRADING")
+        || payload.get("contractType").and_then(Value::as_str) != Some("PERPETUAL")
+    {
+        return Ok(None);
+    }
+    let symbol = payload
+        .get("symbol")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance USD-M symbol is missing symbol"))?;
+    let base_asset = payload
+        .get("baseAsset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance USD-M symbol is missing base asset"))?;
+    let quote_asset = payload
+        .get("quoteAsset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new("Binance USD-M symbol is missing quote asset"))?;
+    let Ok(symbol) = normalize_symbol(symbol) else {
+        return Ok(None);
+    };
+    let Ok(base_asset) = normalize_asset(base_asset) else {
+        return Ok(None);
+    };
+    let Ok(quote_asset) = normalize_asset(quote_asset) else {
+        return Ok(None);
+    };
+    Ok(Some(UsdMarginedSymbol {
+        symbol,
+        base_asset,
+        quote_asset,
+    }))
+}
+
+fn normalize_asset(asset: &str) -> Result<String, Error> {
+    let asset = asset.trim().to_ascii_uppercase();
+    if asset.is_empty()
+        || asset.chars().count() > 24
+        || asset.len() > 72
+        || !asset
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(Error::new("invalid Binance asset code"));
+    }
+    Ok(asset)
+}
+
+fn parse_depth_event(payload: &Value, symbol: &str) -> Result<DepthEvent, Error> {
+    let (update_field, bids_field, asks_field) = if payload.get("lastUpdateId").is_some() {
+        ("lastUpdateId", "bids", "asks")
+    } else {
+        ("u", "b", "a")
+    };
+    let last_update_id = object_i64(payload, update_field)?;
+    let bids = parse_price_levels(payload, bids_field)?;
+    let asks = parse_price_levels(payload, asks_field)?;
+    if last_update_id < 0 || bids.is_empty() || asks.is_empty() {
+        return Err(Error::new("Binance depth snapshot is invalid"));
+    }
+    if !bids
+        .windows(2)
+        .all(|levels| levels[0].price > levels[1].price)
+        || !asks
+            .windows(2)
+            .all(|levels| levels[0].price < levels[1].price)
+        || bids[0].price >= asks[0].price
+    {
+        return Err(Error::new("Binance depth snapshot is not ordered"));
+    }
+    Ok(DepthEvent {
+        symbol: symbol.to_string(),
+        last_update_id,
+        bids,
+        asks,
+    })
+}
+
+fn parse_price_levels(payload: &Value, field: &str) -> Result<Vec<PriceLevel>, Error> {
+    let rows = payload
+        .get(field)
+        .and_then(Value::as_array)
+        .filter(|rows| rows.len() <= 20)
+        .ok_or_else(|| Error::new(format!("Binance depth {field} is invalid")))?;
+    rows.iter()
+        .map(|row| {
+            let row = row
+                .as_array()
+                .filter(|row| row.len() >= 2)
+                .ok_or_else(|| Error::new(format!("Binance depth {field} level is invalid")))?;
+            let level = PriceLevel {
+                price: json_number(&row[0], "depth price")?,
+                quantity: json_number(&row[1], "depth quantity")?,
+            };
+            if level.price <= 0.0 || level.quantity <= 0.0 {
+                return Err(Error::new("Binance depth level must be positive"));
+            }
+            Ok(level)
+        })
+        .collect()
+}
+
+fn parse_kline_event_value(payload: &Value) -> Result<KlineEvent, Error> {
+    if payload.get("e").and_then(Value::as_str) != Some("kline") {
+        return Err(Error::new("Binance WebSocket returned an unexpected event"));
+    }
+    let event_time_ms = object_i64(&payload, "E")?;
+    let symbol = payload
+        .get("s")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| Error::new("Binance WebSocket kline is missing symbol"))?;
+    let raw = payload
+        .get("k")
+        .ok_or_else(|| Error::new("Binance WebSocket event is missing kline"))?;
+    let interval = raw
+        .get("i")
+        .and_then(Value::as_str)
+        .and_then(Interval::from_api_str)
+        .ok_or_else(|| Error::new("Binance WebSocket returned an unsupported interval"))?;
+    let kline = Kline {
+        open_time_ms: object_i64(raw, "t")?,
+        close_time_ms: object_i64(raw, "T")?,
+        open: object_number(raw, "o")?,
+        high: object_number(raw, "h")?,
+        low: object_number(raw, "l")?,
+        close: object_number(raw, "c")?,
+        volume: object_number(raw, "v")?,
+        quote_volume: object_number(raw, "q")?,
+    };
+    validate_klines(std::slice::from_ref(&kline))?;
+    let closed = raw
+        .get("x")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::new("Binance WebSocket kline is missing closed state"))?;
+    let first_trade_id = object_i64(raw, "f")?;
+    let last_trade_id = object_i64(raw, "L")?;
+    if !((first_trade_id == -1 && last_trade_id == -1)
+        || (first_trade_id >= 0 && last_trade_id >= first_trade_id))
+    {
+        return Err(Error::new(
+            "Binance WebSocket kline contains invalid trade IDs",
+        ));
+    }
+    Ok(KlineEvent {
+        event_time_ms,
+        symbol,
+        interval,
+        kline,
+        first_trade_id,
+        last_trade_id,
+        closed,
+    })
+}
+
+fn parse_aggregate_trade_event(payload: &Value) -> Result<AggregateTradeEvent, Error> {
+    if payload.get("e").and_then(Value::as_str) != Some("aggTrade") {
+        return Err(Error::new("Binance WebSocket returned an unexpected event"));
+    }
+    let event = AggregateTradeEvent {
+        event_time_ms: object_i64(payload, "E")?,
+        trade_time_ms: object_i64(payload, "T")?,
+        symbol: payload
+            .get("s")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| Error::new("Binance aggregate trade is missing symbol"))?,
+        aggregate_trade_id: object_i64(payload, "a")?,
+        first_trade_id: object_i64(payload, "f")?,
+        last_trade_id: object_i64(payload, "l")?,
+        price: object_number(payload, "p")?,
+        quantity: object_number(payload, "q")?,
+        buyer_is_maker: payload
+            .get("m")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| Error::new("Binance aggregate trade is missing maker side"))?,
+    };
+    if event.event_time_ms <= 0
+        || event.trade_time_ms <= 0
+        || event.aggregate_trade_id < 0
+        || event.first_trade_id < 0
+        || event.last_trade_id < event.first_trade_id
+        || event.price <= 0.0
+        || event.quantity <= 0.0
+    {
+        return Err(Error::new(
+            "Binance WebSocket returned an invalid aggregate trade",
+        ));
+    }
+    Ok(event)
+}
+
+fn json_i64(value: &Value, field: &str) -> Result<i64, Error> {
+    value
+        .as_i64()
+        .ok_or_else(|| Error::new(format!("Binance {field} must be an integer")))
+}
+
+fn json_number(value: &Value, field: &str) -> Result<f64, Error> {
+    let parsed = match value {
+        Value::String(text) => text.parse::<f64>().ok(),
+        Value::Number(number) => number.as_f64(),
+        _ => None,
+    }
+    .ok_or_else(|| Error::new(format!("Binance {field} must be numeric")))?;
+    if !parsed.is_finite() {
+        return Err(Error::new(format!("Binance {field} must be finite")));
+    }
+    Ok(parsed)
+}
+
+fn object_number(value: &Value, field: &str) -> Result<f64, Error> {
+    let raw = value
+        .get(field)
+        .ok_or_else(|| Error::new(format!("Binance ticker is missing {field}")))?;
+    json_number(raw, field)
+}
+
+fn object_i64(value: &Value, field: &str) -> Result<i64, Error> {
+    let raw = value
+        .get(field)
+        .ok_or_else(|| Error::new(format!("Binance payload is missing {field}")))?;
+    json_i64(raw, field)
+}
+
+fn validate_klines(klines: &[Kline]) -> Result<(), Error> {
+    let mut previous_open = None;
+    for kline in klines {
+        if previous_open.is_some_and(|time| time >= kline.open_time_ms) {
+            return Err(Error::new("Binance klines must be strictly ascending"));
+        }
+        if kline.close_time_ms < kline.open_time_ms
+            || [kline.open, kline.high, kline.low, kline.close]
+                .into_iter()
+                .any(|price| price <= 0.0)
+            || kline.volume < 0.0
+            || kline.quote_volume < 0.0
+            || kline.high < kline.open.max(kline.close)
+            || kline.low > kline.open.min(kline.close)
+            || kline.high < kline.low
+        {
+            return Err(Error::new("Binance returned an invalid kline"));
+        }
+        previous_open = Some(kline.open_time_ms);
+    }
+    Ok(())
+}
+
+fn validate_ticker(ticker: &Ticker24h) -> Result<(), Error> {
+    if [
+        ticker.last,
+        ticker.previous_close,
+        ticker.open,
+        ticker.high,
+        ticker.low,
+    ]
+    .into_iter()
+    .any(|price| !price.is_finite() || price <= 0.0)
+        || !ticker.volume.is_finite()
+        || ticker.volume < 0.0
+        || !ticker.quote_volume.is_finite()
+        || ticker.quote_volume < 0.0
+        || ticker.high < ticker.low
+    {
+        return Err(Error::new("Binance returned an invalid 24h ticker"));
+    }
+    Ok(())
+}
+
+fn merge_pages(mut pages: Vec<Vec<Kline>>, requested: usize) -> Result<Vec<Kline>, Error> {
+    pages.reverse();
+    let mut klines = pages.into_iter().flatten().collect::<Vec<_>>();
+    validate_klines(&klines)?;
+    if klines.len() > requested {
+        klines.drain(..klines.len() - requested);
+    }
+    Ok(klines)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn independent_history_cancels_before_io_and_between_pages() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let idle = super::Client::new("http://127.0.0.1:0", Duration::from_secs(2)).unwrap();
+        assert!(idle.fetch_klines_with_cancellation("BTCUSDT", super::Interval::Minute1, 2, || false)
+            .unwrap_err().to_string().contains("cancelled"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut request = Vec::new(); let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") { socket.read_exact(&mut byte).unwrap(); request.push(byte[0]); assert!(request.len() < 8192); }
+            let rows = (0..super::MAX_PAGE_SIZE).map(|i| serde_json::json!([
+                (i as i64)*60_000,"10","12","9","11","100",(i as i64+1)*60_000-1,"1100",10,"50","550","0"
+            ])).collect::<Vec<_>>();
+            let body = serde_json::to_vec(&rows).unwrap();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        let client = super::Client::new(&format!("http://{address}"), Duration::from_secs(2)).unwrap();
+        let checks = AtomicUsize::new(0);
+        let result = client.fetch_klines_with_cancellation("BTCUSDT", super::Interval::Minute1, super::MAX_PAGE_SIZE+1,
+            || checks.fetch_add(1, Ordering::SeqCst) == 0);
+        server.join().unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(checks.load(Ordering::SeqCst), 2, "the second page must never start");
+    }
+
+    use super::{
+        AggregateTradeEvent, Client, Interval, MAX_STREAM_CONNECT_ADDRESSES, Market, RealtimeEvent,
+        RealtimeKlineState, RealtimeStream, RealtimeStreamKind, RealtimeUpdateSource,
+        ResolverService,
+        STREAM_CONNECT_RETRY_DELAY, STREAM_CONNECT_TIMEOUT, STREAM_RESOLVER_MAX_CONCURRENCY,
+        connect_stream_socket, connect_stream_socket_with_resolver,
+        connect_tcp_stream_with_control, merge_pages, normalize_asset, normalize_symbol,
+        parse_kline, parse_kline_event, parse_realtime_event, parse_spot_symbol,
+        parse_usd_margined_symbol, spot_stream_url, usd_margined_depth_stream_url,
+        usd_margined_market_stream_url, payload_matches_subscription,
+    };
+    use serde_json::json;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn tcp_connect_seam_bounds_attempts_and_timeout_budget() {
+        let addresses = (0..(MAX_STREAM_CONNECT_ADDRESSES + 3))
+            .map(|index| SocketAddr::from(([192, 0, 2, index as u8 + 1], 443)))
+            .collect::<Vec<_>>();
+        let mut attempts = Vec::new();
+        let started = Instant::now();
+        let control = super::ConnectControl::new(Duration::from_millis(50), Arc::new(|| false));
+        let error = connect_tcp_stream_with_control(&addresses, &control, |address, timeout| {
+            attempts.push((*address, timeout));
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "deterministic test refusal",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(attempts.len(), MAX_STREAM_CONNECT_ADDRESSES);
+        assert!(
+            attempts
+                .iter()
+                .all(|(_, timeout)| *timeout <= Duration::from_millis(50))
+        );
+        assert!(error.to_string().contains("attempts=8"));
+        assert_eq!(STREAM_CONNECT_TIMEOUT, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn websocket_handshake_returns_when_local_peer_stays_silent() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = Instant::now();
+        let error = connect_stream_socket(
+            format!("ws://{address}/stream"),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "handshake exceeded bound: {elapsed:?}"
+        );
+        assert!(error.to_string().contains("handshake"));
+    }
+
+    #[test]
+    fn tls_handshake_returns_when_local_peer_stays_silent() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = Instant::now();
+        let error = connect_stream_socket(
+            format!("wss://{address}/stream"),
+            Duration::from_millis(100),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "TLS handshake exceeded bound: {elapsed:?}"
+        );
+        assert!(error.to_string().contains("handshake"));
+    }
+
+    #[test]
+    fn slow_dns_resolution_is_rejected_by_the_shared_deadline() {
+        let started = Instant::now();
+        let error = connect_stream_socket_with_resolver(
+            "ws://127.0.0.1:1/stream".to_string(),
+            Duration::from_millis(25),
+            Duration::from_millis(20),
+            Arc::new(|| false),
+            |_host, _port, timeout| {
+                thread::sleep(timeout + Duration::from_millis(5));
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 1))])
+            },
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("DNS lookup exceeded deadline"));
+    }
+
+    #[test]
+    fn async_resolver_returns_on_deadline_when_lookup_never_returns() {
+        let resolver = ResolverService::new().unwrap();
+        let cancelled: super::CancellationCheck = Arc::new(|| false);
+        let started = Instant::now();
+        let error = resolver
+            .resolve_with_future(
+                Duration::from_millis(40),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "resolver caller exceeded deadline bound: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn async_resolver_cancellation_releases_and_allows_follow_up_lookup() {
+        let resolver = Arc::new(ResolverService::new().unwrap());
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        let caller_flag = Arc::clone(&cancelled_flag);
+        let cancelled: super::CancellationCheck =
+            Arc::new(move || caller_flag.load(Ordering::Acquire));
+        let resolver_for_caller = Arc::clone(&resolver);
+        let caller = thread::spawn(move || {
+            resolver_for_caller.resolve_with_future(
+                Duration::from_secs(5),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        cancelled_flag.store(true, Ordering::Release);
+        let error = caller.join().unwrap().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let not_cancelled: super::CancellationCheck = Arc::new(|| false);
+        let addresses = resolver
+            .resolve("localhost", 443, Duration::from_secs(1), &not_cancelled)
+            .unwrap();
+        assert!(addresses.iter().any(|address| address.ip().is_loopback()));
+    }
+
+    #[test]
+    fn async_resolver_limits_concurrent_requests_without_single_slot_busy_failures() {
+        let resolver = Arc::new(ResolverService::new().unwrap());
+        let release = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Barrier::new(STREAM_RESOLVER_MAX_CONCURRENCY + 1));
+        let mut callers = Vec::new();
+        for _ in 0..STREAM_RESOLVER_MAX_CONCURRENCY {
+            let resolver = Arc::clone(&resolver);
+            let release = Arc::clone(&release);
+            let entered = Arc::clone(&entered);
+            callers.push(thread::spawn(move || {
+                let cancelled: super::CancellationCheck =
+                    Arc::new(move || release.load(Ordering::Acquire));
+                entered.wait();
+                resolver.resolve_with_future(
+                    Duration::from_secs(5),
+                    &cancelled,
+                    std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+                )
+            }));
+        }
+        entered.wait();
+        let wait_started = Instant::now();
+        while resolver.permits.available_permits() != 0
+            && wait_started.elapsed() < Duration::from_secs(1)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(resolver.permits.available_permits(), 0);
+        let cancelled: super::CancellationCheck = Arc::new(|| false);
+        let error = resolver
+            .resolve_with_future(
+                Duration::from_secs(1),
+                &cancelled,
+                std::future::pending::<io::Result<Vec<SocketAddr>>>(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        release.store(true, Ordering::Release);
+        for caller in callers {
+            assert_eq!(
+                caller.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_connect_would_block_retries_with_a_cancellable_delay() {
+        let addresses = [SocketAddr::from(([192, 0, 2, 1], 443))];
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        let canceller_flag = Arc::clone(&cancelled_flag);
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            canceller_flag.store(true, Ordering::Release);
+        });
+        let cancelled_flag_for_check = Arc::clone(&cancelled_flag);
+        let control = super::ConnectControl::new(
+            Duration::from_secs(1),
+            Arc::new(move || cancelled_flag_for_check.load(Ordering::Acquire)),
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_connect = Arc::clone(&attempts);
+        let started = Instant::now();
+        let error = connect_tcp_stream_with_control(&addresses, &control, |_address, _timeout| {
+            attempts_for_connect.fetch_add(1, Ordering::AcqRel);
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "try again"))
+        })
+        .unwrap_err();
+        canceller.join().unwrap();
+
+        assert!(error.to_string().contains("stopped"));
+        assert!(started.elapsed() >= STREAM_CONNECT_RETRY_DELAY);
+        assert!(attempts.load(Ordering::Acquire) < 100);
+    }
+
+    #[test]
+    fn websocket_handshake_cancellation_releases_without_a_background_worker() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok((_stream, _)) => {
+                        thread::sleep(Duration::from_millis(250));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if started.elapsed() >= Duration::from_secs(1) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            connect_stream_socket_with_resolver(
+                format!("ws://{address}/stream"),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Arc::new(move || worker_cancelled.load(Ordering::Acquire)),
+                |host, port, _timeout| {
+                    (host, port)
+                        .to_socket_addrs()
+                        .map(|addresses| addresses.collect())
+                },
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        cancelled.store(true, Ordering::Release);
+        let error = worker.join().unwrap().unwrap_err();
+        server.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            error.to_string().contains("cancelled"),
+            "unexpected cancellation error: {error}"
+        );
+    }
+
+    #[test]
+    fn tls_websocket_handshake_cancellation_is_not_retried_as_interrupted() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok((_stream, _)) => {
+                        // Keep the TCP connection open without completing TLS. If cancellation is
+                        // surfaced as io::ErrorKind::Interrupted, rustls retries it internally and
+                        // this client remains stuck until the peer finally closes the socket.
+                        thread::sleep(Duration::from_secs(2));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if started.elapsed() >= Duration::from_secs(1) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            connect_stream_socket_with_resolver(
+                format!("wss://localhost:{}/stream", address.port()),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Arc::new(move || worker_cancelled.load(Ordering::Acquire)),
+                |_host, _port, _timeout| Ok(vec![address]),
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        cancelled.store(true, Ordering::Release);
+        let error = worker.join().unwrap().unwrap_err();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "TLS handshake cancellation was retried instead of terminating: {elapsed:?}"
+        );
+        assert!(
+            error.to_string().contains("cancelled"),
+            "unexpected cancellation error: {error}"
+        );
+    }
+
+    #[test]
+    fn interval_values_match_binance_spot_contract() {
+        assert_eq!(Interval::Minute1.as_api_str(), "1m");
+        assert_eq!(Interval::Hour1.as_api_str(), "1h");
+        assert_eq!(Interval::Hour2.as_api_str(), "2h");
+        assert_eq!(Interval::Hour4.as_api_str(), "4h");
+        assert_eq!(Interval::Month1.as_api_str(), "1M");
+    }
+
+    #[test]
+    fn market_endpoints_keep_spot_and_usd_margined_futures_separate() {
+        assert_eq!(
+            Market::Spot.rest_base_url(),
+            "https://data-api.binance.vision"
+        );
+        assert_eq!(
+            Market::UsdMarginedFutures.rest_base_url(),
+            "https://fapi.binance.com"
+        );
+        assert_eq!(
+            Market::UsdMarginedFutures.websocket_base_url(),
+            "wss://fstream.binance.com"
+        );
+        assert_eq!(
+            Market::UsdMarginedFutures.api_path("/api/v3/klines", "/fapi/v1/klines"),
+            "/fapi/v1/klines"
+        );
+        let spot = spot_stream_url("BTCUSDT", Interval::Minute1);
+        assert!(spot.contains("@aggTrade") && spot.contains("@depth20@100ms"));
+        let market = usd_margined_market_stream_url("BTCUSDT", Interval::Minute1);
+        let depth = usd_margined_depth_stream_url("BTCUSDT");
+        assert!(market.contains("/market/stream?"));
+        assert!(market.contains("@aggTrade") && market.contains("@kline_1m"));
+        assert!(!market.contains("@depth"));
+        assert!(depth.contains("/public/stream?"));
+        assert!(depth.contains("@depth20@100ms"));
+        assert!(!depth.contains("@aggTrade") && !depth.contains("@kline"));
+    }
+
+    #[test]
+    fn rejects_untrusted_plain_http_origins() {
+        let error = match Client::new("http://example.com", Duration::from_secs(1)) {
+            Ok(_) => panic!("plain HTTP origin must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn catalog_identity_accepts_ascii_codes_only() {
+        assert_eq!(normalize_symbol("btcusdt").unwrap(), "BTCUSDT");
+        assert_eq!(normalize_asset("usdt").unwrap(), "USDT");
+        assert!(normalize_symbol("币安人生USDT").is_err());
+        assert!(normalize_asset("币安人生").is_err());
+    }
+
+    #[test]
+    fn parses_kline_fields_without_losing_decimal_precision_shape() {
+        let kline = parse_kline(&json!([
+            1_789_375_200_000_i64,
+            "77770.17000000",
+            "77790.01000000",
+            "77766.00000000",
+            "77766.01000000",
+            "3.52271000",
+            1_789_375_259_999_i64,
+            "273996.51768920",
+            1771,
+            "1.19268000",
+            "92760.34470020",
+            "0"
+        ]))
+        .unwrap();
+        assert_eq!(kline.open_time_ms, 1_789_375_200_000);
+        assert_eq!(kline.close_time_ms, 1_789_375_259_999);
+        assert_eq!(kline.open, 77_770.17);
+        assert_eq!(kline.quote_volume, 273_996.5176892);
+    }
+
+    #[test]
+    fn parses_and_validates_websocket_kline_events() {
+        let event = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375234567,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"s":"BTCUSDT","i":"1m",
+                "o":"77770.17","c":"77766.01","h":"77790.01","l":"77766.00",
+                "v":"3.52271","f":100,"L":106,"x":false,"q":"273996.5176892"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(event.symbol, "BTCUSDT");
+        assert_eq!(event.interval, Interval::Minute1);
+        assert_eq!(event.kline.close_time_ms, 1_789_375_259_999);
+        assert_eq!(event.kline.close, 77_766.01);
+        assert_eq!(event.last_trade_id, 106);
+        assert!(!event.closed);
+    }
+
+    #[test]
+    fn rejects_websocket_events_with_invalid_ohlc() {
+        let error = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375234567,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"10","c":"11","h":"9","l":"8","v":"1","f":100,"L":100,
+                "x":false,"q":"10"}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid kline"));
+    }
+
+    #[test]
+    fn parses_combined_aggregate_trade_events() {
+        let text = r#"{
+            "stream":"btcusdt@aggTrade",
+            "data":{"e":"aggTrade","E":1789375235000,"s":"BTCUSDT","a":81,
+            "p":"77780.25","q":"0.125","f":107,"l":109,"T":1789375234999,"m":false}
+        }"#;
+        let event = parse_realtime_event(text, "BTCUSDT", Interval::Minute1).unwrap();
+        let RealtimeEvent::AggregateTrade(event) = event else {
+            panic!("expected aggregate trade");
+        };
+        assert_eq!(event.first_trade_id, 107);
+        assert_eq!(event.last_trade_id, 109);
+        assert_eq!(event.quantity, 0.125);
+        assert!(!event.buyer_is_maker);
+    }
+
+    #[test]
+    fn persistent_subscription_streams_follow_market_channel_boundaries() {
+        assert_eq!(
+            RealtimeStreamKind::Spot.streams("BTCUSDT", Interval::Minute5),
+            vec![
+                "btcusdt@aggTrade",
+                "btcusdt@kline_5m",
+                "btcusdt@depth20@100ms",
+            ]
+        );
+        assert_eq!(
+            RealtimeStreamKind::UsdMarginedMarket.streams("ETHUSDT", Interval::Hour1),
+            vec!["ethusdt@aggTrade", "ethusdt@kline_1h"]
+        );
+        assert_eq!(
+            RealtimeStreamKind::UsdMarginedDepth.streams("SOLUSDT", Interval::Minute1),
+            vec!["solusdt@depth20@100ms"]
+        );
+    }
+
+    #[test]
+    fn late_payloads_from_replaced_subscription_are_ignored_by_identity() {
+        let old = json!({
+            "stream": "btcusdt@kline_1m",
+            "data": {"e": "kline"}
+        });
+        let current = json!({
+            "stream": "ethusdt@kline_5m",
+            "data": {"e": "kline"}
+        });
+        assert!(!payload_matches_subscription(
+            &old,
+            "ETHUSDT",
+            Interval::Minute5
+        ));
+        assert!(payload_matches_subscription(
+            &current,
+            "ETHUSDT",
+            Interval::Minute5
+        ));
+    }
+
+    #[test]
+    fn parses_only_active_spot_catalog_entries() {
+        let active = parse_spot_symbol(&json!({
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT",
+            "isSpotTradingAllowed": true
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(active.symbol, "BTCUSDT");
+        assert_eq!(active.base_asset, "BTC");
+        assert_eq!(active.quote_asset, "USDT");
+        assert!(
+            parse_spot_symbol(&json!({
+                "symbol": "OLDUSDT",
+                "status": "BREAK",
+                "baseAsset": "OLD",
+                "quoteAsset": "USDT",
+                "isSpotTradingAllowed": true
+            }))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            parse_spot_symbol(&json!({
+                "symbol": "币安人生USDT",
+                "status": "TRADING",
+                "baseAsset": "币安人生",
+                "quoteAsset": "USDT",
+                "isSpotTradingAllowed": true
+            }))
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parses_only_active_usd_margined_perpetual_contracts() {
+        let active = parse_usd_margined_symbol(&json!({
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT"
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(active.symbol, "BTCUSDT");
+        assert_eq!(active.quote_asset, "USDT");
+        assert!(
+            parse_usd_margined_symbol(&json!({
+                "symbol": "BTCUSDT_261225",
+                "status": "TRADING",
+                "contractType": "CURRENT_QUARTER",
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT"
+            }))
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parses_usd_margined_partial_depth_snapshots() {
+        let text = r#"{
+            "stream":"btcusdt@depth20@100ms",
+            "data":{"e":"depthUpdate","E":1789375235000,"T":1789375234999,
+            "s":"BTCUSDT","U":150,"u":160,"pu":149,
+            "b":[["100.0","2.0"],["99.5","3.0"]],
+            "a":[["100.5","1.5"],["101.0","4.0"]]}
+        }"#;
+        let event = parse_realtime_event(text, "BTCUSDT", Interval::Minute1).unwrap();
+        let RealtimeEvent::Depth(event) = event else {
+            panic!("expected depth snapshot");
+        };
+        assert_eq!(event.last_update_id, 160);
+        assert_eq!(event.bids[0].price, 100.0);
+        assert_eq!(event.asks[0].quantity, 1.5);
+    }
+
+    #[test]
+    fn parses_top_twenty_partial_depth_snapshots() {
+        let text = r#"{
+            "stream":"btcusdt@depth20@100ms",
+            "data":{"lastUpdateId":160,"bids":[["100.0","2.0"],["99.5","3.0"]],
+            "asks":[["100.5","1.5"],["101.0","4.0"]]}
+        }"#;
+        let event = parse_realtime_event(text, "BTCUSDT", Interval::Minute1).unwrap();
+        let RealtimeEvent::Depth(event) = event else {
+            panic!("expected depth snapshot");
+        };
+        assert_eq!(event.last_update_id, 160);
+        assert_eq!(event.bids[0].price, 100.0);
+        assert_eq!(event.asks[0].quantity, 1.5);
+    }
+
+    #[test]
+    fn aggregate_trade_updates_price_without_recounting_official_kline_volume() {
+        let mut state = RealtimeKlineState::default();
+        let baseline = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375234567,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"101","h":"102","l":"99","v":"5","f":100,"L":106,
+                "x":false,"q":"505"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(baseline)).unwrap();
+        let trade = AggregateTradeEvent {
+            event_time_ms: 1_789_375_235_000,
+            trade_time_ms: 1_789_375_234_999,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 81,
+            first_trade_id: 107,
+            last_trade_id: 109,
+            price: 103.0,
+            quantity: 2.0,
+            buyer_is_maker: false,
+        };
+        let update = state
+            .apply(&RealtimeEvent::AggregateTrade(trade.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.source, RealtimeUpdateSource::AggregateTrade);
+        assert_eq!(update.kline.high, 103.0);
+        assert_eq!(update.kline.close, 103.0);
+        assert_eq!(update.kline.volume, 5.0);
+        assert_eq!(update.kline.quote_volume, 505.0);
+        assert!(
+            state
+                .apply(&RealtimeEvent::AggregateTrade(trade))
+                .unwrap()
+                .is_none(),
+            "a repeated aggregate trade must not add volume twice"
+        );
+    }
+
+    #[test]
+    fn overlapping_raw_trade_ranges_do_not_pause_live_price_updates() {
+        let mut state = RealtimeKlineState::default();
+        let baseline = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375234567,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"101","h":"102","l":"99","v":"5","f":100,"L":106,
+                "x":false,"q":"505"}
+            }"#,
+        )
+        .unwrap();
+        state
+            .apply(&RealtimeEvent::Kline(baseline.clone()))
+            .unwrap();
+        let skipped = AggregateTradeEvent {
+            event_time_ms: 1_789_375_235_000,
+            trade_time_ms: 1_789_375_234_999,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 82,
+            first_trade_id: 108,
+            last_trade_id: 109,
+            price: 103.0,
+            quantity: 2.0,
+            buyer_is_maker: false,
+        };
+        let update = state
+            .apply(&RealtimeEvent::AggregateTrade(skipped))
+            .unwrap()
+            .expect("an overlapping aggregate still carries the latest tradable price");
+        assert_eq!(update.kline.close, 103.0);
+        assert!(!state.awaiting_calibration());
+        let next = AggregateTradeEvent {
+            event_time_ms: 1_789_375_235_100,
+            trade_time_ms: 1_789_375_235_099,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 83,
+            first_trade_id: 110,
+            last_trade_id: 110,
+            price: 104.0,
+            quantity: 1.0,
+            buyer_is_maker: true,
+        };
+        let update = state
+            .apply(&RealtimeEvent::AggregateTrade(next))
+            .unwrap()
+            .expect("later aggregate trades must keep the live close moving");
+        assert_eq!(update.kline.close, 104.0);
+        assert_eq!(update.kline.volume, 5.0);
+        assert!(!state.awaiting_calibration());
+
+        assert!(
+            state
+                .apply(&RealtimeEvent::Kline(baseline))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn first_trade_of_a_new_fixed_interval_opens_a_provisional_bar() {
+        let mut state = RealtimeKlineState::default();
+        let baseline = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375259900,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"101","h":"102","l":"99","v":"5","f":100,"L":106,
+                "x":true,"q":"505"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(baseline)).unwrap();
+        let trade = AggregateTradeEvent {
+            event_time_ms: 1_789_375_260_050,
+            trade_time_ms: 1_789_375_260_049,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 82,
+            first_trade_id: 107,
+            last_trade_id: 107,
+            price: 103.0,
+            quantity: 2.0,
+            buyer_is_maker: false,
+        };
+        let update = state
+            .apply(&RealtimeEvent::AggregateTrade(trade))
+            .unwrap()
+            .expect("the first real trade must open the next minute without waiting for Kline");
+        assert_eq!(update.kline.open_time_ms, 1_789_375_260_000);
+        assert_eq!(update.kline.close_time_ms, 1_789_375_319_999);
+        assert_eq!(update.kline.open, 103.0);
+        assert_eq!(update.kline.high, 103.0);
+        assert_eq!(update.kline.low, 103.0);
+        assert_eq!(update.kline.close, 103.0);
+        assert_eq!(update.kline.volume, 0.0);
+        assert_eq!(update.kline.quote_volume, 0.0);
+        assert!(!state.awaiting_calibration());
+    }
+
+    #[test]
+    fn late_previous_close_does_not_reset_the_provisional_next_bar() {
+        let mut state = RealtimeKlineState::default();
+        let baseline = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375259900,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"101","h":"102","l":"99","v":"5","f":100,"L":106,
+                "x":false,"q":"505"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(baseline)).unwrap();
+
+        let trade = |aggregate_trade_id, event_time_ms, price| AggregateTradeEvent {
+            event_time_ms,
+            trade_time_ms: event_time_ms,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id,
+            first_trade_id: aggregate_trade_id + 100,
+            last_trade_id: aggregate_trade_id + 100,
+            price,
+            quantity: 1.0,
+            buyer_is_maker: false,
+        };
+        state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                82,
+                1_789_375_260_050,
+                103.0,
+            )))
+            .unwrap()
+            .unwrap();
+        state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                83,
+                1_789_375_260_100,
+                105.0,
+            )))
+            .unwrap()
+            .unwrap();
+
+        let late_close = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375260800,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"102","h":"104","l":"99","v":"8","f":100,"L":110,
+                "x":true,"q":"810"}
+            }"#,
+        )
+        .unwrap();
+        let late_update = state
+            .apply(&RealtimeEvent::Kline(late_close))
+            .unwrap()
+            .expect("the previous interval close must still be emitted");
+        assert!(late_update.closed);
+        assert_eq!(late_update.kline.open_time_ms, 1_789_375_200_000);
+
+        let next_update = state
+            .apply(&RealtimeEvent::AggregateTrade(trade(
+                84,
+                1_789_375_260_900,
+                102.0,
+            )))
+            .unwrap()
+            .expect("the next trade must continue the provisional next bar");
+        assert_eq!(next_update.kline.open_time_ms, 1_789_375_260_000);
+        assert_eq!(next_update.kline.open, 103.0);
+        assert_eq!(next_update.kline.high, 105.0);
+        assert_eq!(next_update.kline.low, 102.0);
+        assert_eq!(next_update.kline.close, 102.0);
+    }
+
+    #[test]
+    fn late_previous_close_does_not_lower_the_kline_event_high_watermark() {
+        let mut state = RealtimeKlineState::default();
+        let current = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375261000,"s":"BTCUSDT",
+                "k":{"t":1789375260000,"T":1789375319999,"i":"1m",
+                "o":"103","c":"104","h":"105","l":"102","v":"2","f":107,"L":109,
+                "x":false,"q":"208"}
+            }"#,
+        )
+        .unwrap();
+        state.apply(&RealtimeEvent::Kline(current)).unwrap();
+
+        let late_previous_close = parse_kline_event(
+            r#"{
+                "e":"kline","E":1789375260500,"s":"BTCUSDT",
+                "k":{"t":1789375200000,"T":1789375259999,"i":"1m",
+                "o":"100","c":"102","h":"104","l":"99","v":"8","f":100,"L":106,
+                "x":true,"q":"810"}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            state
+                .apply(&RealtimeEvent::Kline(late_previous_close))
+                .unwrap()
+                .is_some(),
+            "the previous close must still be forwarded"
+        );
+
+        let stale_trade = AggregateTradeEvent {
+            event_time_ms: 1_789_375_260_750,
+            trade_time_ms: 1_789_375_260_749,
+            symbol: "BTCUSDT".to_string(),
+            aggregate_trade_id: 82,
+            first_trade_id: 110,
+            last_trade_id: 110,
+            price: 99.0,
+            quantity: 1.0,
+            buyer_is_maker: false,
+        };
+        assert!(
+            state
+                .apply(&RealtimeEvent::AggregateTrade(stale_trade))
+                .unwrap()
+                .is_none(),
+            "a late previous close must not let an older trade cross the existing kline watermark"
+        );
+    }
+
+    #[test]
+    #[ignore = "connects to Binance Spot WebSocket market stream"]
+    fn receives_real_aggregate_trade_and_kline_events() {
+        let mut stream = RealtimeStream::connect("BTCUSDT", Interval::Minute1).unwrap();
+        let mut state = RealtimeKlineState::default();
+        let mut aggregate_update = false;
+        let mut kline_update = false;
+        let mut depth_update = false;
+        let started = std::time::Instant::now();
+        let mut last_update_at = None;
+        let mut max_update_gap_ms = 0;
+        let mut calibration_pauses = 0;
+        let mut updates = 0;
+        let mut aggregate_events = 0;
+        let mut aggregate_updates = 0;
+        let mut last_close = None;
+        let mut last_price_change_at = None;
+        let mut price_changes = 0;
+        let mut max_price_change_gap_ms = 0;
+        while started.elapsed() < Duration::from_secs(20) {
+            let event = stream.read_event().unwrap();
+            match &event {
+                RealtimeEvent::AggregateTrade(event) => {
+                    aggregate_events += 1;
+                    assert_eq!(event.symbol, "BTCUSDT");
+                    assert!(event.price > 0.0);
+                }
+                RealtimeEvent::Kline(event) => {
+                    assert_eq!(event.symbol, "BTCUSDT");
+                    assert_eq!(event.interval, Interval::Minute1);
+                    assert!(event.kline.close > 0.0);
+                }
+                RealtimeEvent::Depth(event) => {
+                    assert_eq!(event.symbol, "BTCUSDT");
+                    assert!(event.bids.len() <= 20);
+                    assert!(event.asks.len() <= 20);
+                    depth_update = true;
+                }
+            }
+            let was_awaiting = state.awaiting_calibration();
+            if let Some(update) = state.apply(&event).unwrap() {
+                let now = std::time::Instant::now();
+                if let Some(previous) = last_update_at {
+                    max_update_gap_ms =
+                        max_update_gap_ms.max(now.duration_since(previous).as_millis());
+                }
+                last_update_at = Some(now);
+                updates += 1;
+                if last_close.is_some_and(|close| close != update.kline.close) {
+                    if let Some(previous) = last_price_change_at {
+                        max_price_change_gap_ms =
+                            max_price_change_gap_ms.max(now.duration_since(previous).as_millis());
+                    }
+                    last_price_change_at = Some(now);
+                    price_changes += 1;
+                } else if last_close.is_none() {
+                    last_price_change_at = Some(now);
+                }
+                last_close = Some(update.kline.close);
+                match update.source {
+                    RealtimeUpdateSource::AggregateTrade => aggregate_update = true,
+                    RealtimeUpdateSource::Kline => kline_update = true,
+                }
+                if update.source == RealtimeUpdateSource::AggregateTrade {
+                    aggregate_updates += 1;
+                }
+            }
+            if !was_awaiting && state.awaiting_calibration() {
+                calibration_pauses += 1;
+            }
+        }
+        assert!(aggregate_update && kline_update && depth_update);
+        eprintln!(
+            "Spot 20s cadence: updates={updates} aggregate_events={aggregate_events} aggregate_updates={aggregate_updates} price_changes={price_changes} max_update_gap_ms={max_update_gap_ms} max_price_change_gap_ms={max_price_change_gap_ms} calibration_pauses={calibration_pauses}"
+        );
+    }
+
+    #[test]
+    #[ignore = "connects to Binance Spot exchange information"]
+    fn receives_real_active_spot_catalog() {
+        let symbols = Client::public_market_data()
+            .unwrap()
+            .fetch_spot_symbols()
+            .unwrap();
+        assert!(symbols.len() > 100);
+        assert!(symbols.iter().any(|symbol| {
+            symbol.symbol == "BTCUSDT" && symbol.base_asset == "BTC" && symbol.quote_asset == "USDT"
+        }));
+    }
+
+    #[test]
+    #[ignore = "connects to Binance USD-M Futures public market data"]
+    fn receives_real_usd_margined_perpetual_market() {
+        let client = Client::public_usd_margined_market_data().unwrap();
+        let symbols = client.fetch_usd_margined_perpetual_symbols().unwrap();
+        assert!(symbols.iter().any(|symbol| symbol.symbol == "BTCUSDT"));
+        let klines = client
+            .fetch_klines("BTCUSDT", Interval::Minute1, 3)
+            .unwrap();
+        assert_eq!(klines.len(), 3);
+        assert!(client.fetch_ticker_24h("BTCUSDT").unwrap().last > 0.0);
+    }
+
+    #[test]
+    #[ignore = "connects to Binance USD-M Futures WebSocket market stream"]
+    fn reuses_real_usd_margined_subscription_for_symbol_and_interval_switches() {
+        let mut market =
+            RealtimeStream::connect_usd_margined_market("BTCUSDT", Interval::Minute1).unwrap();
+        let first_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < first_deadline, "initial USD-M stream timed out");
+            if market.poll_event().unwrap().is_some() {
+                break;
+            }
+        }
+        market
+            .replace_subscription("ETHUSDT", Interval::Minute5)
+            .unwrap();
+        let switched_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                Instant::now() < switched_deadline,
+                "reused USD-M market stream did not produce ETHUSDT"
+            );
+            let Some(event) = market.poll_event().unwrap() else {
+                continue;
+            };
+            let matches = match event {
+                RealtimeEvent::AggregateTrade(event) => event.symbol == "ETHUSDT",
+                RealtimeEvent::Kline(event) => {
+                    event.symbol == "ETHUSDT" && event.interval == Interval::Minute5
+                }
+                RealtimeEvent::Depth(_) => false,
+            };
+            if matches {
+                break;
+            }
+        }
+
+        let mut depth =
+            RealtimeStream::connect_usd_margined_depth("BTCUSDT", Interval::Minute1).unwrap();
+        depth
+            .replace_subscription("ETHUSDT", Interval::Minute5)
+            .unwrap();
+        let depth_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                Instant::now() < depth_deadline,
+                "reused USD-M depth stream did not produce ETHUSDT"
+            );
+            if matches!(
+                depth.poll_event().unwrap(),
+                Some(RealtimeEvent::Depth(event)) if event.symbol == "ETHUSDT"
+            ) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "connects to Binance USD-M Futures WebSocket market stream"]
+    fn receives_real_usd_margined_realtime_events() {
+        let depth_worker = std::thread::spawn(|| {
+            let mut depth =
+                RealtimeStream::connect_usd_margined_depth("BTCUSDT", Interval::Minute1).unwrap();
+            for _ in 0..300 {
+                assert!(matches!(
+                    depth.read_event().unwrap(),
+                    RealtimeEvent::Depth(_)
+                ));
+            }
+        });
+        let mut market =
+            RealtimeStream::connect_usd_margined_market("BTCUSDT", Interval::Minute1).unwrap();
+        let mut aggregate_trade = false;
+        let mut kline = false;
+        let mut state = RealtimeKlineState::default();
+        let started = std::time::Instant::now();
+        let mut events = 0;
+        let mut updates = 0;
+        let mut calibration_pauses = 0;
+        let mut last_update_at = None;
+        let mut max_update_gap_ms = 0;
+        let mut max_lag_ms = 0;
+        while started.elapsed() < Duration::from_secs(30) {
+            let event = market.read_event().unwrap();
+            let event_time_ms = match &event {
+                RealtimeEvent::AggregateTrade(event) => {
+                    aggregate_trade = true;
+                    event.event_time_ms
+                }
+                RealtimeEvent::Kline(event) => {
+                    kline = true;
+                    event.event_time_ms
+                }
+                RealtimeEvent::Depth(_) => panic!("depth must not share the USD-M market stream"),
+            };
+            let was_awaiting = state.awaiting_calibration();
+            if state.apply(&event).unwrap().is_some() {
+                let now = std::time::Instant::now();
+                if let Some(previous) = last_update_at {
+                    max_update_gap_ms =
+                        max_update_gap_ms.max(now.duration_since(previous).as_millis());
+                }
+                last_update_at = Some(now);
+                updates += 1;
+            }
+            if !was_awaiting && state.awaiting_calibration() {
+                calibration_pauses += 1;
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            max_lag_ms = max_lag_ms.max(now_ms.saturating_sub(event_time_ms));
+            events += 1;
+        }
+        depth_worker.join().unwrap();
+        assert!(aggregate_trade && kline);
+        eprintln!(
+            "USD-M 30s cadence: events={events} updates={updates} max_lag_ms={max_lag_ms} max_update_gap_ms={max_update_gap_ms} calibration_pauses={calibration_pauses}"
+        );
+        assert!(events > 100, "USD-M market stream was unexpectedly quiet");
+        assert!(
+            max_lag_ms < 2_000,
+            "USD-M market stream accumulated {max_lag_ms}ms of lag"
+        );
+    }
+
+    #[test]
+    fn rejects_overlapping_history_pages_instead_of_splicing_them() {
+        let row = |open_time_ms| super::Kline {
+            open_time_ms,
+            close_time_ms: open_time_ms + 59_999,
+            open: 10.0,
+            high: 11.0,
+            low: 9.0,
+            close: 10.5,
+            volume: 1.0,
+            quote_volume: 10.0,
+        };
+        let error =
+            merge_pages(vec![vec![row(120_000)], vec![row(60_000), row(120_000)]], 3).unwrap_err();
+        assert!(error.to_string().contains("strictly ascending"));
+    }
+}

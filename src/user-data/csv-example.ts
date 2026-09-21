@@ -1,0 +1,72 @@
+/** A reference Connector, not a required physical storage format. */
+export const CSV_CONNECTOR_SOURCE = String.raw`// Reference only: UTF-8 CSV files named SH_600000.csv / SZ_000001.csv / BJ_430001.csv.
+// Physical files are read in place and never converted or changed.
+// Columns: time (Unix seconds) or date (YYYY-MM-DD), open, high, low, close, volume; amount optional.
+// History is paged oldest to newest. Adapt this code to YOUR format, not the files to this example.
+function csvParser() {
+  let field='',row=[],quoted=false,afterQuote=false,skipLF=false;
+  return {push(text,eof){
+    const rows=[];
+    const emit=()=>{row.push(field);rows.push(row);row=[];field='';afterQuote=false;};
+    for(const character of text){
+      if(skipLF){skipLF=false;if(character==='\n')continue;}
+      if(quoted){if(character==='"'){quoted=false;afterQuote=true;}else field+=character;continue;}
+      if(afterQuote&&character==='"'){field+='"';quoted=true;afterQuote=false;continue;}
+      if(character===','){row.push(field);field='';afterQuote=false;continue;}
+      if(character==='\r'||character==='\n'){emit();skipLF=character==='\r';continue;}
+      if(afterQuote){if(character===' '||character==='\t')continue;throw new Error('Unexpected text after closing quote');}
+      if(character==='"'){if(field)throw new Error('Quote inside unquoted field');quoted=true;continue;}
+      field+=character;
+    }
+    if(eof){if(quoted)throw new Error('Unclosed CSV quote');if(field||row.length||afterQuote)emit();}
+    return rows;
+  }};
+}
+defineConnector({
+  formatVersion:1,apiVersion:1,id:'example.csv-files',version:1,name:'CSV 文件参考连接器',
+  description:'示例格式：SH_600000.csv，UTF-8，日线，原始价格。实际文件无需转换，可让 AI 修改连接器来适配。',
+  supports:{venues:['SH','SZ','BJ'],kinds:['stock'],resolutions:['1D'],adjustments:['none']},
+  *listSymbols(query,io){
+    const page=yield io.list('',query.cursor,query.limit);
+    const symbols=[];
+    for(const entry of page.entries){
+      const match=/^(SH|SZ|BJ)_([A-Z0-9._-]+)\.csv$/.exec(entry.name);
+      if(match&&(entry.kind==='file'||entry.kind==='link'))symbols.push({symbol:match[1]+':'+match[2],name:entry.name,kind:'stock'});
+    }
+    return {symbols,nextCursor:page.next};
+  },
+  *getHistory(query,io){
+    const path=query.symbol.replace(':','_')+'.csv';
+    let continuation=query.cursor?JSON.parse(query.cursor):{skip:0};
+    if(!continuation||!Number.isSafeInteger(continuation.skip)||continuation.skip<0
+      ||Object.keys(continuation).some(k=>k!=='skip'&&k!=='revision')
+      ||(query.cursor&&typeof continuation.revision!=='string'))throw new Error('Invalid history continuation');
+    const parser=csvParser();let offset=0,revision=continuation.revision,headers=null,seen=0,previous=-Infinity,more=false;
+    const bars=[];
+    readLoop:while(true){
+      const chunk=yield io.readText(path,offset,65536,revision,'utf-8');revision=chunk.revision;offset+=chunk.bytesRead;
+      if(!chunk.eof&&chunk.bytesRead===0)throw new Error('Read made no progress');
+      for(const cells of parser.push(chunk.text,chunk.eof)){
+        if(cells.length===1&&cells[0].trim()==='')continue;
+        if(!headers){
+          headers=cells.map(v=>v.trim().toLowerCase());
+          if(new Set(headers).size!==headers.length||!['open','high','low','close','volume'].every(k=>headers.includes(k))
+            ||(!headers.includes('time')&&!headers.includes('date')))throw new Error('CSV columns do not match this reference Connector');
+          continue;
+        }
+        if(cells.length!==headers.length)throw new Error('CSV row length mismatch');
+        const get=name=>cells[headers.indexOf(name)].trim();
+        const numeric=name=>{const text=get(name);if(!text)throw new Error('Missing '+name);const value=Number(text);if(!Number.isFinite(value))throw new Error('Invalid '+name);return value;};
+        const rawTime=get(headers.includes('time')?'time':'date');
+        const time=/^\d{4}-\d{2}-\d{2}$/.test(rawTime)?Date.parse(rawTime+'T00:00:00Z')/1000:Number(rawTime);
+        if(!rawTime||!Number.isSafeInteger(time)||time<=previous)throw new Error('CSV times must be strictly ascending Unix seconds or dates');previous=time;
+        const bar={time,open:numeric('open'),high:numeric('high'),low:numeric('low'),close:numeric('close'),volume:numeric('volume')};
+        if(headers.includes('amount'))bar.amount=numeric('amount');
+        if(seen++<continuation.skip)continue;
+        if(bars.length===query.count){more=true;break readLoop;}bars.push(bar);
+      }
+      if(chunk.eof)break;
+    }
+    return {seriesKind:'ohlcv',bars,nextCursor:more?JSON.stringify({skip:continuation.skip+bars.length,revision}):null};
+  }
+});`;

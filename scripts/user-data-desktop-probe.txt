@@ -1,0 +1,143 @@
+// Appended only to a private acceptance bundle. No test grant or API is shipped.
+async function runUserDataDesktopProbe(command) {
+  const get = id => document.getElementById(id);
+  const assert = (yes, message) => { if (!yes) throw Error(message); };
+  const wait = async (fn, label, milliseconds = 18000) => {
+    const end = performance.now() + milliseconds;
+    while (!fn()) { if (performance.now() > end) throw Error(`data ${label}: ${get('user-data-status').textContent}`); await new Promise(r => setTimeout(r, 30)); }
+  };
+  const click = element => { assert(element && !element.disabled, 'data control unavailable'); element.click(); };
+  const manager = getUserDataManager();
+  await userDataController.initialize(); await manager.idle();
+  const card = () => {
+    assert(/^[a-f0-9]{32}$/.test(command.sourceId), 'invalid private fixture identity');
+    return document.querySelector(`[data-source-id="${command.sourceId}"]`);
+  };
+  const action = name => { const node = card()?.querySelector(`[data-action="${name}"]`); if (node?.closest('details')) node.closest('details').open = true; click(node); };
+  const open = async () => {
+    await getCurrentWindow().show(); await getCurrentWindow().setFocus();
+    if (aiPanel.hidden || !widgetBar.classList.contains('open')) click(get('ai-toggle'));
+    if (!get('api-history-page').hidden) click(get('api-history-back'));
+    if (get('api-settings-page').hidden) click(get('api-settings-open'));
+    get('user-data-settings').open = true;
+    get('user-data-settings').dispatchEvent(new Event('toggle'));
+    await wait(() => get('user-data-page').dataset.ready === 'true', 'data settings ready');
+  };
+  const idle = () => wait(() => get('user-data-page').dataset.busy !== 'true', 'UI operation finished');
+  switch (command.op) {
+    case 'state': return { sources: manager.list() };
+    case 'mcp-page':
+      if (aiPanel.hidden || !widgetBar.classList.contains('open')) click(get('ai-toggle'));
+      if (get('api-settings-page').hidden) click(get('api-settings-open'));
+      get('api-mcp-settings').open = true;
+      await wait(() => !aiPanel.hidden && !get('api-settings-page').hidden && get('api-mcp-settings').open, 'MCP settings visible');
+      return { visible: true };
+    case 'pick-start':
+      await open(); await idle();
+      command.sourceId ? action('reselect') : click(get('user-data-add'));
+      await wait(() => get('user-data-page').dataset.busy === 'true', 'native picker start');
+      return { picking: true };
+    case 'pick-finished': await idle(); return { sources: manager.list(), status: get('user-data-status').textContent };
+    case 'import': {
+      await open(); await idle();
+      // File selection is a private File fixture; directory authority is tested
+      // separately through the unmodified native picker, never this substitution.
+      const input = get('user-data-file'); const ownClick = Object.getOwnPropertyDescriptor(input, 'click');
+      Object.defineProperty(input, 'click', { configurable: true, value: () => {} });
+      try { action('import'); } finally { if (ownClick) Object.defineProperty(input, 'click', ownClick); else delete input.click; }
+      const files = new DataTransfer(); files.items.add(new File([command.source], 'fixture.tfc', { type: 'text/plain' }));
+      get('user-data-file').files = files.files; get('user-data-file').dispatchEvent(new Event('change'));
+      await idle(); assert(!get('user-data-preview').hidden, 'isolated validation did not yield a preview');
+      assert(!get('user-data-install').disabled, 'validated import cannot be installed');
+      const before = manager.info(command.sourceId).revision;
+      click(get('user-data-install')); await idle(); await manager.idle();
+      const row = manager.list().find(item => item.id === command.sourceId);
+      assert(row?.status === 'connected' && row.revision !== before, 'import did not commit a new connected revision');
+      return { source: row, previewClosed: get('user-data-preview').hidden };
+    }
+    case 'handoff': {
+      await open(); action('ai');
+      const prompt = get('api-prompt').value;
+      assert(prompt.includes(command.sourceId) && prompt.includes('tf.data.guide'), 'AI handoff lost source identity');
+      assert(get('api-settings-page').hidden && !get('api-chat-page').hidden, 'AI handoff did not return to chat');
+      get('api-prompt').value = ''; get('api-prompt').dispatchEvent(new Event('input', { bubbles: true }));
+      return { drafted: true };
+    }
+    case 'manage':
+      assert(['disable', 'enable', 'remove'].includes(command.operation), 'unknown fixture mutation');
+      await open(); await idle(); action(command.operation); await idle(); await manager.idle();
+      return { sources: manager.list() };
+    case 'layout': {
+      await open(); setWidgetPanelWidth(command.width ?? 440);
+      if (command.toggleTheme) click(get('theme-toggle'));
+      try {
+        await wait(() => Math.abs(widgetBar.getBoundingClientRect().width - 45 - Number.parseFloat(widgetBar.style.getPropertyValue('--tf-widget-panel-width'))) < 1, 'sidebar layout');
+      } catch (error) {
+        throw Error(`${error.message}; ${JSON.stringify({ actual: widgetBar.getBoundingClientRect().width,
+          configured: widgetBar.style.getPropertyValue('--tf-widget-panel-width'), open: widgetBar.classList.contains('open'),
+          aiHidden: aiPanel.hidden, settingsHidden: get('api-settings-page').hidden, dataOpen: get('user-data-settings').open })}`);
+      }
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      assert(get('user-data-page').scrollWidth <= get('user-data-page').clientWidth + 1, 'data page horizontal overflow');
+      assert(get('api-chat-page').hidden && !get('api-settings-page').hidden && get('user-data-settings').open, 'inline data settings visibility mismatch');
+      return { width: get('user-data-page').getBoundingClientRect().width };
+    }
+    case 'verify': {
+      const row = manager.list().find(item => item.id === command.sourceId);
+      assert(row?.status === 'connected', 'restored data source is not connected');
+      const toolId = `user.data_${row.id}.query`;
+      const session = openAiChartSession({ [toolId]: 'allow' }); let sequence = 0;
+      const before = readCurrentAiChartSelection();
+      const call = async input => {
+        const result = await session.invoke(JSON.stringify({ protocolVersion: 1, requestId: `data-proof-${++sequence}`, toolId,
+          context: { scope: 'app', appInstanceId: aiChartAppInstanceId }, input }));
+        assert(result.status === 'ok' && !result.data.errorCode, `restored query failed: ${JSON.stringify(result)}`); return result.data;
+      };
+      try {
+        const catalog = await call({ operation: 'catalog', limit: 1 });
+        assert(catalog.symbols[0].symbol === 'SH:600000' && catalog.nextCursor, 'catalog pagination mismatch');
+        const history = await call({ operation: 'history', symbol: 'SH:600000', kind: 'stock', resolution: '1D', count: 3 });
+        const page = await call({ operation: 'page', datasetId: history.dataset.datasetId, limit: 2 });
+        assert(page.rows.length === 2 && page.rows[0].close === 2 && page.nextOffset === 2, 'native CSV history mismatch');
+        assert(JSON.stringify(before) === JSON.stringify(readCurrentAiChartSelection()), 'user data query altered foreground chart');
+        return { source: row, rowCount: history.dataset.rowCount, nextCursor: history.dataset.nextCursor, rows: page.rows };
+      } finally { session.close(); }
+    }
+    case 'format-verify': {
+      assert(command.format === 'sqlite' || command.format === 'parquet', 'unknown format fixture');
+      const before = readCurrentAiChartSelection(), row = manager.list().find(r => r.id === command.sourceId);
+      assert(row?.status === 'connected', 'format connector is not ready');
+      const sampleTool = 'tf.data.sample';
+      const session = openAiChartSession({ [sampleTool]: 'allow' });
+      let sample;
+      try {
+        const reply = await session.invoke(JSON.stringify({protocolVersion:1, requestId:'format-sample', toolId:sampleTool,
+          context:{scope:'app',appInstanceId:aiChartAppInstanceId},input:{sourceId:row.id,format:command.format,
+            path:command.format==='sqlite'?'market.db':'SH_600000.parquet',limit:command.format==='sqlite'?5:0}}));
+        assert(reply.status==='ok' && !reply.data.errorCode, `format sample failed ${JSON.stringify(reply)}`);sample=reply.data;
+      } finally { session.close(); }
+      const provider = manager.connector(row.id).provider, signal=new AbortController().signal;
+      const catalog = await provider.catalog({limit:1},signal);assert(catalog.symbols[0].symbol==='SH:600000', 'format catalog mismatch');
+      let cursor, bars=[];
+      do {
+        const h=await provider.execute({operation:'history',providerId:provider.providerId,symbol:'SH:600000',kind:'stock',resolution:'1D',adjustment:'none',count:2,...(cursor?{cursor}:{})},signal);
+        bars.push(...h.bars);cursor=h.nextCursor;
+      } while(cursor);
+      assert(JSON.stringify(bars.map(b=>b.time))===JSON.stringify([1700000000,1700086400,1700172800,1700259200,1700345600]), 'time precision or continuation mismatch');
+      assert(JSON.stringify(bars.map(b=>b.close))===JSON.stringify([10,11,12,13,14]), 'format values mismatch');
+      assert(JSON.stringify(before)===JSON.stringify(readCurrentAiChartSelection()), 'format read changed the chart');
+      return {rows:bars.length,revision:row.revision,columns:sample.columns,totalRows:sample.totalRows??null};
+    }
+    case 'boundary': {
+      let escapeDenied = false, unknownDenied = false;
+      try { await manager.read(command.sourceId, { operation: 'read', path: 'z_outside.csv', offset: 0, length: 256 }, new AbortController().signal); }
+      catch { escapeDenied = true; }
+      try { await invoke('user_data_begin', { input: { sourceId: 'not-a-grant', revision: 'not-a-revision',
+        request: { operation: 'read', path: 'outside.txt', offset: 0, length: 256 } } }); }
+      catch { unknownDenied = true; }
+      assert(escapeDenied && unknownDenied, 'native directory boundary was bypassed');
+      return { escapeDenied, unknownDenied };
+    }
+    default: throw Error('unknown private user-data probe');
+  }
+}
