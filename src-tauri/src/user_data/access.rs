@@ -324,7 +324,18 @@ mod tests {
         let f = Fixture::new(); fs::create_dir(f.0.join("data")).unwrap();
         let path = f.0.join("data"); fs::write(path.join("a"), b"old").unwrap();
         let r = RootGrant::select(&path).unwrap(); let saved = r.saved();
-        fs::rename(&path, f.0.join("old")).unwrap(); fs::create_dir(&path).unwrap(); fs::write(path.join("a"), b"new").unwrap();
+        #[cfg(windows)]
+        {
+            assert!(fs::rename(&path, f.0.join("old")).is_err(),
+                "Windows must not replace a directory while the grant handle is open");
+            drop(r);
+        }
+        #[cfg(not(windows))]
+        fs::rename(&path, f.0.join("old")).unwrap();
+        #[cfg(windows)]
+        fs::rename(&path, f.0.join("old")).unwrap();
+        fs::create_dir(&path).unwrap(); fs::write(path.join("a"), b"new").unwrap();
+        #[cfg(not(windows))]
         assert_eq!(r.read("a", 0, 10, None, &active()).unwrap_err(), AccessError::RootChanged);
         assert!(matches!(RootGrant::restore(&saved), Err(AccessError::RootChanged)));
     }
