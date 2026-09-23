@@ -109,9 +109,11 @@ impl Broker {
                             let _ = socket.shutdown(Shutdown::Both);
                             continue;
                         }
+                        // The nonblocking listener can yield a nonblocking peer on macOS.
+                        if socket.set_nonblocking(false).is_err()
+                            || socket.set_read_timeout(Some(Duration::from_millis(250))).is_err() { continue; }
                         let Ok(writer) = socket.try_clone() else { continue; };
                         let Ok(shutdown) = socket.try_clone() else { continue; };
-                        let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
                         let _ = writer.set_write_timeout(Some(Duration::from_secs(1)));
                         let id = owner.next.fetch_add(1, Ordering::Relaxed).to_string();
                         let peer = Arc::new(Peer { authenticated: AtomicBool::new(false), notification_pending: AtomicBool::new(false),

@@ -1,5 +1,5 @@
 use super::{broker::{BridgeEvent, Broker}, wire};
-use std::io::{BufReader, Cursor, Write};
+use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
 use std::time::Duration;
@@ -42,6 +42,27 @@ fn wire_is_bounded_utf8_newline_only() {
     assert!(wire::read_line(&mut Cursor::new(b"abcdefg\n"), 6, &stop, Duration::from_secs(1)).is_err());
     assert!(wire::read_line(&mut Cursor::new(b"\xff\n"), 6, &stop, Duration::from_secs(1)).is_err());
     assert!(wire::read_line(&mut Cursor::new(b"partial"), 9, &stop, Duration::from_secs(1)).is_err());
+}
+
+#[test]
+fn idle_nonblocking_reader_does_not_spin() {
+    struct IdleReader { attempts: usize }
+    impl Read for IdleReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { Err(io::ErrorKind::WouldBlock.into()) }
+    }
+    impl BufRead for IdleReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.attempts += 1;
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    let mut reader = IdleReader { attempts: 0 };
+    let stop = AtomicBool::new(false);
+    let result = wire::read_line(&mut reader, 16, &stop, Duration::from_millis(50));
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert!(reader.attempts <= 20, "idle socket was polled {} times", reader.attempts);
 }
 #[test]
 fn indicator_source_frame_fits_but_wire_budget_is_still_enforced() {
