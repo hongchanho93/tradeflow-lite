@@ -20,10 +20,11 @@ const main = read('src/main.ts');
 test('desktop environment uses the OS account, not the tool temporary HOME', () => {
   assert.equal(typeof guard.desktopRuntimeEnvironment, 'function');
   const original = { HOME: '/temporary/tool', PATH: '/bin' };
-  const result = guard.desktopRuntimeEnvironment(original, '/Users/another-user');
-  assert.equal(result.HOME, '/Users/another-user');
-  assert.equal(result.CARGO_HOME, '/Users/another-user/.cargo');
-  assert.equal(result.RUSTUP_HOME, '/Users/another-user/.rustup');
+  const accountHome = '/Users/another-user';
+  const result = guard.desktopRuntimeEnvironment(original, accountHome);
+  assert.equal(result.HOME, accountHome);
+  assert.equal(result.CARGO_HOME, path.join(accountHome, '.cargo'));
+  assert.equal(result.RUSTUP_HOME, path.join(accountHome, '.rustup'));
   assert.equal(result.PATH, original.PATH);
   assert.equal(original.HOME, '/temporary/tool');
   assert.equal(original.CARGO_HOME, undefined);
