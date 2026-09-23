@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   enabledProviderIds,
   loadMarketProviderPreferences,
@@ -104,10 +104,10 @@ const windowsReleaseAdapter = readFileSync(new URL('vite.windows-release.config.
 assert.match(windowsReleaseAdapter, /await workspaceStorage\.flush\(\);/);
 assert.doesNotMatch(windowsReleaseAdapter, /BUNDLED_CVD|crypto-orderflow-cvd|USER_PLUGIN_GLOB/);
 
-const releaseWorkflow = readFileSync(new URL('../.github/workflows/release-editions.yml', import.meta.url), 'utf8');
-assert.match(releaseWorkflow, /tags:\s*\n\s*- 'v\*'/, 'only version tags should start an automatic package build');
-assert.match(releaseWorkflow, /releaseDraft: true/, 'generated installers require review before publication');
-assert.match(releaseWorkflow, /tauri\.windows\.release\.conf\.json/, 'Windows packages require the Windows release adapter');
-assert.match(releaseWorkflow, /edition: cn[\s\S]*edition: global/, 'both editions must be packaged');
+assert.equal(
+  existsSync(new URL('../.github/workflows/release-editions.yml', import.meta.url)),
+  false,
+  'edition installers are built locally on Mac and Windows, not by GitHub Actions',
+);
 
 console.log('market editions: ok');
