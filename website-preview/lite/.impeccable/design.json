@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-22T13:50:23.402110+00:00",
+  "title": "Design System: TradeFlow Lite homepage prototype",
+  "extensions": {
+    "breakpoints": [
+      {
+        "name": "medium",
+        "value": "900px"
+      },
+      {
+        "name": "mobile",
+        "value": "600px"
+      }
+    ],
+    "shadows": [
+      {
+        "name": "screenshot",
+        "value": "0 40px 80px #0008",
+        "purpose": "真实截图透视深度"
+      },
+      {
+        "name": "core",
+        "value": "0 25px 40px #0008",
+        "purpose": "模块核心节点"
+      }
+    ],
+    "motion": [
+      {
+        "name": "entrance",
+        "value": "1.3s cubic-bezier(.16,1,.3,1)",
+        "purpose": "首屏截图入场"
+      },
+      {
+        "name": "signal",
+        "value": "8s linear infinite",
+        "purpose": "可见区域中的模块信号"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "首页操作入口",
+      "html": "<a class=\"ds-button\" href=\"#\">开始探索 Lite</a>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;background:#ededed;color:#111;border:1px solid #ededed;border-radius:7px;padding:12px 18px;font:550 13px -apple-system,BlinkMacSystemFont,\"PingFang SC\",sans-serif;text-decoration:none;transition:background .2s,transform .2s}.ds-button:hover{background:#fff;transform:translateY(-1px)}.ds-button:focus-visible{outline:2px solid #eee;outline-offset:6px}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "首页操作入口",
+      "html": "<a class=\"ds-button\" href=\"#\">开始探索 Lite</a>",
+      "css": ".ds-button{display:inline-flex;align-items:center;justify-content:center;background:#151515;color:#f2f2f2;border:1px solid #ffffff28;border-radius:7px;padding:12px 18px;font:550 13px -apple-system,BlinkMacSystemFont,\"PingFang SC\",sans-serif;text-decoration:none;transition:background .2s,transform .2s}.ds-button:hover{background:#252525;transform:translateY(-1px)}.ds-button:focus-visible{outline:2px solid #eee;outline-offset:6px}@media(prefers-reduced-motion:reduce){.ds-button{transition:none}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Linear 黑白参考",
+    "overview": "用户指定 Linear 参考的黑白视觉方向：近黑底色、左对齐标题、宽幅真实产品截图与细线模块结构。此文档仅约束 Lite 本地首页原型，不覆盖应用界面、旧版详情页或生产网站。",
+    "keyCharacteristics": [
+      "近黑底色与灰白文字。",
+      "左对齐标题和宽幅截图。",
+      "细线模块与充足留白。"
+    ],
+    "rules": [],
+    "dos": [
+      "保留真实截图的原始颜色。",
+      "用标题、间距与细线表达层级。",
+      "保持七个详情入口与三个能力标签可用。"
+    ],
+    "donts": [
+      "不要引入品牌彩色装饰。",
+      "不要把示意结构当作产品截图。",
+      "不要将原型文档作为生产部署依据。"
+    ]
+  }
+}

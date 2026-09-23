@@ -199,6 +199,12 @@ assert.ok(renderedText.includes('<script>alert(1)</script>'));
 assert.ok(renderedText.includes('<img src=x onerror=alert(1)>'));
 assert.equal(root.children.length, 1);
 assert.match(USER_INDICATOR_PANEL_STYLES, /tf-user-panel/);
+assert.match(USER_INDICATOR_PANEL_STYLES, /width:\s*max-content/,
+  'multi-column panels must keep their natural horizontal width instead of collapsing into a vertical strip');
+assert.match(USER_INDICATOR_PANEL_STYLES, /white-space:\s*nowrap/,
+  'panel cells must keep compact metric labels on one line');
+assert.doesNotMatch(USER_INDICATOR_PANEL_STYLES, /overflow-wrap:\s*anywhere/,
+  'panel layout must not make every character a valid wrap point');
 assert.doesNotMatch(renderUserIndicatorPanel.toString(), /innerHTML|insertAdjacentHTML|outerHTML/);
 
 const panelSource = String.raw`

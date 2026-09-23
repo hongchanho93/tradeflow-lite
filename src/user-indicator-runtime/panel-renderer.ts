@@ -19,20 +19,21 @@ export const USER_INDICATOR_PANEL_STYLES = `
   padding: 6px 8px;
   border-bottom: 1px solid rgba(120, 123, 134, .40);
   font-weight: 600;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .tf-user-panel table {
   border-collapse: collapse;
-  max-width: 100%;
+  width: max-content;
+  max-width: none;
 }
 .tf-user-panel th,
 .tf-user-panel td {
   padding: 4px 8px;
   border-right: 1px solid rgba(120, 123, 134, .32);
   border-bottom: 1px solid rgba(120, 123, 134, .32);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .tf-user-panel th:last-child,
 .tf-user-panel td:last-child {

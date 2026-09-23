@@ -1,0 +1,2 @@
+3776bf0e69a96c9df90d943d2e5e32f3390b9e41dc426e387a4a430d64b0672d  TradeFlow-Lite_0.1.0_windows-x64.exe
+775521f48df0a1dfe4c70394fa56ba501ecbce7b7a0da4f57595a7396c39317e  TradeFlow-Lite_0.1.0_macos-arm64.dmg
