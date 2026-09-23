@@ -34,6 +34,7 @@ TradeFlow Lite 将 A 股、数字货币和预测市场图表放进一个本地�
 | 让 AI 生成可导入的指标 | [指标接口说明](docs/zh-CN/indicators.md) |
 | 使用 CSV、SQLite、Parquet 研究自己的数据 | [本地数据与任务](docs/zh-CN/data-and-tasks.md) |
 | 运行可核对的小型示例 | [示例实操](docs/zh-CN/examples.md) |
+| 查看修复与更新 | [更新日志](CHANGELOG.md) |
 | 在 PC 本地打包并验收 Windows 两个发行版本 | [Windows 本地打包与验收](docs/zh-CN/windows-local-build.md) |
 | 把仓库交给开发 AI | [AGENTS.zh-CN.md](AGENTS.zh-CN.md) · [AI 工具参考](docs/zh-CN/api-reference.md) |
 
