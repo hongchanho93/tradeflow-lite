@@ -34,6 +34,7 @@ Built with **Tauri, Rust, TypeScript and TradingView Lightweight Charts**. Trade
 | Ask AI to make an importable indicator | [Indicator reference](docs/en/indicators.md) |
 | Use CSV, SQLite or Parquet for your research | [Local data and tasks](docs/en/data-and-tasks.md) |
 | Try small, reproducible examples | [Examples](docs/en/examples.md) |
+| See fixes and updates | [Changelog](CHANGELOG.md) |
 | Build and accept the two Windows editions locally | [Local Windows build and acceptance](docs/en/windows-local-build.md) |
 | Give this repository to a coding assistant | [AGENTS.md](AGENTS.md) · [AI tool reference](docs/en/api-reference.md) |
 
